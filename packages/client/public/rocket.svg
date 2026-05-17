@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1840"/>
+      <stop offset="1" stop-color="#05030f"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#475569"/>
+    </linearGradient>
+    <radialGradient id="window" cx="0.5" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#bae6fd"/>
+      <stop offset="1" stop-color="#075985"/>
+    </radialGradient>
+    <linearGradient id="flame" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#fde047"/>
+      <stop offset="0.6" stop-color="#f97316"/>
+      <stop offset="1" stop-color="#ef4444" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="32" fill="url(#bg)"/>
+  <!-- Flame -->
+  <path d="M28 50 Q32 64 36 50 Q34 56 32 58 Q30 56 28 50 Z" fill="url(#flame)"/>
+  <!-- Body -->
+  <path d="M24 16 Q32 6 40 16 L40 42 Q32 48 24 42 Z" fill="url(#body)" stroke="#0f172a" stroke-width="0.8"/>
+  <!-- Stripe -->
+  <rect x="24" y="28" width="16" height="3" fill="#ef4444"/>
+  <!-- Window -->
+  <circle cx="32" cy="22" r="3.2" fill="url(#window)" stroke="#0f172a" stroke-width="0.5"/>
+  <!-- Fins -->
+  <path d="M24 38 L18 46 L24 44 Z" fill="#ef4444"/>
+  <path d="M40 38 L46 46 L40 44 Z" fill="#ef4444"/>
+</svg>
