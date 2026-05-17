@@ -1,0 +1,18 @@
+{
+  "name": "crash-game",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "cd packages/server && npm run dev",
+    "dev:client": "cd packages/client && npm run dev",
+    "build": "npm run build --workspace=packages/shared --workspace=packages/server --workspace=packages/client",
+    "test": "cd packages/shared && npm test"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  }
+}

@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Crash Game</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: #0a0a1a;
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: #12122a;
+            padding: 16px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .logo-icon { font-size: 24px; }
+        .logo-text {
+            font-size: 20px;
+            font-weight: bold;
+            background: linear-gradient(135deg, #00e676, #6c5ce7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .balance-display {
+            background: #1a1a3e;
+            padding: 12px 20px;
+            border-radius: 10px;
+        }
+        .balance-label { font-size: 12px; color: #8080a0; }
+        .balance-value { font-size: 18px; font-weight: bold; color: #00e676; }
+        .history-strip {
+            background: #1a1a3e;
+            padding: 12px;
+            overflow-x: auto;
+            display: flex;
+            gap: 8px;
+        }
+        .history-chip {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: bold;
+            white-space: nowrap;
+        }
+        .history-chip.pink { background: rgba(253, 121, 168, 0.2); color: #fd79a8; }
+        .history-chip.purple { background: rgba(108, 92, 231, 0.2); color: #a78bfa; }
+        .history-chip.gold { background: rgba(255, 145, 0, 0.2); color: #ffab00; }
+        .main {
+            flex: 1;
+            display: flex;
+            gap: 16px;
+            padding: 16px;
+        }
+        .canvas-container {
+            flex: 1;
+            background: #12122a;
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        .sidebar {
+            width: 320px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .panel {
+            background: #12122a;
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .panel-title {
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 16px;
+        }
+        .input-group {
+            margin-bottom: 16px;
+        }
+        .input-label {
+            font-size: 12px;
+            color: #8080a0;
+            margin-bottom: 4px;
+        }
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+        .input-field {
+            flex: 1;
+            padding: 12px;
+            background: #1a1a3e;
+            border: 2px solid #2a2a5a;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 16px;
+            outline: none;
+        }
+        .input-field:focus { border-color: #6c5ce7; }
+        .btn-half {
+            padding: 12px 16px;
+            background: #2a2a5a;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        .btn-half:hover { background: #3a3a6a; }
+        .btn {
+            padding: 16px 32px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+        }
+        .btn:hover { transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn-bet {
+            background: linear-gradient(135deg, #00c853, #00e676);
+            color: #000;
+            width: 100%;
+        }
+        .btn-cashout {
+            background: linear-gradient(135deg, #ff9100, #ffab00);
+            color: #000;
+            width: 100%;
+        }
+        .player-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .player-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: #1a1a3e;
+            border-radius: 8px;
+            margin-bottom: 4px;
+        }
+        .player-name { font-size: 14px; }
+        .player-amount { font-size: 14px; text-align: right; }
+        .player-cashout { font-size: 12px; color: #00e676; }
+        .footer {
+            background: #12122a;
+            padding: 16px;
+            text-align: center;
+            font-size: 12px;
+            color: #6060a0;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+        }
+        .flying { animation: pulse 0.5s ease infinite; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <span class="logo-icon">🚀</span>
+            <span class="logo-text">CRASH GAME</span>
+        </div>
+        <div class="balance-display">
+            <div class="balance-label">Balance</div>
+            <div class="balance-value" id="balance">$1,000.00</div>
+        </div>
+    </div>
+
+    <div class="history-strip" id="historyStrip"></div>
+
+    <div class="main">
+        <div class="canvas-container">
+            <canvas id="gameCanvas"></canvas>
+        </div>
+
+        <div class="sidebar">
+            <div class="panel">
+                <div class="panel-title">Place Bet</div>
+                <div class="input-group">
+                    <div class="input-label">Bet Amount</div>
+                    <div class="input-row">
+                        <input type="number" id="betAmount" class="input-field" value="10" min="1">
+                        <button class="btn-half" onclick="adjustBet(0.5)">½</button>
+                        <button class="btn-half" onclick="adjustBet(2)">2×</button>
+                    </div>
+                </div>
+                <div class="input-group">
+                    <div class="input-label">Auto Cashout</div>
+                    <input type="number" id="autoCashout" class="input-field" value="2.00" min="1.01" step="0.01">
+                </div>
+                <button class="btn btn-bet" id="betBtn" onclick="placeBet()">Place Bet</button>
+                <button class="btn btn-cashout" id="cashoutBtn" onclick="cashOut()" disabled>Cash Out</button>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Players</div>
+                <div class="player-list" id="playerList"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="footer">
+        This is a simulation for entertainment / demo purposes. No real money is involved.
+    </div>
+
+    <script>
+        // Game state
+        let balance = 1000;
+        let currentMultiplier = 1.00;
+        let crashPoint = 0;
+        let gameRunning = false;
+        let betPlaced = false;
+        let currentBet = 0;
+        let cashedOut = false;
+        let history = [];
+        let bots = [];
+        let gameInterval = null;
+        let startTime = 0;
+
+        // Canvas
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = canvas.parentElement.clientHeight;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // Provably fair crash point generation
+        function generateCrashPoint() {
+            const r = Math.random();
+            if (r < 0.03) return 1.00;
+            return Math.max(1.00, Math.floor((0.97 / (1 - r)) * 100) / 100);
+        }
+
+        // Generate bot players
+        function generateBots() {
+            const names = ['Alex', 'Maria', 'Chen', 'Ivan', 'Sara', 'Mike', 'Luna', 'Oscar', 'Yuki', 'Kai', 'Zara', 'Leo', 'Mia', 'Noah', 'Ella', 'Max'];
+            const count = 10 + Math.floor(Math.random() * 20);
+            bots = [];
+            for (let i = 0; i < count; i++) {
+                const name = names[Math.floor(Math.random() * names.length)];
+                const amount = Math.round((1 + Math.random() * 99) * 100) / 100;
+                const autoCashout = Math.random() < 0.6 ? Math.round((1.2 + Math.random() * 10) * 100) / 100 : null;
+                bots.push({ name, amount, autoCashout, cashedOut: false, cashoutMultiplier: null });
+            }
+            updatePlayerList();
+        }
+
+        function updatePlayerList() {
+            const list = document.getElementById('playerList');
+            const allPlayers = betPlaced ? [{ name: 'You', amount: currentBet, cashedOut, cashoutMultiplier: currentMultiplier, isPlayer: true }, ...bots] : [...bots];
+            list.innerHTML = allPlayers.map(p => `
+                <div class="player-row">
+                    <span class="player-name">${p.name}</span>
+                    <div>
+                        <div class="player-amount">$${p.amount.toFixed(2)}</div>
+                        ${p.cashedOut ? `<div class="player-cashout">✓ ${p.cashoutMultiplier?.toFixed(2)}x</div>` : ''}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function updateHistory() {
+            const strip = document.getElementById('historyStrip');
+            strip.innerHTML = history.slice(-20).map(h => {
+                const cls = h < 2 ? 'pink' : h < 10 ? 'purple' : 'gold';
+                return `<span class="history-chip ${cls}">${h.toFixed(2)}x</span>`;
+            }).join('');
+        }
+
+        function updateBalance() {
+            document.getElementById('balance').textContent = '$' + balance.toFixed(2);
+        }
+
+        function drawCanvas() {
+            const width = canvas.width;
+            const height = canvas.height;
+
+            ctx.fillStyle = '#0a0a1a';
+            ctx.fillRect(0, 0, width, height);
+
+            // Grid
+            ctx.strokeStyle = '#1a1a3e';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < width; i += 40) {
+                ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, height); ctx.stroke();
+            }
+            for (let i = 0; i < height; i += 40) {
+                ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(width, i); ctx.stroke();
+            }
+
+            if (gameRunning) {
+                const elapsed = (Date.now() - startTime) / 1000;
+                const m = Math.pow(1.0024, elapsed * 1000);
+
+                // Draw curve
+                const points = [];
+                for (let i = 0; i <= 100; i++) {
+                    const t = i / 100;
+                    const x = t * (width - 100) + 50;
+                    const curveM = Math.pow(1.0024, t * elapsed * 10);
+                    const y = height - 50 - (curveM - 1) * 50;
+                    points.push([x, Math.max(10, y)]);
+                }
+
+                ctx.strokeStyle = '#00e676';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(points[0][0], points[0][1]);
+                for (let i = 1; i < points.length; i++) {
+                    ctx.lineTo(points[i][0], points[i][1]);
+                }
+                ctx.stroke();
+
+                // Plane
+                const last = points[points.length - 1];
+                ctx.fillStyle = '#ff1744';
+                ctx.beginPath();
+                ctx.arc(last[0], last[1], 15, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Multiplier text
+                ctx.fillStyle = '#00e676';
+                ctx.font = 'bold 48px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(m.toFixed(2) + 'x', width / 2, height / 2);
+            } else if (crashPoint > 0) {
+                ctx.fillStyle = '#ff1744';
+                ctx.font = 'bold 48px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(crashPoint.toFixed(2) + 'x', width / 2, height / 2 - 20);
+                ctx.font = 'bold 24px sans-serif';
+                ctx.fillText('CRASHED!', width / 2, height / 2 + 20);
+            } else {
+                ctx.fillStyle = '#8080a0';
+                ctx.font = '24px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('Place a bet to start', width / 2, height / 2);
+            }
+        }
+
+        function startGame() {
+            crashPoint = generateCrashPoint();
+            currentMultiplier = 1.00;
+            gameRunning = true;
+            startTime = Date.now();
+            generateBots();
+
+            document.getElementById('betBtn').disabled = true;
+            document.getElementById('cashoutBtn').disabled = !betPlaced;
+
+            gameInterval = setInterval(() => {
+                if (!gameRunning) return;
+
+                const elapsed = (Date.now() - startTime) / 1000;
+                currentMultiplier = Math.pow(1.0024, elapsed * 1000);
+
+                // Check auto cashout
+                if (betPlaced && !cashedOut) {
+                    const autoCashout = parseFloat(document.getElementById('autoCashout').value);
+                    if (!isNaN(autoCashout) && currentMultiplier >= autoCashout) {
+                        cashOut();
+                    }
+                }
+
+                // Check bot auto cashouts
+                bots.forEach(bot => {
+                    if (!bot.cashedOut && bot.autoCashout && currentMultiplier >= bot.autoCashout) {
+                        bot.cashedOut = true;
+                        bot.cashoutMultiplier = bot.autoCashout;
+                    }
+                });
+                updatePlayerList();
+
+                // Update cashout button
+                if (betPlaced && !cashedOut) {
+                    const winnings = (currentBet * currentMultiplier).toFixed(2);
+                    document.getElementById('cashoutBtn').textContent = `Cash Out $${winnings}`;
+                }
+
+                // Check crash
+                if (currentMultiplier >= crashPoint) {
+                    crash();
+                }
+
+                drawCanvas();
+            }, 50);
+        }
+
+        function crash() {
+            clearInterval(gameInterval);
+            gameRunning = false;
+            history.push(crashPoint);
+            updateHistory();
+
+            if (betPlaced && !cashedOut) {
+                // Lost bet
+            }
+
+            betPlaced = false;
+            document.getElementById('betBtn').disabled = false;
+            document.getElementById('cashoutBtn').disabled = true;
+            document.getElementById('cashoutBtn').textContent = 'Cash Out';
+
+            drawCanvas();
+
+            setTimeout(() => {
+                crashPoint = 0;
+                currentMultiplier = 1.00;
+                drawCanvas();
+            }, 3000);
+        }
+
+        function placeBet() {
+            const betAmount = parseFloat(document.getElementById('betAmount').value);
+            if (isNaN(betAmount) || betAmount <= 0 || betAmount > balance) {
+                alert('Invalid bet amount');
+                return;
+            }
+
+            currentBet = betAmount;
+            balance -= betAmount;
+            betPlaced = true;
+            cashedOut = false;
+            updateBalance();
+
+            if (!gameRunning) {
+                startGame();
+            }
+
+            document.getElementById('betBtn').disabled = true;
+            document.getElementById('cashoutBtn').disabled = false;
+            updatePlayerList();
+        }
+
+        function cashOut() {
+            if (!gameRunning || !betPlaced || cashedOut) return;
+
+            cashedOut = true;
+            const winnings = currentBet * currentMultiplier;
+            balance += winnings;
+            updateBalance();
+
+            document.getElementById('cashoutBtn').disabled = true;
+            document.getElementById('cashoutBtn').textContent = 'Cashed Out!';
+            updatePlayerList();
+        }
+
+        function adjustBet(factor) {
+            const input = document.getElementById('betAmount');
+            input.value = Math.max(1, Math.floor(parseFloat(input.value) * factor));
+        }
+
+        // Initial draw
+        drawCanvas();
+    </script>
+</body>
+</html>

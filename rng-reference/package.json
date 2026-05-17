@@ -1,0 +1,15 @@
+{
+  "name": "rng-reference",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/rng.ts",
+  "scripts": {
+    "test": "vitest run",
+    "diagnostic": "tsx diagnostic.ts"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  }
+}

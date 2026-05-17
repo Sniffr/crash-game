@@ -1,0 +1,20 @@
+{
+  "name": "@crash/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./rng": "./src/rng.ts",
+    "./types": "./src/types.ts",
+    "./config": "./src/config.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}

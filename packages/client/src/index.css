@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #0a0a1a;
+  color: #fff;
+}
+
+.game-container {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+}
+
+.multiplier-display {
+  font-size: 4rem;
+  font-weight: bold;
+  text-align: center;
+  padding: 2rem;
+  transition: color 0.2s;
+}
+
+.multiplier-display.flying {
+  color: #00e676;
+  animation: pulse 0.5s ease infinite;
+}
+
+.multiplier-display.crashed {
+  color: #ff1744;
+}
+
+@keyframes pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.02); }
+}
+
+.history-chip {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  font-weight: bold;
+  display: inline-block;
+  margin: 2px;
+}
+
+.history-chip.pink {
+  background: rgba(253, 121, 168, 0.2);
+  color: #fd79a8;
+}
+
+.history-chip.purple {
+  background: rgba(108, 92, 231, 0.2);
+  color: #a78bfa;
+}
+
+.history-chip.gold {
+  background: rgba(255, 145, 0, 0.2);
+  color: #ffab00;
+}
+
+.btn {
+  padding: 12px 24px;
+  border-radius: 8px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-bet {
+  background: linear-gradient(135deg, #00c853, #00e676);
+  color: #000;
+}
+
+.btn-cashout {
+  background: linear-gradient(135deg, #ff9100, #ffab00);
+  color: #000;
+}
+
+canvas {
+  border-radius: 12px;
+}
