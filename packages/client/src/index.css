@@ -1,96 +1,91 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-body {
+:root {
+  color-scheme: dark;
+  /* Default theme RGB triples — the loader overrides these at runtime. */
+  --rgb-accent:  34 211 238;  /* cyan */
+  --rgb-accent2: 168 85 247;  /* violet */
+  --rgb-win:     52 211 153;  /* green */
+  --rgb-crash:   239 68 68;   /* red */
+  --rgb-gold:    251 191 36;  /* gold */
+  --rgb-text:    230 227 245; /* off-white */
+}
+
+html, body {
   margin: 0;
+  padding: 0;
+  background: #05030f;
+  color: #e6e3f5;
   font-family: 'Inter', system-ui, sans-serif;
-  background: #0a0a1a;
-  color: #fff;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overscroll-behavior: none;
 }
 
-.game-container {
-  min-height: 100vh;
-  background: linear-gradient(135deg, #0a0a1a 0%, #1a1a3e 100%);
+* { box-sizing: border-box; }
+
+/* A faint global nebula tint behind the chrome so panels read against something. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(60% 50% at 15% 0%, rgba(124, 58, 237, 0.18), transparent 60%),
+    radial-gradient(45% 40% at 90% 100%, rgba(34, 211, 238, 0.14), transparent 60%),
+    radial-gradient(80% 80% at 50% 50%, rgba(168, 85, 247, 0.06), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
 }
 
-.multiplier-display {
-  font-size: 4rem;
-  font-weight: bold;
-  text-align: center;
-  padding: 2rem;
-  transition: color 0.2s;
+/* ─── Animations ─────────────────────────────────────────────────────────── */
+
+.animate-toast-in {
+  animation: toastIn 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.1) both;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translate(-50%, -10px) scale(0.96); }
+  to   { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 
-.multiplier-display.flying {
-  color: #00e676;
-  animation: pulse 0.5s ease infinite;
+.animate-chip-in {
+  animation: chipIn 0.35s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes chipIn {
+  from { opacity: 0; transform: scale(0.5) translateX(-8px); }
+  to   { opacity: 1; transform: scale(1) translateX(0); }
 }
 
-.multiplier-display.crashed {
-  color: #ff1744;
+.animate-countdown {
+  animation: countdownPop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@keyframes countdownPop {
+  0%   { opacity: 0; transform: scale(0.6); }
+  60%  { opacity: 1; transform: scale(1.08); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
-@keyframes pulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.02); }
+.btn-pulse-cashout {
+  animation: pulseCashout 1.2s ease-in-out infinite;
+}
+@keyframes pulseCashout {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.0), 0 8px 28px -10px rgba(52, 211, 153, 0.7); }
+  50%      { box-shadow: 0 0 0 6px rgba(52, 211, 153, 0.0), 0 12px 36px -8px rgba(52, 211, 153, 0.9); }
 }
 
-.history-chip {
-  padding: 4px 12px;
-  border-radius: 20px;
-  font-size: 0.85rem;
-  font-weight: bold;
-  display: inline-block;
-  margin: 2px;
-}
+/* Thin scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
 
-.history-chip.pink {
-  background: rgba(253, 121, 168, 0.2);
-  color: #fd79a8;
-}
+/* Make sure the React root sits above the body::before nebula */
+#root { position: relative; z-index: 1; }
 
-.history-chip.purple {
-  background: rgba(108, 92, 231, 0.2);
-  color: #a78bfa;
-}
-
-.history-chip.gold {
-  background: rgba(255, 145, 0, 0.2);
-  color: #ffab00;
-}
-
-.btn {
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: bold;
-  cursor: pointer;
-  transition: all 0.2s;
-  border: none;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-}
-
-.btn:hover {
-  transform: translateY(-1px);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  transform: none;
-}
-
-.btn-bet {
-  background: linear-gradient(135deg, #00c853, #00e676);
-  color: #000;
-}
-
-.btn-cashout {
-  background: linear-gradient(135deg, #ff9100, #ffab00);
-  color: #000;
-}
-
-canvas {
-  border-radius: 12px;
-}
+/* Hide spinner on number inputs (cleaner look) */
+input[type='number']::-webkit-outer-spin-button,
+input[type='number']::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type='number'] { -moz-appearance: textfield; }

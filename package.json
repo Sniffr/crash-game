@@ -9,6 +9,8 @@
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
     "dev:server": "cd packages/server && npm run dev",
     "dev:client": "cd packages/client && npm run dev",
+    "dev:creator": "cd packages/creator && npm run dev",
+    "dev:all": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:creator\"",
     "build": "npm run build --workspace=packages/shared --workspace=packages/server --workspace=packages/client",
     "test": "cd packages/shared && npm test"
   },

@@ -15,7 +15,7 @@
  * distribution is a memoryless 1/u tail.
  */
 
-import { createHmac, createHash, randomBytes } from 'crypto';
+import { createHmac, createHash, randomBytes } from "crypto";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -39,12 +39,12 @@ export const DEFAULT_CONFIG: RngConfig = {
 
 /** Generate a fresh 32-byte server seed (hex-encoded). */
 export function generateServerSeed(): string {
-  return randomBytes(32).toString('hex');
+  return randomBytes(32).toString("hex");
 }
 
 /** The hash that is published *before* the round opens. */
 export function commitSeed(serverSeed: string): string {
-  return createHash('sha256').update(serverSeed).digest('hex');
+  return createHash("sha256").update(serverSeed).digest("hex");
 }
 
 /** Anyone can call this after the seed is revealed to verify the commit. */
@@ -72,9 +72,9 @@ export function crashPointFor(
     throw new Error(`rtp must be in (0, 1], got ${config.rtp}`);
   }
 
-  const hmac = createHmac('sha256', serverSeed)
+  const hmac = createHmac("sha256", serverSeed)
     .update(String(roundNumber))
-    .digest('hex');
+    .digest("hex");
 
   // Take the first 13 hex chars = 52 bits of entropy, then map to [0, 1).
   // 52 bits matches the mantissa of an IEEE-754 double, so we get the
@@ -115,14 +115,6 @@ export interface RoundReveal {
   crashPoint: number;
 }
 
-// Backwards-compatible aliases (the rest of the codebase imports these names).
-export type Commit = RoundCommit;
-export type Reveal = RoundReveal;
-export interface VerificationResult {
-  ok: boolean;
-  reason?: string;
-}
-
 /** Build the commit a client receives at round start. */
 export function buildCommit(
   serverSeed: string,
@@ -156,12 +148,12 @@ export function verifyRound(
   commit: RoundCommit,
   reveal: RoundReveal,
   config: RngConfig = DEFAULT_CONFIG,
-): VerificationResult {
+): { ok: boolean; reason?: string } {
   if (commit.roundNumber !== reveal.roundNumber) {
-    return { ok: false, reason: 'round number mismatch' };
+    return { ok: false, reason: "round number mismatch" };
   }
   if (!verifyCommit(reveal.serverSeed, commit.hashCommit)) {
-    return { ok: false, reason: 'seed does not match committed hash' };
+    return { ok: false, reason: "seed does not match committed hash" };
   }
   const expected = crashPointFor(
     reveal.serverSeed,
@@ -169,7 +161,7 @@ export function verifyRound(
     config,
   );
   if (expected !== reveal.crashPoint) {
-    return { ok: false, reason: 'crash point does not match recomputation' };
+    return { ok: false, reason: "crash point does not match recomputation" };
   }
   return { ok: true };
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect } from "vitest";
 import {
   crashPointFor,
   generateServerSeed,
@@ -9,7 +9,7 @@ import {
   verifyRound,
   DEFAULT_CONFIG,
   type RngConfig,
-} from './rng';
+} from "../src/rng";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,7 +35,7 @@ import {
 function simulateRtp(
   rounds: number,
   config: RngConfig,
-  seed = '0000000000000000000000000000000000000000000000000000000000000000',
+  seed = "0000000000000000000000000000000000000000000000000000000000000000",
 ): number {
   const targets = [1.5, 2.0, 3.0, 5.0];
   let totalPayout = 0;
@@ -55,7 +55,7 @@ function fractionWhere(
   rounds: number,
   predicate: (cp: number) => boolean,
   config: RngConfig,
-  seed = '1111111111111111111111111111111111111111111111111111111111111111',
+  seed = "1111111111111111111111111111111111111111111111111111111111111111",
 ): number {
   let hits = 0;
   for (let i = 0; i < rounds; i++) {
@@ -68,8 +68,8 @@ function fractionWhere(
 // 1. Determinism
 // ---------------------------------------------------------------------------
 
-describe('determinism', () => {
-  it('same seed + round = same crash point, every call', () => {
+describe("determinism", () => {
+  it("same seed + round = same crash point, every call", () => {
     const seed = generateServerSeed();
     const a = crashPointFor(seed, 42);
     const b = crashPointFor(seed, 42);
@@ -78,7 +78,7 @@ describe('determinism', () => {
     expect(b).toBe(c);
   });
 
-  it('different rounds produce diverse crash points', () => {
+  it("different rounds produce diverse crash points", () => {
     const seed = generateServerSeed();
     const values = new Set<number>();
     for (let i = 0; i < 1000; i++) values.add(crashPointFor(seed, i));
@@ -88,7 +88,7 @@ describe('determinism', () => {
     expect(values.size).toBeGreaterThan(300);
   });
 
-  it('different seeds produce different sequences', () => {
+  it("different seeds produce different sequences", () => {
     const s1 = generateServerSeed();
     const s2 = generateServerSeed();
     expect(s1).not.toBe(s2);
@@ -100,63 +100,63 @@ describe('determinism', () => {
 // 2. Distribution / RTP correctness — the most important tests
 // ---------------------------------------------------------------------------
 
-describe('RTP — the configurable knob', () => {
+describe("RTP — the configurable knob", () => {
   // RTP is measured as E[payout] / E[stake] under a fixed-cashout strategy.
   // See simulateRtp() for why.
 
-  it('rtp = 0.97 → measured RTP ≈ 0.97 (±0.01)', () => {
+  it("rtp = 0.97 → measured RTP ≈ 0.97 (±0.01)", () => {
     const measured = simulateRtp(250_000, {
       rtp: 0.97,
       maxMultiplier: 10_000,
     });
     expect(measured).toBeGreaterThan(0.96);
     expect(measured).toBeLessThan(0.98);
-  }, 60_000);
+  });
 
-  it('rtp = 0.90 → measured RTP ≈ 0.90 (±0.01)', () => {
+  it("rtp = 0.90 → measured RTP ≈ 0.90 (±0.01)", () => {
     const measured = simulateRtp(250_000, {
       rtp: 0.9,
       maxMultiplier: 10_000,
     });
     expect(measured).toBeGreaterThan(0.89);
     expect(measured).toBeLessThan(0.91);
-  }, 60_000);
+  });
 
-  it('rtp = 0.99 → measured RTP ≈ 0.99 (±0.01)', () => {
+  it("rtp = 0.99 → measured RTP ≈ 0.99 (±0.01)", () => {
     const measured = simulateRtp(250_000, {
       rtp: 0.99,
       maxMultiplier: 10_000,
     });
     expect(measured).toBeGreaterThan(0.98);
     expect(measured).toBeLessThan(1.0);
-  }, 60_000);
+  });
 
-  it('changing rtp changes the measured RTP monotonically', () => {
+  it("changing rtp changes the measured RTP monotonically", () => {
     const low = simulateRtp(100_000, { rtp: 0.85, maxMultiplier: 10_000 });
     const high = simulateRtp(100_000, { rtp: 0.99, maxMultiplier: 10_000 });
     expect(high).toBeGreaterThan(low);
     // And the gap should be roughly the rtp gap (proves it's the knob, not noise)
     expect(high - low).toBeGreaterThan(0.1);
-  }, 60_000);
+  });
 });
 
 // ---------------------------------------------------------------------------
 // 3. Tail behavior — sanity check on the shape of the distribution
 // ---------------------------------------------------------------------------
 
-describe('distribution shape', () => {
+describe("distribution shape", () => {
   const config: RngConfig = { rtp: 0.97, maxMultiplier: 10_000 };
 
-  it('P(crash = 1.00x) ≈ 1 - rtp/1.01 (the house edge, ±15%)', () => {
+  it("P(crash = 1.00x) ≈ 1 - rtp/1.01 (the house edge, ±15%)", () => {
     // Quantization makes any round with raw < 2.00 collapse to 1.00x.
     // raw = 100r/(1-u) < 2.00 ⇔ u < 1 - 50r. For r=0.97: ≈ 0.0396.
     const p = fractionWhere(500_000, (cp) => cp === 1.0, config);
     const expected = 1 - config.rtp / 1.01;
     expect(p).toBeGreaterThan(expected * 0.9);
     expect(p).toBeLessThan(expected * 1.1);
-  }, 60_000);
+  });
 
-  it('P(crash ≥ m) ≈ rtp/m for every target m (the RTP property)', () => {
+  it("P(crash ≥ m) ≈ rtp/m for every target m (the RTP property)", () => {
     for (const m of [1.5, 2, 3, 5, 10, 50]) {
       const p = fractionWhere(300_000, (cp) => cp >= m, config);
       const expected = config.rtp / m;
@@ -165,9 +165,9 @@ describe('distribution shape', () => {
       expect(p).toBeGreaterThan(expected * (1 - tolerance));
       expect(p).toBeLessThan(expected * (1 + tolerance));
     }
-  }, 60_000);
+  });
 
-  it('crash points are always ≥ 1.00 and ≤ maxMultiplier', () => {
+  it("crash points are always ≥ 1.00 and ≤ maxMultiplier", () => {
     const seed = generateServerSeed();
     for (let i = 0; i < 10_000; i++) {
       const cp = crashPointFor(seed, i, config);
@@ -176,7 +176,7 @@ describe('distribution shape', () => {
     }
   });
 
-  it('crash points are quantized to 0.01', () => {
+  it("crash points are quantized to 0.01", () => {
     const seed = generateServerSeed();
     for (let i = 0; i < 1000; i++) {
       const cp = crashPointFor(seed, i);
@@ -190,22 +190,22 @@ describe('distribution shape', () => {
 // 4. Provably-fair commit / reveal cycle
 // ---------------------------------------------------------------------------
 
-describe('provably-fair scheme', () => {
-  it('commit hashes the seed with SHA-256', () => {
+describe("provably-fair scheme", () => {
+  it("commit hashes the seed with SHA-256", () => {
     const seed = generateServerSeed();
     const commit = commitSeed(seed);
     expect(commit).toMatch(/^[0-9a-f]{64}$/);
     expect(verifyCommit(seed, commit)).toBe(true);
   });
 
-  it('verifyCommit rejects wrong seeds', () => {
+  it("verifyCommit rejects wrong seeds", () => {
     const seed = generateServerSeed();
     const commit = commitSeed(seed);
     const other = generateServerSeed();
     expect(verifyCommit(other, commit)).toBe(false);
   });
 
-  it('commit/reveal round-trips for many rounds', () => {
+  it("commit/reveal round-trips for many rounds", () => {
     const seed = generateServerSeed();
     for (let n = 0; n < 100; n++) {
       const commit = buildCommit(seed, n);
@@ -215,7 +215,7 @@ describe('provably-fair scheme', () => {
     }
   });
 
-  it('verifyRound catches tampered crash points', () => {
+  it("verifyRound catches tampered crash points", () => {
     const seed = generateServerSeed();
     const commit = buildCommit(seed, 1);
     const reveal = buildReveal(seed, 1);
@@ -225,7 +225,7 @@ describe('provably-fair scheme', () => {
     expect(result.reason).toMatch(/crash point/);
   });
 
-  it('verifyRound catches mismatched seeds', () => {
+  it("verifyRound catches mismatched seeds", () => {
     const seed = generateServerSeed();
     const commit = buildCommit(seed, 1);
     const wrongReveal = buildReveal(generateServerSeed(), 1);
@@ -239,21 +239,21 @@ describe('provably-fair scheme', () => {
 // 5. Input validation
 // ---------------------------------------------------------------------------
 
-describe('input validation', () => {
-  it('rejects rtp ≤ 0 or > 1', () => {
+describe("input validation", () => {
+  it("rejects rtp ≤ 0 or > 1", () => {
     expect(() =>
-      crashPointFor('a'.repeat(64), 0, { rtp: 0, maxMultiplier: 100 }),
+      crashPointFor("a".repeat(64), 0, { rtp: 0, maxMultiplier: 100 }),
     ).toThrow();
     expect(() =>
-      crashPointFor('a'.repeat(64), 0, { rtp: -0.1, maxMultiplier: 100 }),
+      crashPointFor("a".repeat(64), 0, { rtp: -0.1, maxMultiplier: 100 }),
     ).toThrow();
     expect(() =>
-      crashPointFor('a'.repeat(64), 0, { rtp: 1.5, maxMultiplier: 100 }),
+      crashPointFor("a".repeat(64), 0, { rtp: 1.5, maxMultiplier: 100 }),
     ).toThrow();
   });
 
-  it('uses DEFAULT_CONFIG when none supplied', () => {
-    const cp = crashPointFor('a'.repeat(64), 0);
+  it("uses DEFAULT_CONFIG when none supplied", () => {
+    const cp = crashPointFor("a".repeat(64), 0);
     expect(cp).toBeGreaterThanOrEqual(1.0);
     expect(cp).toBeLessThanOrEqual(DEFAULT_CONFIG.maxMultiplier);
   });

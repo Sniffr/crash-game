@@ -1,9 +1,15 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import GameCanvas from './components/GameCanvas';
 import BetPanel from './components/BetPanel';
 import PlayerList from './components/PlayerList';
 import HistoryStrip from './components/HistoryStrip';
 import ProvablyFairDrawer from './components/ProvablyFairDrawer';
+import {
+  applyThemeSounds, cashoutChime, crashBoom, isMuted, placeBet as sndPlaceBet,
+  setMuted, startMusic, takeoffWhoosh, uiTick,
+} from './sounds';
+import { applyThemeCssVars, clearTheme, fetchServerTheme, hasUserOverride, loadTheme, readThemeFromFile, saveTheme } from './theme/loader';
+import { DEFAULT_THEME, tierColor as resolveTierColor, type Theme } from './theme/types';
 
 interface Bet {
   playerId: string;
@@ -16,6 +22,11 @@ interface Bet {
   cashoutMultiplier?: number;
 }
 
+interface HistoryEntry {
+  roundNumber: number;
+  crashPoint: number;
+}
+
 interface GameState {
   roundNumber: number;
   phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT';
@@ -23,9 +34,24 @@ interface GameState {
   crashPoint?: number;
   serverSeed?: string;
   hashCommit?: string;
+  prevServerSeed?: string | null;
+  prevRoundNumber?: number | null;
   bets: Bet[];
-  history: Array<{ roundNumber: number; crashPoint: number }>;
+  history: HistoryEntry[];
   countdownMs?: number;
+  flightStartTime?: number | null;
+}
+
+const STORAGE_KEY = 'galaxy-crash-player-id';
+
+function loadPlayerId(): string {
+  try {
+    const cached = localStorage.getItem(STORAGE_KEY);
+    if (cached) return cached;
+  } catch { /* ignore */ }
+  const id = `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  try { localStorage.setItem(STORAGE_KEY, id); } catch { /* ignore */ }
+  return id;
 }
 
 export default function App() {
@@ -35,101 +61,177 @@ export default function App() {
     currentMultiplier: 1.0,
     bets: [],
     history: [],
+    flightStartTime: null,
   });
   const [balance, setBalance] = useState(1000);
   const [betAmount, setBetAmount] = useState(10);
   const [autoCashoutEnabled, setAutoCashoutEnabled] = useState(false);
   const [autoCashout, setAutoCashout] = useState(2.0);
-  const [playerId] = useState(`player-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const [playerId] = useState(loadPlayerId);
   const [hasBet, setHasBet] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [toast, setToast] = useState<{ kind: 'win' | 'loss' | 'info'; text: string } | null>(null);
+  const [connected, setConnected] = useState(false);
+  const [soundOn, setSoundOn] = useState(!isMuted());
+  const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const wsRef = useRef<WebSocket | null>(null);
+  const serverOffsetRef = useRef(0);
+  const themeFileInputRef = useRef<HTMLInputElement>(null);
 
-  // ─── WebSocket ────────────────────────────────────────────────────────────
+  const flashToast = useCallback((kind: 'win' | 'loss' | 'info', text: string) => {
+    setToast({ kind, text });
+    window.setTimeout(() => setToast(null), 2400);
+  }, []);
+
+  // Apply theme tokens (CSS vars + sounds) whenever the theme changes
   useEffect(() => {
-    const ws = new WebSocket(`ws://${location.host}/ws`);
-    wsRef.current = ws;
+    applyThemeCssVars(theme);
+    applyThemeSounds(theme.sounds);
+    saveTheme(theme);
+    document.title = theme.brandName || 'Galaxy Crash';
+  }, [theme]);
 
-    ws.onopen = () => {
-      console.log('Connected to game server');
-      ws.send(JSON.stringify({ type: 'get_balance', data: { playerId } }));
+  // On boot, fetch the operator-configured theme from /api/theme.
+  // Precedence: localStorage user override > server config > built-in default.
+  useEffect(() => {
+    if (hasUserOverride()) return; // user-loaded theme already in localStorage wins
+    fetchServerTheme().then((t) => {
+      if (t) setTheme(t);
+    });
+  }, []);
+
+  const loadThemeFromFile = useCallback(async (file: File) => {
+    try {
+      const t = await readThemeFromFile(file);
+      setTheme(t);
+      saveTheme(t, /* isUserOverride */ true);
+      flashToast('info', `Theme loaded: ${t.brandName}`);
+      window.setTimeout(() => startMusic(), 50);
+    } catch (e) {
+      flashToast('loss', `Failed to load theme: ${(e as Error).message}`);
+    }
+  }, [flashToast]);
+
+  const resetTheme = useCallback(async () => {
+    // Clear user override, then re-fetch server theme; fall back to built-in.
+    clearTheme();
+    const server = await fetchServerTheme();
+    if (server) {
+      setTheme(server);
+      flashToast('info', `Reset to server theme: ${server.brandName}`);
+    } else {
+      setTheme(DEFAULT_THEME);
+      flashToast('info', 'Reset to default Galaxy Crash');
+    }
+  }, [flashToast]);
+
+  useEffect(() => {
+    let alive = true;
+    let reconnectTimer: number | undefined;
+
+    const connect = () => {
+      const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        setConnected(true);
+        ws.send(JSON.stringify({ type: 'hello', data: { playerId } }));
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          handleMessage(msg);
+        } catch (e) { console.error('bad msg', e); }
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        if (!alive) return;
+        reconnectTimer = window.setTimeout(connect, 1200);
+      };
+      ws.onerror = () => { /* close handler reconnects */ };
     };
 
-    ws.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      handleMessage(message);
+    connect();
+    return () => {
+      alive = false;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      wsRef.current?.close();
     };
-
-    ws.onclose = () => {
-      setTimeout(() => {
-        const newWs = new WebSocket(`ws://${location.host}/ws`);
-        wsRef.current = newWs;
-        newWs.onopen = () => {
-          newWs.send(JSON.stringify({ type: 'get_balance', data: { playerId } }));
-        };
-        newWs.onmessage = (e) => handleMessage(JSON.parse(e.data));
-      }, 1500);
-    };
-
-    return () => ws.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playerId]);
 
-  const handleMessage = useCallback((message: any) => {
+  const handleMessage = useCallback((message: { type: string; data: any }) => {
+    if (message.data?.serverTime) {
+      serverOffsetRef.current = message.data.serverTime - Date.now();
+    }
+
     switch (message.type) {
       case 'join':
-        setGameState(message.data);
+        setGameState((prev) => ({
+          ...prev,
+          ...message.data,
+          flightStartTime: message.data.phase === 'FLYING' ? message.data.startTime : null,
+        }));
         setHasBet(false);
         break;
 
       case 'phase_change':
+        if (message.data.phase === 'FLYING') takeoffWhoosh();
         setGameState((prev) => ({
           ...prev,
           phase: message.data.phase,
-          roundNumber: message.data.roundNumber,
-          hashCommit: message.data.hashCommit,
+          roundNumber: message.data.roundNumber ?? prev.roundNumber,
+          hashCommit: message.data.hashCommit ?? prev.hashCommit,
           countdownMs: message.data.countdownMs,
-          history: message.data.history || prev.history,
-          bets: message.data.bets || prev.bets,
+          history: message.data.history ?? prev.history,
+          bets: message.data.bets ?? (message.data.phase === 'BETTING' ? [] : prev.bets),
           currentMultiplier: message.data.phase === 'FLYING' ? 1.0 : prev.currentMultiplier,
+          crashPoint: message.data.phase === 'BETTING' ? undefined : (message.data.crashPoint ?? prev.crashPoint),
+          flightStartTime: message.data.phase === 'FLYING' ? message.data.startTime : null,
+          serverSeed: message.data.phase === 'RESULT' ? message.data.serverSeed : prev.serverSeed,
+          prevServerSeed: message.data.prevServerSeed ?? prev.prevServerSeed,
+          prevRoundNumber: message.data.prevRoundNumber ?? prev.prevRoundNumber,
         }));
-        if (message.data.phase === 'BETTING') {
-          setHasBet(false);
-        }
+        if (message.data.phase === 'BETTING') setHasBet(false);
+        break;
+
+      case 'countdown_update':
+        setGameState((prev) => ({ ...prev, countdownMs: message.data.countdownMs }));
         break;
 
       case 'multiplier_update':
-        setGameState((prev) => ({
-          ...prev,
-          currentMultiplier: message.data.multiplier,
-        }));
+        setGameState((prev) => ({ ...prev, currentMultiplier: message.data.multiplier }));
         break;
 
       case 'crash':
+        crashBoom();
         setGameState((prev) => ({
           ...prev,
           phase: 'CRASHED',
           crashPoint: message.data.crashPoint,
+          currentMultiplier: message.data.crashPoint,
           serverSeed: message.data.serverSeed,
-          bets: message.data.bets,
+          bets: message.data.bets ?? prev.bets,
         }));
-        setHasBet(false);
-        break;
-
-      case 'countdown_update':
-        setGameState((prev) => ({
-          ...prev,
-          countdownMs: message.data.countdownMs,
-        }));
+        setHasBet((had) => {
+          if (had) flashToast('loss', `Crashed @ ${message.data.crashPoint.toFixed(2)}x`);
+          return false;
+        });
         break;
 
       case 'bet_placed':
+        sndPlaceBet();
         setBalance(message.data.balance);
         setHasBet(true);
+        flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
         break;
 
       case 'cashout_success':
+        cashoutChime();
         setBalance(message.data.balance);
         setHasBet(false);
+        flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
         break;
 
       case 'cashout':
@@ -138,22 +240,29 @@ export default function App() {
           bets: prev.bets.map((b) =>
             b.playerId === message.data.playerId
               ? { ...b, cashedOut: true, cashoutMultiplier: message.data.multiplier, profit: message.data.profit }
-              : b
+              : b,
           ),
         }));
         break;
 
       case 'new_bet':
-        setGameState((prev) => ({
-          ...prev,
-          bets: [...prev.bets, {
-            playerId: message.data.playerId,
-            amount: message.data.amount,
-            cashedOut: false,
-            isBot: message.data.isBot,
-            botName: message.data.isBot ? `Bot-${message.data.playerId.slice(-4)}` : undefined,
-          }],
-        }));
+        setGameState((prev) => {
+          if (prev.bets.some((b) => b.playerId === message.data.playerId)) return prev;
+          return {
+            ...prev,
+            bets: [
+              ...prev.bets,
+              {
+                playerId: message.data.playerId,
+                amount: message.data.amount,
+                autoCashout: message.data.autoCashout,
+                cashedOut: false,
+                isBot: !!message.data.isBot,
+                botName: message.data.botName,
+              },
+            ],
+          };
+        });
         break;
 
       case 'balance':
@@ -161,127 +270,107 @@ export default function App() {
         break;
 
       case 'error':
-        console.warn('Server error:', message.data.message);
+        flashToast('loss', message.data?.message ?? 'Error');
         break;
     }
-  }, []);
+  }, [flashToast]);
 
-  // ─── Actions ──────────────────────────────────────────────────────────────
   const placeBet = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
       type: 'place_bet',
-      data: {
-        playerId,
-        amount: betAmount,
-        autoCashout: autoCashoutEnabled ? autoCashout : undefined,
-      },
+      data: { playerId, amount: betAmount, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
     }));
   };
-
   const cashout = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'cashout',
-      data: { playerId },
-    }));
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'cashout', data: { playerId } }));
   };
-
   const resetBalance = () => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    wsRef.current.send(JSON.stringify({
-      type: 'reset_balance',
-      data: { playerId },
-    }));
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ type: 'reset_balance', data: { playerId } }));
   };
 
-  const getChipClass = (crashPoint: number) => {
-    if (crashPoint < 2) return 'pink';
-    if (crashPoint < 10) return 'purple';
-    return 'gold';
-  };
+  const getChipClass = (cp: number) => (cp < 2 ? 'pink' : cp < 10 ? 'purple' : 'gold');
 
-  const getChipColor = (crashPoint: number) => {
-    if (crashPoint < 2) return '#fd79a8';
-    if (crashPoint < 10) return '#a78bfa';
-    return '#ffab00';
-  };
+  // Tier color from active theme — drives canvas curve, multiplier readout, history
+  const getMultiplierColor = useCallback(
+    (m: number) => resolveTierColor(theme, m),
+    [theme],
+  );
 
-  const getMultiplierColor = (m: number) => {
-    if (m >= 10) return '#ff1744';
-    if (m >= 5) return '#ff9100';
-    if (m >= 2) return '#ffab00';
-    return '#00e676';
-  };
-
-  const getCountdownSeconds = () => {
-    if (!gameState.countdownMs || gameState.phase !== 'BETTING') return 0;
-    return Math.max(0, Math.ceil(gameState.countdownMs / 1000));
-  };
-
-  // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0a0a2e] via-[#1a1a4e] to-[#0d0d3a] text-white overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-4 py-3 bg-black/30 backdrop-blur-sm border-b border-white/5">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-red-500 to-orange-500 flex items-center justify-center">
-            <span className="text-lg">✈</span>
-          </div>
-          <h1 className="text-lg font-bold tracking-wide">
-            <span className="bg-gradient-to-r from-red-400 to-orange-400 bg-clip-text text-transparent">
-              CRASH
-            </span>
-            <span className="text-gray-400 ml-1">GAME</span>
-          </h1>
-        </div>
+    <div className="min-h-screen text-slate-100 relative">
+      <Header
+        connected={connected}
+        soundOn={soundOn}
+        onToggleSound={() => {
+          uiTick();
+          const next = !soundOn;
+          setSoundOn(next);
+          setMuted(!next);
+          if (next) startMusic();
+        }}
+        onOpenDrawer={() => setDrawerOpen(true)}
+        balance={balance}
+        onResetBalance={resetBalance}
+        theme={theme}
+        onLoadThemeClick={() => themeFileInputRef.current?.click()}
+        onResetTheme={resetTheme}
+      />
+      <input
+        ref={themeFileInputRef}
+        type="file"
+        accept="application/json"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) loadThemeFromFile(f);
+          e.target.value = '';
+        }}
+      />
 
-        <div className="flex items-center gap-4">
-          {/* Provably Fair Button */}
-          <button
-            onClick={() => setDrawerOpen(true)}
-            className="text-xs text-gray-400 hover:text-white transition-colors flex items-center gap-1"
-          >
-            <span>🔒</span> Provably Fair
-          </button>
-
-          {/* Balance */}
-          <div className="bg-white/5 border border-white/10 rounded-lg px-4 py-2 flex items-center gap-3">
-            <div>
-              <div className="text-xs text-gray-400">Balance</div>
-              <div className="text-lg font-bold text-green-400">${balance.toFixed(2)}</div>
-            </div>
-            <button
-              onClick={resetBalance}
-              className="text-xs text-gray-500 hover:text-white transition-colors px-2 py-1 rounded bg-white/5"
-              title="Reset balance to $1000"
-            >
-              Reset
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* History Strip */}
       <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
-      {/* Main Content */}
-      <div className="flex flex-col lg:flex-row gap-3 p-3 h-[calc(100vh-140px)]">
+      <main className="flex flex-col lg:flex-row gap-4 p-4 lg:p-5 lg:h-[calc(100vh-148px)]">
         {/* Game Canvas */}
-        <div className="flex-1 relative rounded-xl overflow-hidden border border-white/10">
+        <section className="flex-1 relative rounded-panel overflow-hidden border border-space-500/40 bg-space-900/40 shadow-panel min-h-[340px] lg:min-h-0">
           <GameCanvas
             phase={gameState.phase}
+            flightStartTime={gameState.flightStartTime ?? null}
+            serverClockOffsetMs={serverOffsetRef.current}
             currentMultiplier={gameState.currentMultiplier}
             crashPoint={gameState.crashPoint}
             hashCommit={gameState.hashCommit}
             countdownMs={gameState.countdownMs}
             getMultiplierColor={getMultiplierColor}
+            theme={theme}
           />
-        </div>
+
+          <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-slate-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40 font-mono">
+            Round · {gameState.roundNumber}
+          </div>
+
+          {toast && (
+            <div
+              className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-sm font-semibold backdrop-blur-md border animate-toast-in ${
+                toast.kind === 'win'
+                  ? 'bg-aurora-500/15 text-aurora-400 border-aurora-500/40 shadow-aurora'
+                  : toast.kind === 'loss'
+                  ? 'bg-nebula-500/15 text-nebula-400 border-nebula-500/40 shadow-nebula'
+                  : 'bg-plasma-500/15 text-plasma-400 border-plasma-500/40 shadow-plasma'
+              }`}
+            >
+              {toast.text}
+            </div>
+          )}
+        </section>
 
         {/* Sidebar */}
-        <div className="lg:w-80 flex flex-col gap-3">
-          {/* Bet Panel */}
+        <aside className="lg:w-[340px] flex flex-col gap-4 min-h-0">
           <BetPanel
             phase={gameState.phase}
             hasBet={hasBet}
@@ -293,27 +382,184 @@ export default function App() {
             autoCashout={autoCashout}
             setAutoCashout={setAutoCashout}
             currentMultiplier={gameState.currentMultiplier}
+            countdownMs={gameState.countdownMs}
             betAmounts={[1, 5, 10, 25, 50, 100, 500]}
             onPlaceBet={placeBet}
             onCashout={cashout}
           />
+          <PlayerList bets={gameState.bets} youPlayerId={playerId} />
+        </aside>
+      </main>
 
-          {/* Player List */}
-          <PlayerList bets={gameState.bets} />
-        </div>
-      </div>
-
-      {/* Footer */}
-      <footer className="text-center py-2 text-xs text-gray-600 bg-black/20">
-        This is a simulation for entertainment / demo purposes. No real money is involved.
+      <footer className="text-center py-3 text-[11px] text-slate-500 border-t border-space-500/30 bg-space-950/60">
+        {theme.brandName || 'Galaxy Crash'} · simulation only · no real wagers, no real money.
       </footer>
 
-      {/* Provably Fair Drawer */}
       <ProvablyFairDrawer
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         currentRound={gameState}
       />
     </div>
+  );
+}
+
+// ─── Header ──────────────────────────────────────────────────────────────────
+function Header({
+  connected, soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
+  theme, onLoadThemeClick, onResetTheme,
+}: {
+  connected: boolean;
+  soundOn: boolean;
+  onToggleSound: () => void;
+  onOpenDrawer: () => void;
+  balance: number;
+  onResetBalance: () => void;
+  theme: Theme;
+  onLoadThemeClick: () => void;
+  onResetTheme: () => void;
+}) {
+  const brand = theme.brandName || 'Galaxy Crash';
+  const tagline = theme.brandTagline || 'provably-fair multiplier';
+  const customLogo = theme.assets?.logo;
+  return (
+    <header className="flex items-center justify-between px-4 sm:px-6 py-3 border-b border-space-500/30 bg-space-950/70 backdrop-blur-xl relative z-10">
+      <div className="flex items-center gap-3 min-w-0">
+        {customLogo ? (
+          <img
+            src={customLogo}
+            alt={brand}
+            className="w-9 h-9 rounded-control object-contain border border-space-500/60 bg-space-800/60 shrink-0"
+          />
+        ) : (
+          <Logo />
+        )}
+        <div className="flex flex-col min-w-0">
+          <h1 className="font-display font-bold text-[15px] sm:text-base tracking-[0.18em] uppercase leading-none truncate" style={{ color: theme.colors.text }}>
+            <span className="bg-gradient-to-r from-plasma-400 via-cosmos-400 to-nebula-400 bg-clip-text text-transparent">
+              {brand.split(' ')[0]}
+            </span>
+            {brand.split(' ').slice(1).length > 0 && (
+              <span className="ml-1.5">{brand.split(' ').slice(1).join(' ')}</span>
+            )}
+          </h1>
+          <span className="text-[9px] uppercase tracking-[0.22em] text-slate-500 mt-0.5 truncate">
+            {tagline}
+          </span>
+        </div>
+        <span
+          className={`hidden sm:inline-block w-1.5 h-1.5 rounded-full ml-3 ${connected ? 'bg-aurora-500' : 'bg-nebula-500 animate-pulse'}`}
+          title={connected ? 'live' : 'reconnecting'}
+        />
+      </div>
+
+      <div className="flex items-center gap-2 sm:gap-3">
+        <IconButton onClick={onToggleSound} label={soundOn ? 'Mute sounds' : 'Unmute sounds'}>
+          {soundOn ? <SpeakerIcon /> : <SpeakerMutedIcon />}
+        </IconButton>
+        <IconButton onClick={onLoadThemeClick} label="Load theme pack">
+          <ThemeIcon />
+          <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Theme</span>
+        </IconButton>
+        <IconButton onClick={onResetTheme} label="Reset to default theme">
+          <ResetIcon />
+        </IconButton>
+        <IconButton onClick={onOpenDrawer} label="Provably fair">
+          <ShieldIcon />
+          <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Fair</span>
+        </IconButton>
+
+        <div className="flex items-center gap-2 sm:gap-3 bg-space-800/80 border border-space-500/50 rounded-control px-3 py-1.5">
+          <div className="leading-tight">
+            <div className="text-[9px] uppercase tracking-[0.22em] text-slate-500">Balance</div>
+            <div className="text-base sm:text-lg font-mono font-semibold text-aurora-400">${balance.toFixed(2)}</div>
+          </div>
+          <button
+            onClick={onResetBalance}
+            className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
+            title="Reset balance to $1000"
+          >
+            Reset
+          </button>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function ThemeIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="13.5" cy="6.5" r="2.5"/>
+      <circle cx="19" cy="13" r="2.5"/>
+      <circle cx="6" cy="11" r="2.5"/>
+      <circle cx="10" cy="20" r="2.5"/>
+      <path d="M2 12C2 6 7 2 12 2s10 4 10 10-4 10-10 10c-2 0-2-2-1-3 1-1 1-3-1-3-2 0-8 0-8-4z"/>
+    </svg>
+  );
+}
+
+function ResetIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="1 4 1 10 7 10"/>
+      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+    </svg>
+  );
+}
+
+function IconButton({ onClick, label, children }: { onClick: () => void; label: string; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className="flex items-center text-slate-400 hover:text-slate-100 transition px-2.5 py-2 rounded-control hover:bg-space-700/60 border border-transparent hover:border-space-500/40"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Logo() {
+  return (
+    <div className="w-9 h-9 rounded-control bg-gradient-to-br from-cosmos-600 via-space-700 to-plasma-600 border border-space-500/60 flex items-center justify-center shadow-plasma/50">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M12 2 L15 8 L15 16 Q12 22 9 16 L9 8 Z" fill="#f8fafc" stroke="#0f172a" strokeWidth="0.5"/>
+        <circle cx="12" cy="9" r="1.6" fill="#22d3ee"/>
+        <path d="M9 15 L6 19 L9 17 Z" fill="#ef4444"/>
+        <path d="M15 15 L18 19 L15 17 Z" fill="#ef4444"/>
+        <path d="M11 18 Q12 22 13 18 Z" fill="#fbbf24"/>
+      </svg>
+    </div>
+  );
+}
+
+function SpeakerIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/>
+      <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+    </svg>
+  );
+}
+
+function SpeakerMutedIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/>
+      <line x1="23" y1="9" x2="17" y2="15"/>
+      <line x1="17" y1="9" x2="23" y2="15"/>
+    </svg>
+  );
+}
+
+function ShieldIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      <path d="M9 12l2 2 4-4"/>
+    </svg>
   );
 }

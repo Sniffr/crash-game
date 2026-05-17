@@ -1,14 +1,23 @@
-# Asset Credits
+# Galaxy Crash — Asset Credits
 
 All assets in this project are either original, CC0, or permissively licensed.
 
 ## Visual Assets
 
-### Plane Sprite
-- **Source**: Hand-drawn SVG, original creation
+### Rocket Sprite
+- **Source**: Hand-drawn, procedurally rendered to an offscreen canvas
 - **License**: MIT (project license)
-- **Description**: Red propeller plane in 3/4 perspective, drawn with basic SVG shapes
-- **Location**: `src/components/GameCanvas.tsx` (inline SVG rendering)
+- **Description**: Chrome-body rocket with red accent stripe, blue cockpit window, side fins, and an animated thrust flame (particle system)
+- **Location**: `src/components/GameCanvas.tsx` — `buildRocketSprite()`
+
+### Galaxy Background
+- **Source**: Original, procedurally rendered each frame
+- **License**: MIT (project license)
+- **Description**: Layered parallax starfield (220 stars across 4 depth bands), four drifting nebula clouds (HSL gradients), aurora band, and faint orbital arc guides — no static image assets
+
+### Favicon
+- **Source**: Original SVG (`public/rocket.svg`)
+- **License**: MIT (project license)
 
 ### Background & Grid
 - **Source**: Original creation
@@ -22,12 +31,19 @@ All assets in this project are either original, CC0, or permissively licensed.
 
 ## Sound Assets
 
-No sound assets are currently included in this demo. If sounds are added:
-- **Recommended sources**: 
-  - [freesound.org](https://freesound.org) (filter for CC0 license)
-  - [Pixabay Sound Effects](https://pixabay.com/sound-effects/)
-  - [Kenney.nl](https://kenney.nl/assets) (CC0 game assets)
-- **Required sounds**: engine loop, takeoff whoosh, cash-out chime, crash explosion, UI ticks
+All sound effects are **procedurally synthesized at runtime** using the Web Audio
+API — there are no pre-recorded sound files in the repo. Implementation lives in
+`src/sounds.ts` (MIT, original):
+
+| Sound | How it's generated |
+|---|---|
+| UI tick (mute button) | Short 1.2 kHz square-wave click with an exponential decay |
+| Bet placed | Two-note sine arpeggio (A4 → E5) |
+| Takeoff whoosh | White-noise burst through a band-pass filter sweeping 300 Hz → 3 kHz |
+| Cashout chime | C-E-G-C triangle arpeggio |
+| Crash boom | Decaying low-pass noise + sub-bass sine dropping 120 Hz → 40 Hz |
+
+No external audio assets, no licensing exposure.
 
 ## Fonts
 

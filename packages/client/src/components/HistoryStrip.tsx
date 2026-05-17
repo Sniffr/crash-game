@@ -5,36 +5,41 @@ interface HistoryEntry {
 
 interface HistoryStripProps {
   history: HistoryEntry[];
-  getChipClass: (crashPoint: number) => string;
+  getChipClass?: (crashPoint: number) => string;
 }
 
-export default function HistoryStrip({ history, getChipClass }: HistoryStripProps) {
-  const getChipColor = (crashPoint: number) => {
-    if (crashPoint < 2) return '#fd79a8';
-    if (crashPoint < 10) return '#a78bfa';
-    return '#ffab00';
-  };
+function tierFor(cp: number): { fg: string; bg: string; border: string; glow: string } {
+  if (cp < 2)  return { fg: '#5eead4', bg: 'rgba(94, 234, 212, 0.10)', border: 'rgba(94, 234, 212, 0.30)', glow: 'rgba(94, 234, 212, 0.4)' };
+  if (cp < 10) return { fg: '#c084fc', bg: 'rgba(192, 132, 252, 0.10)', border: 'rgba(192, 132, 252, 0.30)', glow: 'rgba(192, 132, 252, 0.4)' };
+  return         { fg: '#fbbf24', bg: 'rgba(251, 191, 36, 0.12)',  border: 'rgba(251, 191, 36, 0.35)',  glow: 'rgba(251, 191, 36, 0.5)'  };
+}
+
+export default function HistoryStrip({ history }: HistoryStripProps) {
+  const recent = [...history].slice(-30).reverse();
 
   return (
-    <div className="px-3 py-2 bg-black/20 border-b border-white/5 overflow-x-auto">
+    <div className="px-4 py-2 bg-space-950/60 border-b border-space-500/30 overflow-x-auto relative z-10">
       <div className="flex items-center gap-1.5 min-w-max">
-        {history.length === 0 && (
-          <span className="text-xs text-gray-500 px-2">No rounds yet</span>
+        <span className="text-[10px] uppercase tracking-[0.22em] text-slate-500 mr-2 shrink-0 font-semibold">
+          History
+        </span>
+        {recent.length === 0 && (
+          <span className="text-xs text-slate-600">No rounds yet</span>
         )}
-        {history.map((entry, idx) => {
-          const color = getChipColor(entry.crashPoint);
-          const isLatest = idx === history.length - 1;
+        {recent.map((entry, idx) => {
+          const t = tierFor(entry.crashPoint);
+          const isLatest = idx === 0;
           return (
             <div
               key={entry.roundNumber}
-              className={`px-2.5 py-1 rounded-full text-xs font-bold font-mono transition-all ${
-                isLatest ? 'ring-2 ring-white/20 scale-105' : 'opacity-80'
-              }`}
+              className={`px-2.5 py-1 rounded-full text-xs font-mono font-bold shrink-0 tabular-nums ${isLatest ? 'animate-chip-in' : ''}`}
               style={{
-                backgroundColor: color + '20',
-                color: color,
-                border: `1px solid ${color}30`,
+                backgroundColor: t.bg,
+                color: t.fg,
+                border: `1px solid ${t.border}`,
+                boxShadow: isLatest ? `0 0 12px ${t.glow}` : undefined,
               }}
+              title={`Round #${entry.roundNumber}`}
             >
               {entry.crashPoint.toFixed(2)}x
             </div>

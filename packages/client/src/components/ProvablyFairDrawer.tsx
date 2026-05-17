@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useCallback, useState } from 'react';
 
 interface ProvablyFairDrawerProps {
   isOpen: boolean;
@@ -10,8 +10,18 @@ interface ProvablyFairDrawerProps {
     crashPoint?: number;
     serverSeed?: string;
     hashCommit?: string;
+    prevServerSeed?: string | null;
+    prevRoundNumber?: number | null;
     history: Array<{ roundNumber: number; crashPoint: number }>;
   };
+}
+
+interface VerifyResult {
+  ok: boolean;
+  reason?: string;
+  computedCrash?: number;
+  revealedSeed?: string;
+  error?: string;
 }
 
 export default function ProvablyFairDrawer({
@@ -20,226 +30,202 @@ export default function ProvablyFairDrawer({
   currentRound,
 }: ProvablyFairDrawerProps) {
   const [verifySeed, setVerifySeed] = useState('');
-  const [verifyRound, setVerifyRound] = useState('');
-  const [verifyResult, setVerifyResult] = useState<Record<string, unknown> | null>(null);
+  const [verifyRoundN, setVerifyRoundN] = useState('');
+  const [verifyResult, setVerifyResult] = useState<VerifyResult | null>(null);
   const [loading, setLoading] = useState(false);
 
   const handleVerify = useCallback(async () => {
-    if (!verifySeed || !verifyRound) return;
+    if (!verifySeed || !verifyRoundN) return;
     setLoading(true);
     try {
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          seed: verifySeed,
-          roundNumber: parseInt(verifyRound, 10),
-        }),
+        body: JSON.stringify({ seed: verifySeed, roundNumber: parseInt(verifyRoundN, 10) }),
       });
-      const result = await res.json();
-      setVerifyResult(result);
+      setVerifyResult(await res.json());
     } catch (e) {
       setVerifyResult({ ok: false, reason: 'Failed to verify: ' + (e as Error).message });
     } finally {
       setLoading(false);
     }
-  }, [verifySeed, verifyRound]);
+  }, [verifySeed, verifyRoundN]);
 
   if (!isOpen) return null;
 
-  const recentHistory = currentRound.history.slice(-10).reverse();
-
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
-      {/* Drawer */}
-      <div className="relative w-full max-w-md bg-[#12122e] border-l border-white/10 overflow-y-auto">
-        <div className="sticky top-0 bg-[#12122e]/95 backdrop-blur-sm border-b border-white/10 px-6 py-4 flex items-center justify-between">
-          <h2 className="text-lg font-bold flex items-center gap-2">
-            <span>🔒</span> Provably Fair
-          </h2>
+      <div className="absolute inset-0 bg-space-950/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative w-full max-w-md bg-space-900 border-l border-space-500/40 overflow-y-auto">
+        {/* Sticky header */}
+        <div className="sticky top-0 bg-space-900/95 backdrop-blur-md border-b border-space-500/40 px-5 py-4 flex items-center justify-between z-10">
+          <div className="flex items-center gap-2.5">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <path d="M9 12l2 2 4-4"/>
+            </svg>
+            <h2 className="text-sm font-display font-bold uppercase tracking-[0.18em]">Provably Fair</h2>
+          </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center hover:bg-white/20 transition-colors"
+            className="w-8 h-8 rounded-control bg-space-700/60 border border-space-500/40 text-slate-300 hover:bg-space-600 hover:text-white transition flex items-center justify-center"
+            aria-label="Close"
           >
-            ✕
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18"/>
+              <line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
           </button>
         </div>
 
-        <div className="p-6 space-y-6">
+        <div className="p-5 space-y-5">
           {/* How it works */}
-          <div>
-            <h3 className="text-sm font-bold text-gray-300 uppercase tracking-wider mb-3">
-              How it works
-            </h3>
-            <div className="space-y-3 text-sm text-gray-400">
-              <p>
-                <strong className="text-gray-300">1.</strong> Before each round, we publish a
-                hashed commitment of our server seed.
-              </p>
-              <p>
-                <strong className="text-gray-300">2.</strong> After the round crashes, we reveal
-                the server seed so anyone can verify the result.
-              </p>
-              <p>
-                <strong className="text-gray-300">3.</strong> The crash point is computed using
-                HMAC-SHA256 of the seed and round number — ensuring it was predetermined and
-                tamper-proof.
-              </p>
-            </div>
-          </div>
+          <Section title="How it works">
+            <ol className="space-y-2.5 text-sm text-slate-400 leading-relaxed list-decimal pl-4 marker:text-plasma-500">
+              <li>Before each round, the server publishes a SHA-256 commitment of its secret seed.</li>
+              <li>The crash multiplier is derived deterministically from <code className="font-mono text-plasma-400">HMAC-SHA256(seed, roundNumber)</code>.</li>
+              <li>After the round, the seed is revealed — anyone can recompute the same crash point.</li>
+            </ol>
+          </Section>
 
-          {/* Current round info */}
+          {/* Current round */}
           {currentRound.hashCommit && (
-            <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-              <h3 className="text-sm font-bold text-gray-300 uppercase tracking-wider mb-3">
-                Current Round #{currentRound.roundNumber}
-              </h3>
-              <div className="space-y-2 text-xs font-mono">
-                <div className="flex justify-between">
-                  <span className="text-gray-400">Hash Commit</span>
-                  <span className="text-green-400 truncate ml-2">
-                    {currentRound.hashCommit.slice(0, 20)}...
-                  </span>
-                </div>
-                {currentRound.phase === 'CRASHED' && currentRound.serverSeed && (
-                  <>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">Seed Revealed</span>
-                      <span className="text-orange-400 truncate ml-2">
-                        {currentRound.serverSeed.slice(0, 20)}...
-                      </span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-gray-400">Crash Point</span>
-                      <span className="text-red-400">
-                        {currentRound.crashPoint?.toFixed(2)}x
-                      </span>
-                    </div>
-                  </>
-                )}
-              </div>
-            </div>
+            <Section title={`Round #${currentRound.roundNumber}`}>
+              <KV label="Hash commit">
+                <span className="text-plasma-400">{currentRound.hashCommit.slice(0, 24)}…</span>
+              </KV>
+              {(currentRound.phase === 'CRASHED' || currentRound.phase === 'RESULT') && currentRound.serverSeed && (
+                <>
+                  <KV label="Server seed">
+                    <span className="text-solar-500">{currentRound.serverSeed.slice(0, 24)}…</span>
+                  </KV>
+                  <KV label="Crash point">
+                    <span className="text-nebula-400">{currentRound.crashPoint?.toFixed(2)}x</span>
+                  </KV>
+                </>
+              )}
+            </Section>
           )}
 
-          {/* Recent history */}
-          {recentHistory.length > 0 && (
-            <div>
-              <h3 className="text-sm font-bold text-gray-300 uppercase tracking-wider mb-3">
-                Recent Rounds
-              </h3>
-              <div className="flex flex-wrap gap-2">
-                {recentHistory.map((entry) => (
-                  <div
-                    key={entry.roundNumber}
-                    className="px-3 py-1.5 rounded-full text-xs font-bold font-mono"
-                    style={{
-                      backgroundColor:
-                        entry.crashPoint < 2
-                          ? 'rgba(253, 121, 168, 0.2)'
-                          : entry.crashPoint < 10
-                          ? 'rgba(167, 139, 250, 0.2)'
-                          : 'rgba(255, 171, 0, 0.2)',
-                      color:
-                        entry.crashPoint < 2
-                          ? '#fd79a8'
-                          : entry.crashPoint < 10
-                          ? '#a78bfa'
-                          : '#ffab00',
-                      border: '1px solid rgba(255,255,255,0.1)',
-                    }}
-                  >
-                    #{entry.roundNumber} → {entry.crashPoint.toFixed(2)}x
-                  </div>
-                ))}
+          {/* Previous round (always revealed) */}
+          {currentRound.prevServerSeed && currentRound.prevRoundNumber != null && (
+            <Section title={`Round #${currentRound.prevRoundNumber} — revealed`} accent="solar">
+              <div className="text-xs font-mono break-all text-solar-500/90 leading-relaxed">
+                {currentRound.prevServerSeed}
               </div>
-            </div>
+              <button
+                onClick={() => {
+                  setVerifySeed(currentRound.prevServerSeed!);
+                  setVerifyRoundN(String(currentRound.prevRoundNumber!));
+                }}
+                className="mt-3 text-[11px] uppercase tracking-[0.18em] font-semibold px-3 py-1.5 rounded-control bg-solar-500/15 text-solar-500 hover:bg-solar-500/25 transition border border-solar-500/30"
+              >
+                Use in verifier
+              </button>
+            </Section>
           )}
 
-          {/* Verification tool */}
-          <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-            <h3 className="text-sm font-bold text-gray-300 uppercase tracking-wider mb-3">
-              Verify a Round
-            </h3>
-            <div className="space-y-3">
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Server Seed</label>
+          {/* Verifier */}
+          <Section title="Verify a round">
+            <div className="space-y-2.5">
+              <Field label="Server seed">
                 <input
                   type="text"
                   value={verifySeed}
                   onChange={(e) => setVerifySeed(e.target.value)}
-                  placeholder="Enter server seed hex..."
-                  className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-green-500/50"
+                  placeholder="hex string"
+                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs font-mono text-white focus:outline-none focus:border-plasma-500/60"
                 />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400 block mb-1">Round Number</label>
+              </Field>
+              <Field label="Round number">
                 <input
                   type="number"
-                  value={verifyRound}
-                  onChange={(e) => setVerifyRound(e.target.value)}
-                  placeholder="Enter round number..."
-                  className="w-full bg-black/30 border border-white/10 rounded-lg px-3 py-2 text-sm font-mono text-white focus:outline-none focus:border-green-500/50"
+                  value={verifyRoundN}
+                  onChange={(e) => setVerifyRoundN(e.target.value)}
+                  placeholder="42"
+                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs font-mono text-white focus:outline-none focus:border-plasma-500/60"
                 />
-              </div>
+              </Field>
               <button
                 onClick={handleVerify}
-                disabled={loading || !verifySeed || !verifyRound}
-                className="w-full py-2.5 rounded-lg bg-gradient-to-r from-green-500 to-green-400 text-black font-bold text-sm uppercase tracking-wider hover:from-green-400 hover:to-green-300 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={loading || !verifySeed || !verifyRoundN}
+                className="w-full h-10 rounded-control bg-gradient-to-r from-plasma-500 to-cosmos-500 text-space-950 font-display font-bold text-xs uppercase tracking-[0.18em] hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
-                {loading ? 'Verifying...' : 'Verify'}
+                {loading ? 'Verifying…' : 'Verify'}
               </button>
 
               {verifyResult && (
                 <div
-                  className={`mt-3 p-3 rounded-lg text-sm font-mono ${
+                  className={`mt-2 p-3 rounded-control text-xs font-mono leading-relaxed ${
                     verifyResult.ok
-                      ? 'bg-green-500/10 border border-green-500/30 text-green-400'
-                      : 'bg-red-500/10 border border-red-500/30 text-red-400'
+                      ? 'bg-aurora-500/10 border border-aurora-500/40 text-aurora-400'
+                      : 'bg-nebula-500/10 border border-nebula-500/40 text-nebula-400'
                   }`}
                 >
                   {verifyResult.ok ? (
-                    <div className="flex items-center gap-2">
-                      <span>✅</span>
-                      <span>Verification passed! The crash point is valid.</span>
-                    </div>
+                    <>Verified · crash recomputed to <span className="font-bold">{verifyResult.computedCrash}x</span></>
                   ) : (
-                    <div className="flex items-center gap-2">
-                      <span>❌</span>
-                      <span>{verifyResult.reason}</span>
-                    </div>
+                    <>Verification failed — {verifyResult.reason}</>
                   )}
-                  {!verifyResult.ok && verifyResult.computedCrash && (
-                    <div className="mt-2 text-xs text-gray-400">
-                      Computed crash: {verifyResult.computedCrash}
-                    </div>
+                  {!verifyResult.ok && verifyResult.computedCrash != null && (
+                    <div className="mt-1 text-slate-500">computed crash: {verifyResult.computedCrash}</div>
                   )}
                 </div>
               )}
             </div>
-          </div>
+          </Section>
 
           {/* Formula */}
-          <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-            <h3 className="text-sm font-bold text-gray-300 uppercase tracking-wider mb-3">
-              Formula
-            </h3>
-            <div className="text-xs font-mono text-gray-400 space-y-1">
-              <p>u = HMAC-SHA256(seed, round) → first 13 hex chars → [0, 1)</p>
-              <p>raw = (100 × RTP) / (1 - u)</p>
-              <p>crash = max(1.0, floor(raw) / 100)</p>
-              <p className="text-gray-500 mt-2">
-                This gives P(crash ≥ m) = RTP/m for every m &gt; 1
-              </p>
-            </div>
-          </div>
+          <Section title="Formula">
+            <pre className="text-[11px] font-mono text-slate-400 leading-relaxed whitespace-pre-wrap">
+{`u    = HMAC-SHA256(seed, round) → first 13 hex → [0,1)
+raw  = (100 × RTP) / (1 − u)
+crash = max(1.00, floor(raw) / 100)`}
+            </pre>
+            <p className="text-[11px] text-slate-500 mt-2">
+              This gives <code className="font-mono text-plasma-400">P(crash ≥ m) = RTP / m</code> for every m &gt; 1.
+            </p>
+          </Section>
         </div>
       </div>
+    </div>
+  );
+}
+
+function Section({
+  title, children, accent,
+}: {
+  title: string;
+  children: React.ReactNode;
+  accent?: 'solar' | 'plasma' | 'cosmos';
+}) {
+  const border = accent === 'solar'
+    ? 'border-solar-500/30'
+    : accent === 'cosmos'
+    ? 'border-cosmos-500/30'
+    : 'border-space-500/40';
+  return (
+    <section className={`bg-space-800/40 rounded-panel p-4 border ${border}`}>
+      <h3 className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.22em] mb-3">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function KV({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="flex justify-between items-baseline text-xs font-mono mb-1.5">
+      <span className="text-slate-500">{label}</span>
+      <span className="truncate ml-3 tabular-nums">{children}</span>
+    </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-500 mb-1">{label}</label>
+      {children}
     </div>
   );
 }

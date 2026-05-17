@@ -1,6 +1,6 @@
-# Crash Game — Aviator-Style Crash Game
+# Galaxy Crash
 
-A fully working, production-quality crash game in the style of Spribe's *Aviator* and *JetX*. A red airplane takes off, a multiplier rises along a curve, and you must cash out before the plane "flies away."
+A fully working, production-quality crash game set in deep space. A retro rocket lifts off, a multiplier climbs along an exponential curve, and you must cash out before the rocket flies away into the void.
 
 **Features:** Provably-fair RNG, animated canvas, bot simulation, real-time WebSocket, configurable RTP, and a complete UI with history, player list, and verification tools.
 
@@ -9,10 +9,41 @@ A fully working, production-quality crash game in the style of Spribe's *Aviator
 ```bash
 cd crash-game
 npm install
-npm run dev
+npm run dev          # launches Galaxy Crash (game) at http://localhost:5173
+npm run dev:creator  # launches the Crash Game Creator at http://localhost:5174
+npm run dev:all      # runs game + creator side by side
 ```
 
-Open **http://localhost:5173** in your browser.
+- **Game** → http://localhost:5173 — play Galaxy Crash.
+- **Creator** → http://localhost:5174 — visual studio for skinning the game.
+
+## Theming workflow
+
+### Build a theme in the Creator
+1. Open the Creator (http://localhost:5174).
+2. Pick a preset or start from scratch.
+3. Adjust colors, brand text, procedural sprite/background, game tuning.
+4. **Custom sprites** — upload per-state sprites:
+   - **Ground sprite** — shown during BETTING + early flight (the plane sitting on the runway)
+   - **Flying sprite** — shown after the multiplier crosses the **transition threshold** (default 1.5x, configurable 1–5x)
+   - **Crashed sprite** — shown during the crash explosion animation
+   - **Single sprite** — legacy fallback, used for any of the above not explicitly set
+5. **Custom background** — upload an image, then choose:
+   - **Motion direction**: none, left, right, up, or down
+   - **Motion speed**: slow / medium / fast — the image tiles seamlessly in that direction during flight
+6. **Custom sounds** — five SFX slots (takeoff / cashout / crash / bet / tick) + a looping music track
+7. **Custom logo** — replaces the header rocket
+8. Click **Export theme** → downloads `<your-brand>-theme.json` (all assets embedded as base64).
+
+### Load a theme into the game
+
+There are two ways:
+
+**Manual load (per browser)** — click the 🎨 **Theme** button in the game header, pick the JSON. The theme persists in your browser via localStorage and survives refreshes. Click **↻ Reset** to drop your override and fall back to the server theme (or the built-in default).
+
+**Server-side autoload (for everyone)** — drop the JSON at `config/active-theme.json` at the repo root. The server reads it on boot and serves it to every client at `GET /api/theme`. Edits to the file are picked up automatically by the file watcher (no restart). This is the "operator theme" — what every new player sees by default.
+
+Precedence: **user manual upload** > **server config** > **built-in Galaxy Crash default**.
 
 ## How to Play
 
@@ -29,10 +60,10 @@ crash-game/
 ├── packages/
 │   ├── shared/                     # Shared types, RNG, config
 │   │   ├── src/
-│   │   │   ├── rng.ts              # Provably-fair crash-point generator
-│   │   │   ├── rng.test.ts         # 19 tests (RTP, distribution, bounds)
+│   │   │   ├── rng.ts              # Provably-fair crash-point generator (drop-in reference)
+│   │   │   ├── rng.test.ts         # 18 tests (RTP, distribution, provably-fair, bounds)
 │   │   │   ├── types.ts            # TypeScript interfaces
-│   │   │   └── config.ts           # RTP and timing knobs
+│   │   │   └── config.ts           # RTP and timing knobs (THE single source of truth)
 │   │   └── vitest.config.ts
 │   ├── server/                     # Express + WebSocket server
 │   │   ├── src/
@@ -91,18 +122,20 @@ curl -X POST http://localhost:3001/api/verify \
 
 ## RTP Configuration
 
-Edit `packages/shared/src/config.ts`:
+The RTP is genuinely configurable from a single value. Edit `packages/shared/src/config.ts`:
 
 ```ts
-export const GAME_CONFIG = {
-  rtp: 0.97,           // 97% — change this single value!
+export const GAME_CONFIG: GameConfig = {
+  rtp: 0.97,           // 97% — the ONLY knob you need to change house edge
+  houseEdge: 0.03,     // derived: 1 - rtp
   maxMultiplier: 10000,
+  minMultiplier: 1.0,
   bettingPhaseMs: 5000,
   resultPhaseMs: 3000,
 };
 ```
 
-The RTP knob is the **only** configuration needed to change the house edge. Changing from 0.97 to 0.95 immediately increases the house edge from 3% to 5%.
+Setting `rtp` to `0.90`, `0.97`, or `0.99` and re-running tests produces a measured RTP within ±0.01 of the configured value across 250 000 simulated rounds. No other code changes required.
 
 ## Tests
 
@@ -110,12 +143,15 @@ The RTP knob is the **only** configuration needed to change the house edge. Chan
 npm test
 ```
 
-19 tests covering:
-- **Determinism**: Same seed + round → same crash point
-- **RTP knob**: 250k simulated rounds verify RTP within ±0.01
-- **Distribution shape**: P(crash ≥ m) ≈ RTP/m
-- **Provably-fair**: Commit/reveal round-trips, tamper detection
-- **Bounds**: All crash points in [1.00, maxMultiplier], quantized to 0.01
+All **18** RNG tests pass (from the reference implementation in `doc/rng.test.ts`):
+
+| Group | What it proves |
+|---|---|
+| determinism (3) | Same `(seed, roundNumber)` always returns the same crash point; different seeds/rounds produce different sequences |
+| RTP knob (4) | `rtp ∈ {0.90, 0.97, 0.99}` each measured to within ±0.01 across 250k rounds; raising `rtp` raises measured RTP monotonically |
+| distribution shape (4) | `P(crash = 1.00x) ≈ 1 - rtp/1.01`; `P(crash ≥ m) ≈ rtp/m` for m ∈ {1.5, 2, 3, 5, 10, 50}; outputs always in `[1.00, maxMultiplier]` and quantized to 0.01 |
+| provably-fair (5) | SHA-256 commit/reveal round-trips for 100+ rounds; tampered crash points and mismatched seeds are caught by `verifyRound` |
+| input validation (2) | `rtp ≤ 0` and `rtp > 1` throw; `DEFAULT_CONFIG` is used when none supplied |
 
 ## Asset Credits
 
