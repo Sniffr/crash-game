@@ -43,9 +43,25 @@ export type BgSpeed = 'slow' | 'medium' | 'fast';
 export interface BackgroundMotion {
   direction: BgDirection;
   speed: BgSpeed;
+  /**
+   * If true, the effective scroll speed scales with the current multiplier
+   * (clamped to [0.5, 10]). At 1x the background moves at half base speed,
+   * at 2x it moves at 2× base, etc. Gives a "speeding up" sensation as the
+   * round goes on. Default false (constant speed).
+   */
+  tieToMultiplier?: boolean;
 }
 
-export const DEFAULT_BG_MOTION: BackgroundMotion = { direction: 'none', speed: 'medium' };
+export const DEFAULT_BG_MOTION: BackgroundMotion = { direction: 'none', speed: 'medium', tieToMultiplier: false };
+
+/** Effective scroll speed in pixels per second given motion + current multiplier. */
+export function effectiveBgSpeed(motion: BackgroundMotion | undefined, multiplier: number): number {
+  if (!motion) return 0;
+  const base = speedPxPerSec(motion.speed);
+  if (!motion.tieToMultiplier) return base;
+  const factor = Math.max(0.5, Math.min(10, multiplier));
+  return base * factor;
+}
 
 /** Convert speed enum to pixels-per-second. */
 export function speedPxPerSec(speed: BgSpeed): number {
@@ -69,6 +85,46 @@ export const DEFAULT_FLIGHT_ANIMATION: FlightAnimation = {
   bobAmplitude: 0.08,
   bobPeriodMs:  1500,
 };
+
+/**
+ * Shape of the flight path the sprite traces:
+ *   • 'elliptic'  — quarter-ellipse from bottom-left to upper-right (default)
+ *   • 'straight'  — diagonal takeoff then horizontal cruise across the vertical
+ *                   center (J-curve / hockey stick). Sprite flies straight,
+ *                   not up, once it has cleared the takeoff phase.
+ */
+export type FlightTrajectory = 'elliptic' | 'straight';
+export const DEFAULT_FLIGHT_TRAJECTORY: FlightTrajectory = 'elliptic';
+
+// ─── Game type ─────────────────────────────────────────────────────────────
+// Two distinct rendering modes:
+//
+//   • 'sprite' (default) — procedural / static sprite at the tip of an
+//     elliptic curve, drawn against a procedural or image background.
+//
+//   • 'gif' — full-screen animated GIFs per phase. The GIF brings its own
+//     background and motion; the game just overlays the multiplier text
+//     and countdown ring. No curve, no sprite, no separate background.
+export type GameType = 'sprite' | 'gif';
+
+/**
+ * GIF assets for gameType === 'gif'.
+ *
+ *   • loading            — BETTING phase (countdown overlay drawn on top)
+ *   • flying             — FLYING phase, base animation from round start
+ *   • flyingThreshold    — optional: takes over once multiplier ≥ flyingThresholdAt
+ *   • flyingThresholdAt  — multiplier at which flyingThreshold kicks in (default 2.0)
+ *   • crashed            — CRASHED + RESULT phases (crash multiplier overlay)
+ */
+export interface ThemeGifs {
+  loading?: string | null;
+  flying?: string | null;
+  flyingThreshold?: string | null;
+  flyingThresholdAt?: number;
+  crashed?: string | null;
+}
+
+export const DEFAULT_GIF_THRESHOLD_AT = 2.0;
 
 export interface ThemeSounds {
   takeoff?: string | null;      // audio/* — plays when the round transitions to FLYING
@@ -101,8 +157,15 @@ export interface Theme {
   backgroundMotion?: BackgroundMotion;
   /** Multiplier at which the sprite swaps from ground → flying. Default 1.5. */
   spriteTransitionAt?: number;
-  /** How the sprite moves along the elliptic arc during cruise. */
+  /** How the sprite moves along the flight path during cruise. */
   flightAnimation?: FlightAnimation;
+  /** Shape of the flight path: 'elliptic' (default) or 'straight'. */
+  flightTrajectory?: FlightTrajectory;
+
+  /** Rendering mode: procedural/sprite-on-curve, or full-screen GIFs per phase. */
+  gameType?: GameType;
+  /** GIF slots, used only when gameType === 'gif'. */
+  gifs?: ThemeGifs;
 }
 
 export const THEME_VERSION = 1;

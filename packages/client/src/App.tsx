@@ -11,6 +11,16 @@ import {
 import { applyThemeCssVars, clearTheme, fetchServerTheme, hasUserOverride, loadTheme, readThemeFromFile, saveTheme } from './theme/loader';
 import { DEFAULT_THEME, tierColor as resolveTierColor, type Theme } from './theme/types';
 
+/**
+ * In a production build the theme is whatever the server is serving from
+ * config/active-theme.json. Players can't override it — the upload/reset UI
+ * is hidden, and we never persist a user override to localStorage.
+ *
+ * Vite bakes `import.meta.env.PROD` to `true` for `vite build`, `false` for
+ * `vite dev`. So local development keeps the full theme-editing experience.
+ */
+const THEME_LOCKED = import.meta.env.PROD;
+
 interface Bet {
   playerId: string;
   amount: number;
@@ -18,9 +28,29 @@ interface Bet {
   cashedOut: boolean;
   isBot: boolean;
   botName?: string;
+  displayName?: string;
   profit?: number;
   cashoutMultiplier?: number;
 }
+
+interface SessionInfo {
+  sessionId: string;
+  displayName: string;
+}
+
+interface SessionStats {
+  bets: number; wins: number; losses: number;
+  totalWagered: number; totalWon: number; netProfit: number;
+  biggestCashout: number; biggestWin: number;
+  currentStreak: number; bestStreak: number;
+}
+
+const ZERO_STATS: SessionStats = {
+  bets: 0, wins: 0, losses: 0,
+  totalWagered: 0, totalWon: 0, netProfit: 0,
+  biggestCashout: 0, biggestWin: 0,
+  currentStreak: 0, bestStreak: 0,
+};
 
 interface HistoryEntry {
   roundNumber: number;
@@ -42,16 +72,35 @@ interface GameState {
   flightStartTime?: number | null;
 }
 
-const STORAGE_KEY = 'galaxy-crash-player-id';
+const SESSION_PARAM = 'session';
 
-function loadPlayerId(): string {
+function readSessionIdFromUrl(): string | null {
   try {
-    const cached = localStorage.getItem(STORAGE_KEY);
-    if (cached) return cached;
+    const id = new URLSearchParams(location.search).get(SESSION_PARAM);
+    return id && /^[a-z0-9]{8,32}$/.test(id) ? id : null;
+  } catch { return null; }
+}
+
+function writeSessionIdToUrl(sessionId: string) {
+  try {
+    const url = new URL(location.href);
+    url.searchParams.set(SESSION_PARAM, sessionId);
+    history.replaceState(null, '', url.toString());
   } catch { /* ignore */ }
-  const id = `player-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  try { localStorage.setItem(STORAGE_KEY, id); } catch { /* ignore */ }
-  return id;
+}
+
+async function createNewSession(): Promise<SessionInfo | null> {
+  try {
+    const res = await fetch('/api/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    if (res.status === 503) return null; // backend offline
+    if (!res.ok) return null;
+    const j = await res.json() as { sessionId: string; displayName: string };
+    return { sessionId: j.sessionId, displayName: j.displayName };
+  } catch { return null; }
 }
 
 export default function App() {
@@ -67,7 +116,9 @@ export default function App() {
   const [betAmount, setBetAmount] = useState(10);
   const [autoCashoutEnabled, setAutoCashoutEnabled] = useState(false);
   const [autoCashout, setAutoCashout] = useState(2.0);
-  const [playerId] = useState(loadPlayerId);
+  const [session, setSession] = useState<SessionInfo | null>(null);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [stats, setStats] = useState<SessionStats>(ZERO_STATS);
   const [hasBet, setHasBet] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [toast, setToast] = useState<{ kind: 'win' | 'loss' | 'info'; text: string } | null>(null);
@@ -87,7 +138,9 @@ export default function App() {
   useEffect(() => {
     applyThemeCssVars(theme);
     applyThemeSounds(theme.sounds);
-    saveTheme(theme);
+    // Production: never persist the theme — the server is the source of truth
+    // each time the page loads. Dev: persist so refresh keeps your last edit.
+    if (!THEME_LOCKED) saveTheme(theme);
     document.title = theme.brandName || 'Galaxy Crash';
   }, [theme]);
 
@@ -98,6 +151,51 @@ export default function App() {
     fetchServerTheme().then((t) => {
       if (t) setTheme(t);
     });
+  }, []);
+
+  // Bootstrap the session — pull from URL, validate, or create a fresh one.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      let id = readSessionIdFromUrl();
+      if (!id) {
+        const fresh = await createNewSession();
+        if (cancelled) return;
+        if (!fresh) {
+          setSessionError('Backend offline — start Dragonfly with `docker compose up -d dragonfly`');
+          return;
+        }
+        writeSessionIdToUrl(fresh.sessionId);
+        setSession(fresh);
+      } else {
+        // We have an id from the URL — fetch the session to confirm it's valid
+        try {
+          const res = await fetch(`/api/sessions/${id}`);
+          if (res.status === 404) {
+            // session expired or invalid — mint a new one
+            const fresh = await createNewSession();
+            if (cancelled) return;
+            if (!fresh) {
+              setSessionError('Backend offline — start Dragonfly with `docker compose up -d dragonfly`');
+              return;
+            }
+            writeSessionIdToUrl(fresh.sessionId);
+            setSession(fresh);
+          } else if (res.status === 503) {
+            setSessionError('Backend offline — start Dragonfly with `docker compose up -d dragonfly`');
+          } else if (res.ok) {
+            const j = await res.json() as { session: SessionInfo & { balance: number }; stats: SessionStats };
+            if (cancelled) return;
+            setSession({ sessionId: j.session.sessionId, displayName: j.session.displayName });
+            setBalance(j.session.balance);
+            setStats(j.stats);
+          }
+        } catch {
+          setSessionError('Could not reach the server');
+        }
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const loadThemeFromFile = useCallback(async (file: File) => {
@@ -126,6 +224,8 @@ export default function App() {
   }, [flashToast]);
 
   useEffect(() => {
+    // Don't open the WebSocket until we have a session id to attach to
+    if (!session) return;
     let alive = true;
     let reconnectTimer: number | undefined;
 
@@ -136,7 +236,7 @@ export default function App() {
 
       ws.onopen = () => {
         setConnected(true);
-        ws.send(JSON.stringify({ type: 'hello', data: { playerId } }));
+        ws.send(JSON.stringify({ type: 'hello', data: { sessionId: session.sessionId } }));
       };
       ws.onmessage = (event) => {
         try {
@@ -159,7 +259,7 @@ export default function App() {
       wsRef.current?.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [playerId]);
+  }, [session?.sessionId]);
 
   const handleMessage = useCallback((message: { type: string; data: any }) => {
     if (message.data?.serverTime) {
@@ -224,6 +324,7 @@ export default function App() {
         sndPlaceBet();
         setBalance(message.data.balance);
         setHasBet(true);
+        if (message.data.stats) setStats(message.data.stats);
         flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
         break;
 
@@ -231,6 +332,7 @@ export default function App() {
         cashoutChime();
         setBalance(message.data.balance);
         setHasBet(false);
+        if (message.data.stats) setStats(message.data.stats);
         flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
         break;
 
@@ -259,6 +361,7 @@ export default function App() {
                 cashedOut: false,
                 isBot: !!message.data.isBot,
                 botName: message.data.botName,
+                displayName: message.data.displayName,
               },
             ],
           };
@@ -269,6 +372,31 @@ export default function App() {
         setBalance(message.data.balance);
         break;
 
+      case 'session_hello':
+        if (message.data.session) {
+          setSession({ sessionId: message.data.session.sessionId, displayName: message.data.session.displayName });
+          setBalance(message.data.session.balance);
+        }
+        if (message.data.stats) setStats(message.data.stats);
+        break;
+
+      case 'stats_update':
+        if (message.data.stats) setStats(message.data.stats);
+        break;
+
+      case 'session_invalid':
+        // URL session is bogus — mint a new one and reload
+        flashToast('loss', 'Session expired — creating a new one');
+        createNewSession().then((fresh) => {
+          if (fresh) {
+            writeSessionIdToUrl(fresh.sessionId);
+            setSession(fresh);
+            setBalance(1000);
+            setStats(ZERO_STATS);
+          }
+        });
+        break;
+
       case 'error':
         flashToast('loss', message.data?.message ?? 'Error');
         break;
@@ -277,21 +405,21 @@ export default function App() {
 
   const placeBet = () => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
     ws.send(JSON.stringify({
       type: 'place_bet',
-      data: { playerId, amount: betAmount, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
+      data: { sessionId: session.sessionId, amount: betAmount, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
     }));
   };
   const cashout = () => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'cashout', data: { playerId } }));
+    if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
+    ws.send(JSON.stringify({ type: 'cashout', data: { sessionId: session.sessionId } }));
   };
   const resetBalance = () => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'reset_balance', data: { playerId } }));
+    if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
+    ws.send(JSON.stringify({ type: 'reset_balance', data: { sessionId: session.sessionId } }));
   };
 
   const getChipClass = (cp: number) => (cp < 2 ? 'pink' : cp < 10 ? 'purple' : 'gold');
@@ -318,22 +446,31 @@ export default function App() {
         balance={balance}
         onResetBalance={resetBalance}
         theme={theme}
+        themeLocked={THEME_LOCKED}
         onLoadThemeClick={() => themeFileInputRef.current?.click()}
         onResetTheme={resetTheme}
       />
-      <input
-        ref={themeFileInputRef}
-        type="file"
-        accept="application/json"
-        className="hidden"
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) loadThemeFromFile(f);
-          e.target.value = '';
-        }}
-      />
+      {!THEME_LOCKED && (
+        <input
+          ref={themeFileInputRef}
+          type="file"
+          accept="application/json"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) loadThemeFromFile(f);
+            e.target.value = '';
+          }}
+        />
+      )}
 
       <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
+
+      {sessionError && (
+        <div className="px-4 py-2 bg-nebula-500/15 border-b border-nebula-500/40 text-nebula-400 text-xs font-mono text-center">
+          {sessionError}
+        </div>
+      )}
 
       <main className="flex flex-col lg:flex-row gap-4 p-4 lg:p-5 lg:h-[calc(100vh-148px)]">
         {/* Game Canvas */}
@@ -387,7 +524,8 @@ export default function App() {
             onPlaceBet={placeBet}
             onCashout={cashout}
           />
-          <PlayerList bets={gameState.bets} youPlayerId={playerId} />
+          <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
+          <StatsPanel stats={stats} displayName={session?.displayName} />
         </aside>
       </main>
 
@@ -407,7 +545,7 @@ export default function App() {
 // ─── Header ──────────────────────────────────────────────────────────────────
 function Header({
   connected, soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
-  theme, onLoadThemeClick, onResetTheme,
+  theme, themeLocked, onLoadThemeClick, onResetTheme,
 }: {
   connected: boolean;
   soundOn: boolean;
@@ -416,6 +554,7 @@ function Header({
   balance: number;
   onResetBalance: () => void;
   theme: Theme;
+  themeLocked: boolean;
   onLoadThemeClick: () => void;
   onResetTheme: () => void;
 }) {
@@ -457,13 +596,17 @@ function Header({
         <IconButton onClick={onToggleSound} label={soundOn ? 'Mute sounds' : 'Unmute sounds'}>
           {soundOn ? <SpeakerIcon /> : <SpeakerMutedIcon />}
         </IconButton>
-        <IconButton onClick={onLoadThemeClick} label="Load theme pack">
-          <ThemeIcon />
-          <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Theme</span>
-        </IconButton>
-        <IconButton onClick={onResetTheme} label="Reset to default theme">
-          <ResetIcon />
-        </IconButton>
+        {!themeLocked && (
+          <>
+            <IconButton onClick={onLoadThemeClick} label="Load theme pack">
+              <ThemeIcon />
+              <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Theme</span>
+            </IconButton>
+            <IconButton onClick={onResetTheme} label="Reset to default theme">
+              <ResetIcon />
+            </IconButton>
+          </>
+        )}
         <IconButton onClick={onOpenDrawer} label="Provably fair">
           <ShieldIcon />
           <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Fair</span>
@@ -561,5 +704,52 @@ function ShieldIcon() {
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
       <path d="M9 12l2 2 4-4"/>
     </svg>
+  );
+}
+
+
+// ─── Session stats sidebar panel ─────────────────────────────────────────────
+function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?: string }) {
+  const net = stats.netProfit;
+  const streakLabel = stats.currentStreak > 0
+    ? `${stats.currentStreak} wins`
+    : stats.currentStreak < 0
+    ? `${Math.abs(stats.currentStreak)} losses`
+    : '—';
+  return (
+    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 shadow-panel">
+      <div className="flex items-baseline justify-between mb-3">
+        <h2 className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.22em]">Your stats</h2>
+        {displayName && (
+          <span className="text-[10px] font-mono text-cosmos-400 truncate ml-2" title={displayName}>
+            {displayName}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-[11px]">
+        <StatTile label="Bets" value={stats.bets.toString()} />
+        <StatTile label="Wins" value={`${stats.wins} / ${stats.losses}`} />
+        <StatTile label="Wagered" value={`$${stats.totalWagered.toFixed(2)}`} />
+        <StatTile label="Won" value={`$${stats.totalWon.toFixed(2)}`} />
+        <StatTile
+          label="Net P/L"
+          value={`${net >= 0 ? '+' : ''}$${net.toFixed(2)}`}
+          tone={net > 0 ? 'win' : net < 0 ? 'loss' : 'neutral'}
+        />
+        <StatTile label="Streak" value={streakLabel} tone={stats.currentStreak > 0 ? 'win' : stats.currentStreak < 0 ? 'loss' : 'neutral'} />
+        <StatTile label="Biggest x" value={stats.biggestCashout > 0 ? `${stats.biggestCashout.toFixed(2)}x` : '—'} />
+        <StatTile label="Best win" value={stats.biggestWin > 0 ? `$${stats.biggestWin.toFixed(2)}` : '—'} />
+      </div>
+    </div>
+  );
+}
+
+function StatTile({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'win' | 'loss' | 'neutral' }) {
+  const color = tone === 'win' ? 'text-aurora-400' : tone === 'loss' ? 'text-nebula-400' : 'text-slate-100';
+  return (
+    <div className="bg-space-800/50 border border-space-500/30 rounded-control px-2.5 py-1.5 leading-tight">
+      <div className="text-[9px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
+      <div className={`font-mono font-semibold tabular-nums ${color}`}>{value}</div>
+    </div>
   );
 }

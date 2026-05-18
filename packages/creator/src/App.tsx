@@ -4,15 +4,20 @@ import AssetUpload from './AssetUpload';
 import {
   BACKGROUND_OPTIONS,
   DEFAULT_FLIGHT_ANIMATION,
+  DEFAULT_FLIGHT_TRAJECTORY,
+  DEFAULT_GIF_THRESHOLD_AT,
   PRESETS,
   SPRITE_OPTIONS,
   THEME_VERSION,
   type BackgroundKey,
   type FlightAnimation,
+  type FlightTrajectory,
+  type GameType,
   type SpriteKey,
   type Theme,
   type ThemeAssets,
   type ThemeColors,
+  type ThemeGifs,
   type ThemeSounds,
 } from './theme';
 
@@ -44,6 +49,9 @@ export default function App() {
   }, []);
   const updateSound = useCallback(<K extends keyof ThemeSounds>(key: K, value: ThemeSounds[K]) => {
     setTheme((t) => ({ ...t, sounds: { ...(t.sounds ?? {}), [key]: value } }));
+  }, []);
+  const updateGif = useCallback(<K extends keyof ThemeGifs>(key: K, value: ThemeGifs[K]) => {
+    setTheme((t) => ({ ...t, gifs: { ...(t.gifs ?? {}), [key]: value } }));
   }, []);
 
   const handleExport = () => {
@@ -95,6 +103,7 @@ export default function App() {
             updateColor={updateColor}
             updateAsset={updateAsset}
             updateSound={updateSound}
+            updateGif={updateGif}
             onLoadPreset={(key) => setTheme(PRESETS[key])}
           />
         </aside>
@@ -224,17 +233,44 @@ function SampleControls({ theme }: { theme: Theme }) {
 
 // ─── Editor form ────────────────────────────────────────────────────────────
 function EditorForm({
-  theme, update, updateColor, updateAsset, updateSound, onLoadPreset,
+  theme, update, updateColor, updateAsset, updateSound, updateGif, onLoadPreset,
 }: {
   theme: Theme;
   update: <K extends keyof Theme>(k: K, v: Theme[K]) => void;
   updateColor: <K extends keyof ThemeColors>(k: K, v: ThemeColors[K]) => void;
   updateAsset: <K extends keyof ThemeAssets>(k: K, v: ThemeAssets[K]) => void;
   updateSound: <K extends keyof ThemeSounds>(k: K, v: ThemeSounds[K]) => void;
+  updateGif: <K extends keyof ThemeGifs>(k: K, v: ThemeGifs[K]) => void;
   onLoadPreset: (key: string) => void;
 }) {
+  const gameType: GameType = theme.gameType ?? 'sprite';
   return (
     <div className="p-5 pb-16 space-y-7">
+      {/* Game type — the first decision: sprite-on-curve, or full-screen GIF */}
+      <Section title="Game type">
+        <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
+          Pick how this game renders. <strong className="text-slate-300">Sprite</strong> uses
+          a procedural or static sprite traveling along an elliptic curve.
+          <strong className="text-slate-300"> GIF</strong> plays a full-screen
+          animated GIF per phase with the multiplier overlaid — the GIF brings
+          its own background and motion.
+        </p>
+        <div className="grid grid-cols-2 gap-2">
+          <SegmentCard
+            active={gameType === 'sprite'}
+            label="Sprite"
+            description="Sprite + curve + background"
+            onClick={() => update('gameType', 'sprite')}
+          />
+          <SegmentCard
+            active={gameType === 'gif'}
+            label="GIF"
+            description="Full-screen GIF per phase"
+            onClick={() => update('gameType', 'gif')}
+          />
+        </div>
+      </Section>
+
       {/* Presets */}
       <Section title="Presets">
         <div className="grid grid-cols-2 gap-2">
@@ -322,6 +358,65 @@ function EditorForm({
         </div>
       </Section>
 
+      {/* ─── GIF mode: animated GIFs per phase ──────────────────────────── */}
+      {gameType === 'gif' && (
+        <Section title="GIF animations">
+          <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
+            Each phase shows its own animated GIF full-screen. The multiplier
+            text overlays it. Backgrounds and sprite settings are not used in
+            GIF mode — the GIF brings everything.
+          </p>
+          <AssetUpload
+            label="Loading GIF (BETTING phase)"
+            accept="image/gif,image/webp,image/png"
+            kind="image"
+            value={theme.gifs?.loading}
+            onChange={(v) => updateGif('loading', v)}
+            hint="Plays during the place-bet countdown."
+            warnBytes={5_000_000}
+          />
+          <AssetUpload
+            label="Started GIF (FLYING phase)"
+            accept="image/gif,image/webp,image/png"
+            kind="image"
+            value={theme.gifs?.flying}
+            onChange={(v) => updateGif('flying', v)}
+            hint="Plays from the moment the round starts."
+            warnBytes={5_000_000}
+          />
+          <AssetUpload
+            label="Threshold GIF (optional)"
+            accept="image/gif,image/webp,image/png"
+            kind="image"
+            value={theme.gifs?.flyingThreshold}
+            onChange={(v) => updateGif('flyingThreshold', v)}
+            hint="Optional: takes over the FLYING phase once the multiplier crosses the value below. Skip to keep one GIF for the whole flight."
+            warnBytes={5_000_000}
+          />
+          {theme.gifs?.flyingThreshold && (
+            <SliderField
+              label="Threshold multiplier"
+              min={1.1} max={10.0} step={0.1}
+              value={theme.gifs?.flyingThresholdAt ?? DEFAULT_GIF_THRESHOLD_AT}
+              onChange={(v) => updateGif('flyingThresholdAt', v)}
+              display={`${(theme.gifs?.flyingThresholdAt ?? DEFAULT_GIF_THRESHOLD_AT).toFixed(1)}x`}
+              hint="At this multiplier the Threshold GIF replaces the Started GIF."
+            />
+          )}
+          <AssetUpload
+            label="Crashed GIF"
+            accept="image/gif,image/webp,image/png"
+            kind="image"
+            value={theme.gifs?.crashed}
+            onChange={(v) => updateGif('crashed', v)}
+            hint="Plays on crash (and stays through the brief result phase)."
+            warnBytes={5_000_000}
+          />
+        </Section>
+      )}
+
+      {/* ─── Sprite mode: existing sprite + background + flight sections ──── */}
+      {gameType === 'sprite' && <>
       {/* Custom sprites */}
       <Section title="Custom sprites">
         <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
@@ -377,8 +472,26 @@ function EditorForm({
           const anim = { ...DEFAULT_FLIGHT_ANIMATION, ...(theme.flightAnimation ?? {}) };
           const setAnim = (patch: Partial<FlightAnimation>) =>
             update('flightAnimation', { ...anim, ...patch });
+          const trajectory: FlightTrajectory = theme.flightTrajectory ?? DEFAULT_FLIGHT_TRAJECTORY;
           return (
             <>
+              <div>
+                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400 font-semibold mb-1.5">Trajectory</div>
+                <div className="grid grid-cols-2 gap-2">
+                  <PickCard
+                    active={trajectory === 'elliptic'}
+                    label="Elliptic"
+                    description="Quarter-ellipse from bottom-left to upper-right — the default arc."
+                    onClick={() => update('flightTrajectory', 'elliptic')}
+                  />
+                  <PickCard
+                    active={trajectory === 'straight'}
+                    label="Straight"
+                    description="Takes off diagonally, then levels off and flies horizontally across the center."
+                    onClick={() => update('flightTrajectory', 'straight')}
+                  />
+                </div>
+              </div>
               <SliderField
                 label="Cruise point on arc"
                 min={0.50} max={0.95} step={0.01}
@@ -440,6 +553,7 @@ function EditorForm({
             onChange={(e) => update('backgroundMotion', {
               direction: theme.backgroundMotion?.direction ?? 'none',
               speed: e.target.value as 'slow' | 'medium' | 'fast',
+              tieToMultiplier: theme.backgroundMotion?.tieToMultiplier ?? false,
             })}
             className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control h-9 px-3 text-sm focus:outline-none focus:border-cyan-500/60"
           >
@@ -448,9 +562,28 @@ function EditorForm({
             <option value="fast">Fast</option>
           </select>
         </Field>
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={!!theme.backgroundMotion?.tieToMultiplier}
+            onChange={(e) => update('backgroundMotion', {
+              direction: theme.backgroundMotion?.direction ?? 'none',
+              speed: theme.backgroundMotion?.speed ?? 'medium',
+              tieToMultiplier: e.target.checked,
+            })}
+            className="w-4 h-4 accent-cyan-500"
+          />
+          <div className="leading-tight">
+            <div className="text-xs font-semibold text-slate-200">Tie speed to multiplier</div>
+            <div className="text-[10px] text-slate-500">
+              Background scrolls faster as the round grows. At 1× it moves at half base speed; at 5× it moves at 5× base.
+            </div>
+          </div>
+        </label>
       </Section>
+      </>}
 
-      {/* Header logo */}
+      {/* Header logo (applies to both game types) */}
       <Section title="Header logo">
         <AssetUpload
           label="Logo image"
@@ -588,6 +721,31 @@ function ColorField({ label, value, onChange }: { label: string; value: string; 
         />
       </div>
     </label>
+  );
+}
+
+function SegmentCard({
+  active, label, description, onClick,
+}: {
+  active: boolean;
+  label: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`text-left p-3 rounded-control border-2 transition ${
+        active
+          ? 'bg-cyan-500/15 border-cyan-500/70 ring-1 ring-cyan-500/40'
+          : 'bg-ink-800/40 border-ink-500/30 hover:border-ink-500/70 hover:bg-ink-800/70'
+      }`}
+    >
+      <div className={`text-sm font-display font-bold uppercase tracking-[0.18em] ${active ? 'text-cyan-300' : 'text-slate-200'}`}>
+        {label}
+      </div>
+      <div className="text-[10px] text-slate-500 mt-1 leading-tight">{description}</div>
+    </button>
   );
 }
 

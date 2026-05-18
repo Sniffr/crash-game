@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef } from 'react';
-import type { BackgroundMotion, FlightAnimation, Theme } from './theme';
-import { DEFAULT_FLIGHT_ANIMATION, speedPxPerSec, tierColor } from './theme';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { BackgroundMotion, FlightAnimation, FlightTrajectory, Theme } from './theme';
+import { DEFAULT_FLIGHT_ANIMATION, DEFAULT_FLIGHT_TRAJECTORY, effectiveBgSpeed, tierColor } from './theme';
 import { buildSprite, SPRITE_H, SPRITE_W } from './sprites';
 import { drawBackground, newBackgroundState } from './backgrounds';
 
@@ -45,6 +45,7 @@ export default function PreviewCanvas({ theme }: Props) {
   const crashIdxRef = useRef(0);
   const crashPointRef = useRef(CRASH_LOOP[0]);
   const liveMultiplierRef = useRef(1.0);
+  const bgScrollRef = useRef({ offset: 0, lastFrameMs: 0 });
 
   // Re-bake sprite when sprite key or color tokens change
   const sprite = useMemo(
@@ -131,11 +132,36 @@ export default function PreviewCanvas({ theme }: Props) {
           break;
       }
 
-      // Background — custom image if uploaded, otherwise procedural
+      // GIF mode: clear and only overlay multiplier text — the <img> sibling renders the GIF
+      if (theme.gameType === 'gif') {
+        ctx.clearRect(0, 0, W, H);
+        const m = liveMultiplierRef.current;
+        const tier = tierColor(theme, m);
+        if (phaseRef.current === 'BETTING') {
+          drawGifOverlayBetting(ctx, W, H, dpr, theme.bettingMs - phaseElapsed);
+        } else if (phaseRef.current === 'FLYING') {
+          drawGifOverlayFlying(ctx, W, H, dpr, m, tier);
+        } else {
+          drawGifOverlayCrashed(ctx, W, H, dpr, crashPointRef.current, theme.colors.crash);
+        }
+        animRef.current = requestAnimationFrame(tick);
+        return;
+      }
+
+      // Background — custom image if uploaded, otherwise procedural.
+      // Scroll offset is accumulated per-frame so changing speed (tied-to-multiplier)
+      // doesn't cause the image to jump.
       if (customBackground && customBackground.complete && customBackground.naturalWidth > 0) {
-        // Scroll only during FLYING so the betting/crash screens read cleanly
-        const motionTime = phaseRef.current === 'FLYING' ? phaseElapsed / 1000 : 0;
-        drawBackgroundImage(ctx, customBackground, W, H, theme.backgroundMotion, motionTime);
+        const last = bgScrollRef.current.lastFrameMs || now;
+        const dt = Math.min(0.1, (now - last) / 1000);
+        if (phaseRef.current === 'FLYING') {
+          const speed = effectiveBgSpeed(theme.backgroundMotion, liveMultiplierRef.current);
+          bgScrollRef.current.offset += dt * speed;
+        } else {
+          bgScrollRef.current.offset = 0;
+        }
+        bgScrollRef.current.lastFrameMs = now;
+        drawBackgroundImage(ctx, customBackground, W, H, theme.backgroundMotion, bgScrollRef.current.offset);
         ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
         ctx.fillRect(0, 0, W, H);
       } else {
@@ -173,7 +199,47 @@ export default function PreviewCanvas({ theme }: Props) {
     };
   }, [theme, sprite]);
 
-  return <canvas ref={canvasRef} className="w-full h-full block" />;
+  // In GIF mode we render the GIF as an <img> sibling underneath the canvas.
+  // We pick the gif based on the live phase/multiplier and let React re-mount
+  // the <img> on src change so the GIF restarts cleanly.
+  const [gifTick, setGifTick] = useState(0);
+  useEffect(() => {
+    if (theme.gameType !== 'gif') return;
+    const id = window.setInterval(() => setGifTick((t) => (t + 1) % 1_000_000), 120);
+    return () => window.clearInterval(id);
+  }, [theme.gameType]);
+  // re-read phase on each tick so the chosen GIF stays current
+  const gifSrc = (() => {
+    if (theme.gameType !== 'gif') return null;
+    void gifTick;
+    return pickGifPreview(theme, phaseRef.current, liveMultiplierRef.current);
+  })();
+
+  return (
+    <div className="relative w-full h-full">
+      {gifSrc && (
+        <img
+          key={gifSrc}
+          src={gifSrc}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      )}
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full block" />
+    </div>
+  );
+}
+
+function pickGifPreview(theme: Theme, phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT', multiplier: number): string | null {
+  const g = theme.gifs;
+  if (!g) return null;
+  if (phase === 'BETTING') return g.loading ?? null;
+  if (phase === 'FLYING') {
+    const thr = g.flyingThresholdAt ?? 2.0;
+    if (g.flyingThreshold && multiplier >= thr) return g.flyingThreshold;
+    return g.flying ?? null;
+  }
+  return g.crashed ?? g.flying ?? null;
 }
 
 // ─── Phase renderers ──────────────────────────────────────────────────────
@@ -225,17 +291,47 @@ function renderFlying(
   const graphW = W - padding * 2;
   const graphH = H - padding * 2;
 
-  // Elliptic flight path. At the configured "fully airborne" multiplier the
-  // sprite reaches the cruise point on the arc, then bobs back and forth.
+  // Flight path. At the configured "fully airborne" multiplier the sprite
+  // reaches the cruise point on its path (elliptic arc OR straight J-curve),
+  // then bobs back and forth.
   const anim: FlightAnimation = { ...DEFAULT_FLIGHT_ANIMATION, ...(theme.flightAnimation ?? {}) };
+  const trajectory: FlightTrajectory = theme.flightTrajectory ?? DEFAULT_FLIGHT_TRAJECTORY;
   const fullyFlyingAt = ellipticTargetMs(theme.spriteTransitionAt, theme.growthRate);
   const progress = computeFlightProgress(elapsedMs, fullyFlyingAt, anim);
-  const path = ellipticPositionAt(progress, padding, graphW, graphH, H);
+
+  // Cruise extension applies to BOTH trajectories. World scrolls in the
+  // cruise tangent direction so the trail keeps growing behind the sprite.
+  //   • straight  → horizontal extension (line extends behind to the left)
+  //   • elliptic  → mostly vertical extension (line extends back-and-down)
+  const CRUISE_SPEED_PX_PER_SEC = 110;
+  const inCruise = elapsedMs > fullyFlyingAt;
+  const extensionDist = inCruise ? ((elapsedMs - fullyFlyingAt) / 1000) * CRUISE_SPEED_PX_PER_SEC : 0;
+
+  const cruiseTangentAngle = flightTangentAt(trajectory, anim.cruisePoint, padding, graphW, graphH, H);
+  const tdx = Math.cos(cruiseTangentAngle);
+  const tdy = Math.sin(cruiseTangentAngle);
+  const scrollX = extensionDist * tdx;
+  const scrollY = extensionDist * tdy;
+
+  const path = flightPositionAt(trajectory, progress, padding, graphW, graphH, H);
   const N = 140;
   const points: { x: number; y: number }[] = [];
+  const trailMax = inCruise ? anim.cruisePoint : progress;
   for (let i = 0; i <= N; i++) {
     const frac = i / N;
-    points.push(ellipticPositionAt(frac * progress, padding, graphW, graphH, H));
+    const wp = flightPositionAt(trajectory, frac * trailMax, padding, graphW, graphH, H);
+    points.push({ x: wp.x - scrollX, y: wp.y - scrollY });
+  }
+  if (inCruise) {
+    const startExt = points[points.length - 1];
+    const extSamples = Math.min(60, Math.ceil(extensionDist / 14));
+    for (let i = 1; i <= extSamples; i++) {
+      const frac = i / extSamples;
+      points.push({
+        x: startExt.x + (path.x - startExt.x) * frac,
+        y: startExt.y + (path.y - startExt.y) * frac,
+      });
+    }
   }
 
   const color = tierColor(theme, m);
@@ -264,10 +360,16 @@ function renderFlying(
   ctx.stroke();
   ctx.restore();
 
-  // Sprite angle from the geometric tangent at the current progress —
-  // always points forward along the arc, so the plane visibly pitches up
-  // as it climbs toward the cruise point.
-  const angle = ellipticTangentAt(progress, padding, graphW, graphH, H);
+  // Sprite angle. During approach: tangent at bobbed progress (pitches up).
+  // During cruise: smoothly blend toward a level angle so the sprite stops
+  // wobbling — 0 for straight, cruise-point tangent for elliptic.
+  const approachAngle = flightTangentAt(trajectory, progress, padding, graphW, graphH, H);
+  let angle = approachAngle;
+  if (inCruise) {
+    const levelAngle = trajectory === 'straight' ? 0 : cruiseTangentAngle;
+    const blend = Math.min(1, (elapsedMs - fullyFlyingAt) / 1200);
+    angle = lerpAngle(approachAngle, levelAngle, blend);
+  }
 
   spawnFlame(particles, path.x, path.y, angle, m, dpr);
   drawFlame(ctx, particles, dpr);
@@ -443,37 +545,35 @@ function drawCoverImage(ctx: CanvasRenderingContext2D, img: HTMLImageElement, W:
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
 }
 
-/** Draw a (possibly scrolling) background image. Tiles in the motion direction so it loops seamlessly. */
+/** Background image with optional seamless tile-scroll. scrollPixels is the
+ *  accumulated pixel offset (integrated per-frame so variable speed doesn't jump). */
 function drawBackgroundImage(
   ctx: CanvasRenderingContext2D,
   img: HTMLImageElement, W: number, H: number,
   motion: BackgroundMotion | undefined,
-  timeSec: number,
+  scrollPixels: number,
 ) {
   const direction = motion?.direction ?? 'none';
-  if (direction === 'none' || timeSec === 0) {
+  if (direction === 'none' || scrollPixels === 0) {
     drawCoverImage(ctx, img, W, H);
     return;
   }
-  // For motion: render the image at canvas height, tile across the moving axis.
   const iw = img.naturalWidth;
   const ih = img.naturalHeight;
   if (!iw || !ih) return;
-  const speed = speedPxPerSec(motion?.speed ?? 'medium');
 
   if (direction === 'left' || direction === 'right') {
     const scale = H / ih;
     const w = iw * scale;
-    const offset = (timeSec * speed) % w;
+    const offset = scrollPixels % w;
     const dx = direction === 'left' ? -offset : -(w - offset);
     for (let x = dx; x < W; x += w) {
       ctx.drawImage(img, 0, 0, iw, ih, x, 0, w, H);
     }
   } else {
-    // up / down
     const scale = W / iw;
     const h = ih * scale;
-    const offset = (timeSec * speed) % h;
+    const offset = scrollPixels % h;
     const dy = direction === 'up' ? -offset : -(h - offset);
     for (let y = dy; y < H; y += h) {
       ctx.drawImage(img, 0, 0, iw, ih, 0, y, W, h);
@@ -560,6 +660,129 @@ function ellipticTangentAt(
   const tx = Math.cos(a) * (endX - startX);
   const ty = -Math.sin(a) * (startY - endY);
   return Math.atan2(ty, tx);
+}
+
+// ─── Flight trajectory dispatch + "straight" J-curve ─────────────────────────
+
+/** Shortest-arc lerp between two angles (handles ±π wraparound). */
+function lerpAngle(a: number, b: number, t: number): number {
+  const diff = ((b - a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+  return a + diff * t;
+}
+
+function flightPositionAt(
+  trajectory: FlightTrajectory, progress: number,
+  padding: number, graphW: number, graphH: number, H: number,
+): { x: number; y: number } {
+  return trajectory === 'straight'
+    ? straightPositionAt(progress, padding, graphW, H)
+    : ellipticPositionAt(progress, padding, graphW, graphH, H);
+}
+
+function flightTangentAt(
+  trajectory: FlightTrajectory, progress: number,
+  padding: number, graphW: number, graphH: number, H: number,
+): number {
+  return trajectory === 'straight'
+    ? straightTangentAt(progress, padding, graphW, H)
+    : ellipticTangentAt(progress, padding, graphW, graphH, H);
+}
+
+/**
+ * "Straight" — quadratic Bezier J-curve: takes off diagonally from bottom-left,
+ * smoothly levels off, then cruises horizontally across the vertical center.
+ */
+function straightPositionAt(
+  progress: number, padding: number, graphW: number, H: number,
+): { x: number; y: number } {
+  const t = Math.max(0, Math.min(1, progress));
+  const startX = padding, startY = H - padding;
+  const centerY = H * 0.5;
+  const ctrlX = startX + graphW * 0.35, ctrlY = centerY;
+  const endX = padding + graphW, endY = centerY;
+  const u = 1 - t;
+  return {
+    x: u * u * startX + 2 * u * t * ctrlX + t * t * endX,
+    y: u * u * startY + 2 * u * t * ctrlY + t * t * endY,
+  };
+}
+
+function straightTangentAt(
+  progress: number, padding: number, graphW: number, H: number,
+): number {
+  const t = Math.max(0, Math.min(1, progress));
+  const startX = padding, startY = H - padding;
+  const centerY = H * 0.5;
+  const ctrlX = startX + graphW * 0.35, ctrlY = centerY;
+  const endX = padding + graphW, endY = centerY;
+  const u = 1 - t;
+  const dx = 2 * u * (ctrlX - startX) + 2 * t * (endX - ctrlX);
+  const dy = 2 * u * (ctrlY - startY) + 2 * t * (endY - ctrlY);
+  return Math.atan2(dy, dx);
+}
+
+// ─── GIF-mode overlays (transparent canvas on top of <img>) ───────────────
+function drawGifOverlayBetting(
+  ctx: CanvasRenderingContext2D,
+  W: number, H: number, dpr: number,
+  remainingMs: number,
+) {
+  const seconds = Math.max(0, Math.ceil(remainingMs / 1000));
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0,0,0,0.85)';
+  ctx.shadowBlur = 18 * dpr;
+  ctx.font = `700 ${Math.min(140 * dpr, H * 0.22)}px "Space Grotesk", Inter, sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${seconds}`, W / 2, H * 0.78);
+  ctx.font = `600 ${Math.min(18 * dpr, H * 0.04)}px Inter, sans-serif`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText('PLACE YOUR BET', W / 2, H * 0.88);
+  ctx.restore();
+}
+
+function drawGifOverlayFlying(
+  ctx: CanvasRenderingContext2D,
+  W: number, H: number, dpr: number,
+  multiplier: number, tier: string,
+) {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const fontSize = Math.min(190 * dpr, H * 0.32);
+  ctx.font = `800 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+  ctx.shadowColor = 'rgba(0,0,0,0.9)';
+  ctx.shadowBlur = 26 * dpr;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${multiplier.toFixed(2)}x`, W / 2, H / 2);
+  ctx.shadowColor = tier;
+  ctx.shadowBlur = 40 * dpr;
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = tier;
+  ctx.fillText(`${multiplier.toFixed(2)}x`, W / 2, H / 2);
+  ctx.restore();
+}
+
+function drawGifOverlayCrashed(
+  ctx: CanvasRenderingContext2D,
+  W: number, H: number, dpr: number,
+  crashPoint: number, crashColor: string,
+) {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const fontSize = Math.min(190 * dpr, H * 0.32);
+  ctx.font = `800 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+  ctx.shadowColor = 'rgba(0,0,0,0.92)';
+  ctx.shadowBlur = 28 * dpr;
+  ctx.fillStyle = crashColor;
+  ctx.fillText(`${crashPoint.toFixed(2)}x`, W / 2, H / 2 - 24 * dpr);
+  ctx.font = `700 ${Math.min(34 * dpr, H * 0.07)}px "Space Grotesk", Inter, sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowBlur = 16 * dpr;
+  ctx.fillText('CRASHED', W / 2, H / 2 + Math.min(50 * dpr, H * 0.10));
+  ctx.restore();
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────

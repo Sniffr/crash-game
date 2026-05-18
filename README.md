@@ -8,14 +8,146 @@ A fully working, production-quality crash game set in deep space. A retro rocket
 
 ```bash
 cd crash-game
-npm install
-npm run dev          # launches Galaxy Crash (game) at http://localhost:5173
-npm run dev:creator  # launches the Crash Game Creator at http://localhost:5174
-npm run dev:all      # runs game + creator side by side
+npm install                       # also builds RocksDB native bindings (one-time, ~30s)
+npm run dev                       # launches Galaxy Crash (game) at http://localhost:5173
+npm run dev:creator               # launches the Crash Game Creator at http://localhost:5174
+npm run dev:all                   # runs game + creator side by side
 ```
 
-- **Game** → http://localhost:5173 — play Galaxy Crash.
+- **Game** → http://localhost:5173 — play Galaxy Crash. Sessions persist in embedded **RocksDB**.
 - **Creator** → http://localhost:5174 — visual studio for skinning the game.
+- **Session store** → embedded RocksDB at `./data/rocksdb/` (created on first run). Override with `ROCKSDB_PATH=/some/where npm run dev:server`.
+
+No external services needed — RocksDB runs in-process. Stop the server and your data is still on disk; restart and pick up where you left off.
+
+## Sessions
+
+Every player has a server-side session stored in Dragonfly with balance, stats, and a full bet/cashout audit log. The session id lives in the URL.
+
+- Visit `http://localhost:5173/` with no `?session=` → the server creates a fresh anonymous session, gives you a friendly display name (e.g. *Lucky Falcon*), starting balance, and rewrites the URL to `?session=<id>`.
+- Share that URL to "resume" the same session in another tab / browser / device.
+- Sessions expire after 24h of inactivity; bets and cashouts refresh the TTL.
+
+### Session API
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/session` | Create a new anonymous session. Body `{ displayName?, balance? }` optional. Returns `{ sessionId, displayName, balance, createdAt, expiresAt }`. |
+| `GET /api/sessions/:id` | Fetch session + stats `{ session, stats }`. |
+| `GET /api/sessions/:id/history?limit=50` | Full audit log: every bet, cashout, and crash this session saw. |
+| `GET /api/health` | Reports `storeOnline` so you can health-check Dragonfly via the API. |
+
+### What's tracked per session
+- **Balance** (atomic via `HINCRBYFLOAT`, quantized to 2 decimals)
+- **Stats**: bets, wins/losses, total wagered, total won, net profit, biggest cashout multiplier, biggest single win, current and best win streak
+- **History** (last 500 events): bet placed, cashed out, crashed — each entry has the round number, amount, and (for crashes) the revealed server seed for verification
+
+### Anti-spam / safety
+- **Rate limit**: max 40 bets per minute per session (in-memory token bucket; resets per-minute and on restart)
+- **Max stake**: `MAX_STAKE` in `packages/shared/src/config.ts` (default 1000)
+- **Server-side balance check**: bets that would overdraw are rejected
+- **Atomic balance**: per-session async lock chain serializes read-modify-write so concurrent updates never lose increments. RocksDB is single-process by design — only one Node instance can hold the lock at a time.
+
+## Shipping your game (Docker)
+
+The repo ships a production-ready Dockerfile that bundles the server, the
+built client, and the RocksDB binding into a single image. The Creator app
+is **not** included in the image — it stays a dev-time tool on your machine.
+Player-facing theme upload UI is **automatically hidden** in production
+(`import.meta.env.PROD`), so the only theme players can see is the one you
+serve from `config/active-theme.json`.
+
+### 1. Design your theme
+
+```bash
+npm run dev:creator                  # design at http://localhost:5174
+# click "Export theme" → saves <slug>-theme.json
+cp <slug>-theme.json config/active-theme.json
+```
+
+The file in `config/active-theme.json` is what players will see.
+
+### 2. Build the image
+
+```bash
+docker build -t galaxy-crash .
+```
+
+First build compiles the RocksDB native binding (~4 min on a typical
+machine). Subsequent builds are fast (~30 s) because the layers cache.
+
+### 3. Run it
+
+```bash
+docker run -d \
+  --name galaxy-crash \
+  -p 80:3001 \
+  -v $(pwd)/config:/app/config:ro \
+  -v galaxy-crash-data:/app/data \
+  galaxy-crash
+```
+
+- `-p 80:3001` — exposes the game at http://localhost (or your server's IP)
+- `-v $(pwd)/config:/app/config:ro` — mounts your theme as read-only; the
+  file watcher inside the container picks up live edits without restart
+- `-v galaxy-crash-data:/app/data` — named volume for the RocksDB session
+  store. Sessions, balances, and round history persist across restarts.
+
+### 4. Updating the theme live
+
+Edit `config/active-theme.json` on the host — the running container's
+file-watcher reloads it within ~250 ms and new players see the change on
+their next page load. No rebuild, no redeploy.
+
+If you need to apply it RIGHT NOW to existing players, just refresh their
+tab (the theme is fetched on every page load).
+
+### Hosting destinations
+
+The same image runs anywhere Docker does:
+
+| Platform | One-liner |
+|---|---|
+| **Fly.io** | `flyctl launch --image galaxy-crash` (then `flyctl volumes create galaxy-crash-data` and add the mount in `fly.toml`) |
+| **Railway** | Push the repo, point the service at the Dockerfile, attach a volume at `/app/data` |
+| **Render** | New Web Service → Docker → set health check to `/api/health` → attach a disk at `/app/data` |
+| **DigitalOcean / Hetzner VPS** | `docker run` from above, then put nginx + certbot in front for HTTPS |
+| **Cloud Run / Fargate** | Pre-built RocksDB native binaries deploy fine; mount EFS/Filestore for `/app/data` if you need persistence (or accept that sessions reset on container restart) |
+
+### Environment variables
+
+| Var | Default | Purpose |
+|---|---|---|
+| `PORT` | `3001` | Server listen port |
+| `HOST` | `0.0.0.0` | Bind address |
+| `ROCKSDB_PATH` | `/app/data/rocksdb` | Where to store the session DB |
+| `NODE_ENV` | `production` | Set by the Dockerfile, used by libs |
+
+### Production lockdown — what changes vs dev
+
+| | Dev (`npm run dev`) | Production (Docker image) |
+|---|---|---|
+| Theme controls in header (🎨 / ↻) | Visible | **Hidden** |
+| User upload writes to localStorage | Yes | **No** (gated by `import.meta.env.PROD`) |
+| Theme source | localStorage > server > default | Server only (no override possible) |
+| Creator app available | Yes (port 5174) | **Not in image** |
+| Hot reload | Yes | No |
+| RocksDB path | `./data/rocksdb` | `/app/data/rocksdb` (named volume) |
+
+### Inspecting the database
+
+RocksDB is a flat directory of SST files at `./data/rocksdb/`. To browse contents without a binary client, use the bundled inspector script:
+
+```bash
+node packages/server/scripts/dump.mjs                       # list all keys
+node packages/server/scripts/dump.mjs session:<id>          # one key
+```
+
+Or wipe and start fresh:
+
+```bash
+rm -rf data/rocksdb && npm run dev
+```
 
 ## Theming workflow
 

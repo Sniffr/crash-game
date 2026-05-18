@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
-import type { BackgroundMotion, FlightAnimation, Theme } from '../theme/types';
-import { DEFAULT_FLIGHT_ANIMATION, speedPxPerSec } from '../theme/types';
+import type { BackgroundMotion, FlightAnimation, FlightTrajectory, Theme } from '../theme/types';
+import { DEFAULT_FLIGHT_ANIMATION, DEFAULT_FLIGHT_TRAJECTORY, effectiveBgSpeed } from '../theme/types';
 
 interface GameCanvasProps {
   phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT';
@@ -204,6 +204,7 @@ export default function GameCanvas({
   const flameParticlesRef = useRef<Array<{ x: number; y: number; vx: number; vy: number; life: number; max: number; hue: number }>>([]);
   const orbitOffsetRef = useRef(0);
   const crashAnimRef = useRef<{ startTime: number; finalMultiplier: number } | null>(null);
+  const bgScrollRef = useRef({ offset: 0, lastFrameMs: 0 });
 
   const rocket = useMemo(() => buildRocketSprite(), []);
 
@@ -281,13 +282,32 @@ export default function GameCanvas({
       const tSec = Date.now() / 1000;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
 
+      // ── GIF mode: clear and overlay text only — the <img> renders the GIF
+      if (theme?.gameType === 'gif') {
+        ctx.clearRect(0, 0, W, H);
+        const tier = getMultiplierColor(currentMultiplier);
+        if (phase === 'BETTING') drawGifOverlayBetting(ctx, W, H, dpr, countdownMs);
+        else if (phase === 'FLYING') drawGifOverlayFlying(ctx, W, H, dpr, currentMultiplier, tier);
+        else drawGifOverlayCrashed(ctx, W, H, dpr, crashPoint ?? currentMultiplier, theme.colors.crash);
+        animFrameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
       const bgImg = spriteRefs.bg.current;
       if (bgImg && bgImg.complete && bgImg.naturalWidth > 0) {
-        // Motion only meaningful during FLYING — frozen elsewhere
-        const flightSeconds = (phase === 'FLYING' && flightStartTime)
-          ? Math.max(0, (Date.now() + serverClockOffsetMs - flightStartTime) / 1000)
-          : 0;
-        drawBackgroundImage(ctx, bgImg, W, H, theme?.backgroundMotion, flightSeconds);
+        // Accumulate scroll offset per-frame so changing speed (tied-to-multiplier)
+        // doesn't make the image jump. Reset to 0 when we're not in FLYING.
+        const now = Date.now();
+        const last = bgScrollRef.current.lastFrameMs || now;
+        const dt = Math.min(0.1, (now - last) / 1000); // cap dt at 100ms to avoid huge jumps after tab-switch
+        if (phase === 'FLYING') {
+          const speed = effectiveBgSpeed(theme?.backgroundMotion, currentMultiplier);
+          bgScrollRef.current.offset += dt * speed;
+        } else {
+          bgScrollRef.current.offset = 0;
+        }
+        bgScrollRef.current.lastFrameMs = now;
+        drawBackgroundImage(ctx, bgImg, W, H, theme?.backgroundMotion, bgScrollRef.current.offset);
         ctx.fillStyle = 'rgba(0, 0, 0, 0.30)';
         ctx.fillRect(0, 0, W, H);
       } else {
@@ -307,11 +327,12 @@ export default function GameCanvas({
       } else if (phase === 'FLYING') {
         const useSprite = currentMultiplier < transitionAt ? ground : flying;
         const anim: FlightAnimation = { ...DEFAULT_FLIGHT_ANIMATION, ...(theme?.flightAnimation ?? {}) };
+        const trajectory: FlightTrajectory = theme?.flightTrajectory ?? DEFAULT_FLIGHT_TRAJECTORY;
         renderFlying(
           ctx, W, H, dpr,
           flightStartTime, serverClockOffsetMs,
           currentMultiplier, crashPoint, getMultiplierColor,
-          flameParticlesRef, useSprite, transitionAt, anim,
+          flameParticlesRef, useSprite, transitionAt, anim, trajectory,
         );
       } else if (phase === 'CRASHED') {
         renderCrashed(ctx, W, H, dpr, crashAnimRef.current, crashed);
@@ -327,9 +348,40 @@ export default function GameCanvas({
       window.removeEventListener('resize', resize);
       cancelAnimationFrame(animFrameRef.current);
     };
-  }, [phase, flightStartTime, serverClockOffsetMs, currentMultiplier, crashPoint, hashCommit, countdownMs, getMultiplierColor, rocket]);
+  }, [phase, flightStartTime, serverClockOffsetMs, currentMultiplier, crashPoint, hashCommit, countdownMs, getMultiplierColor, rocket, theme]);
 
-  return <canvas ref={canvasRef} className="w-full h-full block" />;
+  // ─── GIF mode: full-screen animated GIF behind the canvas overlay ─────
+  const gifSrc = pickGif(theme, phase, currentMultiplier);
+
+  return (
+    <div className="relative w-full h-full">
+      {gifSrc && (
+        // key={src} forces a fresh <img> mount whenever the GIF changes,
+        // which restarts the animation from frame 0.
+        <img
+          key={gifSrc}
+          src={gifSrc}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      )}
+      <canvas ref={canvasRef} className="absolute inset-0 w-full h-full block" />
+    </div>
+  );
+}
+
+/** Choose which GIF (if any) to display in GIF mode for the current phase. */
+function pickGif(theme: Theme | undefined, phase: GameCanvasProps['phase'], multiplier: number): string | null {
+  if (!theme || theme.gameType !== 'gif' || !theme.gifs) return null;
+  const g = theme.gifs;
+  if (phase === 'BETTING') return g.loading ?? null;
+  if (phase === 'FLYING') {
+    const thr = g.flyingThresholdAt ?? 2.0;
+    if (g.flyingThreshold && multiplier >= thr) return g.flyingThreshold;
+    return g.flying ?? null;
+  }
+  // CRASHED + RESULT: show crashed gif if present, otherwise hold last flying frame
+  return g.crashed ?? g.flying ?? null;
 }
 
 // ─── Background: nebula + parallax stars + orbital arcs ──────────────────────
@@ -398,6 +450,79 @@ function drawGalaxyBackground(
   ctx.restore();
 }
 
+// ─── GIF-mode overlays (drawn on transparent canvas above the <img>) ────────
+function drawGifOverlayBetting(
+  ctx: CanvasRenderingContext2D,
+  W: number, H: number, dpr: number,
+  countdownMs: number | undefined,
+) {
+  const remaining = countdownMs ?? 5000;
+  const seconds = Math.max(0, Math.ceil(remaining / 1000));
+
+  // Big translucent number near bottom — readable on any GIF
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+  ctx.shadowBlur = 18 * dpr;
+  ctx.font = `700 ${Math.min(140 * dpr, H * 0.22)}px "Space Grotesk", Inter, sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${seconds}`, W / 2, H * 0.78);
+
+  ctx.font = `600 ${Math.min(18 * dpr, H * 0.04)}px Inter, sans-serif`;
+  ctx.fillStyle = 'rgba(255,255,255,0.85)';
+  ctx.fillText('PLACE YOUR BET', W / 2, H * 0.88);
+  ctx.restore();
+}
+
+function drawGifOverlayFlying(
+  ctx: CanvasRenderingContext2D,
+  W: number, H: number, dpr: number,
+  multiplier: number, tier: string,
+) {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const fontSize = Math.min(190 * dpr, H * 0.32);
+  ctx.font = `800 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+
+  // Heavy dark shadow first for legibility on bright GIFs
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
+  ctx.shadowBlur = 26 * dpr;
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(`${multiplier.toFixed(2)}x`, W / 2, H / 2);
+
+  // Tinted glow over the top
+  ctx.shadowColor = tier;
+  ctx.shadowBlur = 40 * dpr;
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = tier;
+  ctx.fillText(`${multiplier.toFixed(2)}x`, W / 2, H / 2);
+  ctx.restore();
+}
+
+function drawGifOverlayCrashed(
+  ctx: CanvasRenderingContext2D,
+  W: number, H: number, dpr: number,
+  crashPoint: number, crashColor: string,
+) {
+  ctx.save();
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const fontSize = Math.min(190 * dpr, H * 0.32);
+  ctx.font = `800 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.92)';
+  ctx.shadowBlur = 28 * dpr;
+  ctx.fillStyle = crashColor;
+  ctx.fillText(`${crashPoint.toFixed(2)}x`, W / 2, H / 2 - 24 * dpr);
+
+  ctx.font = `700 ${Math.min(34 * dpr, H * 0.07)}px "Space Grotesk", Inter, sans-serif`;
+  ctx.fillStyle = '#ffffff';
+  ctx.shadowBlur = 16 * dpr;
+  ctx.fillText('CRASHED', W / 2, H / 2 + Math.min(50 * dpr, H * 0.10));
+  ctx.restore();
+}
+
 // ─── Custom asset helpers ────────────────────────────────────────────────────
 
 /** Hook: maintain stable HTMLImageElement refs for a set of data URLs, recreating only when the URL changes. */
@@ -457,27 +582,30 @@ function drawCoverImage(ctx: CanvasRenderingContext2D, img: HTMLImageElement, W:
   ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
 }
 
-/** Draw the background image — when motion direction is set, tiles seamlessly in that direction. */
+/**
+ * Draw the background image, tiling seamlessly in the motion direction.
+ * `scrollPixels` is the accumulated pixel offset (integrated per-frame so
+ * tying speed to the multiplier doesn't make the image jump).
+ */
 function drawBackgroundImage(
   ctx: CanvasRenderingContext2D,
   img: HTMLImageElement, W: number, H: number,
   motion: BackgroundMotion | undefined,
-  timeSec: number,
+  scrollPixels: number,
 ) {
   const direction = motion?.direction ?? 'none';
-  if (direction === 'none' || timeSec === 0) {
+  if (direction === 'none' || scrollPixels === 0) {
     drawCoverImage(ctx, img, W, H);
     return;
   }
   const iw = img.naturalWidth;
   const ih = img.naturalHeight;
   if (!iw || !ih) return;
-  const speed = speedPxPerSec(motion?.speed ?? 'medium');
 
   if (direction === 'left' || direction === 'right') {
     const scale = H / ih;
     const w = iw * scale;
-    const offset = (timeSec * speed) % w;
+    const offset = scrollPixels % w;
     const dx = direction === 'left' ? -offset : -(w - offset);
     for (let x = dx; x < W; x += w) {
       ctx.drawImage(img, 0, 0, iw, ih, x, 0, w, H);
@@ -485,7 +613,7 @@ function drawBackgroundImage(
   } else {
     const scale = W / iw;
     const h = ih * scale;
-    const offset = (timeSec * speed) % h;
+    const offset = scrollPixels % h;
     const dy = direction === 'up' ? -offset : -(h - offset);
     for (let y = dy; y < H; y += h) {
       ctx.drawImage(img, 0, 0, iw, ih, 0, y, W, h);
@@ -550,6 +678,32 @@ function computeFlightProgress(elapsedMs: number, targetMs: number, anim: Flight
   return Math.max(0.02, Math.min(0.98, bobbed));
 }
 
+// ─── Flight trajectory dispatch ──────────────────────────────────────────────
+
+/** Lerp two angles handling the ±π wraparound (shortest-arc interpolation). */
+function lerpAngle(a: number, b: number, t: number): number {
+  const diff = ((b - a + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
+  return a + diff * t;
+}
+
+function flightPositionAt(
+  trajectory: FlightTrajectory, progress: number,
+  padding: number, graphW: number, graphH: number, H: number,
+): { x: number; y: number } {
+  return trajectory === 'straight'
+    ? straightPositionAt(progress, padding, graphW, H)
+    : ellipticPositionAt(progress, padding, graphW, graphH, H);
+}
+
+function flightTangentAt(
+  trajectory: FlightTrajectory, progress: number,
+  padding: number, graphW: number, graphH: number, H: number,
+): number {
+  return trajectory === 'straight'
+    ? straightTangentAt(progress, padding, graphW, H)
+    : ellipticTangentAt(progress, padding, graphW, graphH, H);
+}
+
 /** Position on the quarter ellipse at parametric progress in [0, 1]. */
 function ellipticPositionAt(
   progress: number,
@@ -566,12 +720,7 @@ function ellipticPositionAt(
   };
 }
 
-/**
- * Geometric tangent angle of the quarter ellipse at the given progress —
- * always points forward along the arc, so the sprite tilts smoothly from
- * horizontal at takeoff to near-vertical near the top, even when the
- * sprite is bobbing backward.
- */
+/** Geometric tangent of the quarter ellipse — always forward-pointing. */
 function ellipticTangentAt(
   progress: number,
   padding: number, graphW: number, graphH: number, H: number,
@@ -582,8 +731,50 @@ function ellipticTangentAt(
   const endY = H - padding - graphH;
   const a = Math.max(0, Math.min(1, progress)) * (Math.PI / 2);
   const tx = Math.cos(a) * (endX - startX);
-  const ty = -Math.sin(a) * (startY - endY); // negative because canvas y grows downward
+  const ty = -Math.sin(a) * (startY - endY); // canvas y grows downward
   return Math.atan2(ty, tx);
+}
+
+/**
+ * "Straight" trajectory — quadratic Bezier J-curve.
+ *
+ *   start  = (padding, H - padding)        ← parked at bottom-left
+ *   ctrl   = (padding + 0.35·graphW, H/2)  ← elbow at vertical center
+ *   end    = (padding + graphW,      H/2)  ← cruising at vertical center
+ *
+ * Takes off diagonally, then smoothly levels off to fly horizontally across
+ * the vertical center. Sprite flies straight, not up, once past the takeoff.
+ */
+function straightPositionAt(
+  progress: number,
+  padding: number, graphW: number, H: number,
+): { x: number; y: number } {
+  const t = Math.max(0, Math.min(1, progress));
+  const startX = padding, startY = H - padding;
+  const centerY = H * 0.5;
+  const ctrlX = startX + graphW * 0.35, ctrlY = centerY;
+  const endX = padding + graphW, endY = centerY;
+  const u = 1 - t;
+  return {
+    x: u * u * startX + 2 * u * t * ctrlX + t * t * endX,
+    y: u * u * startY + 2 * u * t * ctrlY + t * t * endY,
+  };
+}
+
+function straightTangentAt(
+  progress: number,
+  padding: number, graphW: number, H: number,
+): number {
+  const t = Math.max(0, Math.min(1, progress));
+  const startX = padding, startY = H - padding;
+  const centerY = H * 0.5;
+  const ctrlX = startX + graphW * 0.35, ctrlY = centerY;
+  const endX = padding + graphW, endY = centerY;
+  const u = 1 - t;
+  // B'(t) = 2(1-t)(P1-P0) + 2t(P2-P1)
+  const dx = 2 * u * (ctrlX - startX) + 2 * t * (endX - ctrlX);
+  const dy = 2 * u * (ctrlY - startY) + 2 * t * (endY - ctrlY);
+  return Math.atan2(dy, dx);
 }
 
 // ─── Phase: BETTING ──────────────────────────────────────────────────────────
@@ -651,6 +842,7 @@ function renderFlying(
   rocket: HTMLCanvasElement | HTMLImageElement | null,
   transitionAt: number,
   anim: FlightAnimation,
+  trajectory: FlightTrajectory,
 ) {
   let elapsedMs = 0;
   let m: number;
@@ -671,19 +863,53 @@ function renderFlying(
   const graphH = H - padding * 2;
 
   // At the configured "fully airborne" multiplier, the sprite reaches its
-  // cruise point on the elliptic arc, then bobs back and forth per the
-  // theme's flight animation settings.
+  // cruise point, then bobs back and forth per the theme's flight animation
+  // settings.
   const fullyFlyingAt = ellipticTargetMs(transitionAt);
   const progress = computeFlightProgress(elapsedMs, fullyFlyingAt, anim);
-  const path = ellipticPositionAt(progress, padding, graphW, graphH, H);
 
-  // Trail traces a clean arc from 0 → current progress so the line doesn't
-  // jitter from the bobbing oscillation.
+  // ─── Cruise extension (both trajectories) ──────────────────────────────
+  // Once the plane has settled into cruise, scroll the world in the cruise
+  // tangent direction so the trail keeps growing behind the sprite — gives
+  // the visual sense that the plane is actually moving forward, not just
+  // bobbing in place. Direction:
+  //   • straight  → mostly horizontal (tangent ≈ right)
+  //   • elliptic  → mostly vertical   (tangent ≈ steep up)
+  const CRUISE_SPEED_PX_PER_SEC = 110;
+  const inCruise = elapsedMs > fullyFlyingAt;
+  const extensionDist = inCruise
+    ? ((elapsedMs - fullyFlyingAt) / 1000) * CRUISE_SPEED_PX_PER_SEC
+    : 0;
+
+  // Cruise direction (unit vector along the cruise tangent at the cruise point)
+  const cruiseTangentAngle = flightTangentAt(trajectory, anim.cruisePoint, padding, graphW, graphH, H);
+  const tdx = Math.cos(cruiseTangentAngle);
+  const tdy = Math.sin(cruiseTangentAngle);
+  const scrollX = extensionDist * tdx;
+  const scrollY = extensionDist * tdy;
+
+  const path = flightPositionAt(trajectory, progress, padding, graphW, graphH, H);
+
+  // Trail: shift approach curve by -(scroll), then splice in an extension
+  // segment from the displaced approach endpoint to the sprite.
   const N = 160;
   const points: { x: number; y: number }[] = [];
+  const trailMax = inCruise ? anim.cruisePoint : progress;
   for (let i = 0; i <= N; i++) {
     const frac = i / N;
-    points.push(ellipticPositionAt(frac * progress, padding, graphW, graphH, H));
+    const wp = flightPositionAt(trajectory, frac * trailMax, padding, graphW, graphH, H);
+    points.push({ x: wp.x - scrollX, y: wp.y - scrollY });
+  }
+  if (inCruise) {
+    const startExt = points[points.length - 1];
+    const extSamples = Math.min(60, Math.ceil(extensionDist / 14));
+    for (let i = 1; i <= extSamples; i++) {
+      const frac = i / extSamples;
+      points.push({
+        x: startExt.x + (path.x - startExt.x) * frac,
+        y: startExt.y + (path.y - startExt.y) * frac,
+      });
+    }
   }
 
   const tierColor = color(display);
@@ -728,10 +954,17 @@ function renderFlying(
   ctx.stroke();
   ctx.restore();
 
-  // Sprite angle from the geometric tangent at the current progress —
-  // always points forward along the curve, so the sprite tilts steeply
-  // upward as it nears the top of the arc (no longer locked horizontal).
-  const angle = ellipticTangentAt(progress, padding, graphW, graphH, H);
+  // Sprite angle. During approach: tangent at the (bobbed) progress so the
+  // plane visibly pitches up as it climbs. Once in cruise: smoothly blend
+  // toward a "level" angle so the sprite stops wobbling — exactly 0
+  // (horizontal) for straight, the cruise-point tangent for elliptic.
+  const approachAngle = flightTangentAt(trajectory, progress, padding, graphW, graphH, H);
+  let angle = approachAngle;
+  if (inCruise) {
+    const levelAngle = trajectory === 'straight' ? 0 : cruiseTangentAngle;
+    const blend = Math.min(1, (elapsedMs - fullyFlyingAt) / 1200);
+    angle = lerpAngle(approachAngle, levelAngle, blend);
+  }
 
   spawnFlameParticles(particleRef.current, path.x, path.y, angle, display, dpr);
   drawFlameParticles(ctx, particleRef.current, dpr);

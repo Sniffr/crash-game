@@ -31,12 +31,22 @@ export type BgSpeed = 'slow' | 'medium' | 'fast';
 export interface BackgroundMotion {
   direction: BgDirection;
   speed: BgSpeed;
+  /** Scale scroll speed by the current multiplier (clamped to [0.5, 10]). */
+  tieToMultiplier?: boolean;
 }
 
-export const DEFAULT_BG_MOTION: BackgroundMotion = { direction: 'none', speed: 'medium' };
+export const DEFAULT_BG_MOTION: BackgroundMotion = { direction: 'none', speed: 'medium', tieToMultiplier: false };
 
 export function speedPxPerSec(speed: BgSpeed): number {
   return speed === 'slow' ? 30 : speed === 'fast' ? 140 : 70;
+}
+
+/** Effective scroll speed in pixels per second given motion + current multiplier. */
+export function effectiveBgSpeed(motion: BackgroundMotion | undefined, multiplier: number): number {
+  if (!motion) return 0;
+  const base = speedPxPerSec(motion.speed);
+  if (!motion.tieToMultiplier) return base;
+  return base * Math.max(0.5, Math.min(10, multiplier));
 }
 
 export interface FlightAnimation {
@@ -50,6 +60,23 @@ export const DEFAULT_FLIGHT_ANIMATION: FlightAnimation = {
   bobAmplitude: 0.08,
   bobPeriodMs:  1500,
 };
+
+/** Shape of the flight path the sprite traces. */
+export type FlightTrajectory = 'elliptic' | 'straight';
+export const DEFAULT_FLIGHT_TRAJECTORY: FlightTrajectory = 'elliptic';
+
+/** Two crash-game rendering modes: procedural sprite-on-curve, or full-screen GIFs. */
+export type GameType = 'sprite' | 'gif';
+
+export interface ThemeGifs {
+  loading?: string | null;
+  flying?: string | null;
+  flyingThreshold?: string | null;
+  flyingThresholdAt?: number;
+  crashed?: string | null;
+}
+
+export const DEFAULT_GIF_THRESHOLD_AT = 2.0;
 
 export interface ThemeSounds {
   takeoff?: string | null;
@@ -78,6 +105,10 @@ export interface Theme {
   spriteTransitionAt?: number;
   /** Flight animation tuning. */
   flightAnimation?: FlightAnimation;
+  /** Shape of the flight path: 'elliptic' (default) or 'straight'. */
+  flightTrajectory?: FlightTrajectory;
+  gameType?: GameType;
+  gifs?: ThemeGifs;
 }
 
 export const THEME_VERSION = 1;
