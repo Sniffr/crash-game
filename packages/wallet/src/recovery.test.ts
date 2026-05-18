@@ -8,7 +8,7 @@
  * beforeEach, fresh BetLog+OperatorRegistry per test.
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import type { Server } from 'node:http';
 import {
@@ -20,8 +20,6 @@ import {
   BetLog,
   OperatorRegistry,
   WalletClient,
-  WalletError,
-  WalletNetworkError,
   type BetRow,
 } from './index.js';
 import type { Operator } from './types.js';
@@ -77,12 +75,16 @@ function makeFastClientFactory() {
 
 beforeEach(() => {
   resetStubState();
-  const db = new Database(':memory:');
-  betLog = new BetLog(db);
-  registry = new OperatorRegistry(db);
 
-  // Register the stub operator with the stub's known signing key
+  // Build registry with the stub's known signing key so HMAC verification passes
+  const db = new Database(':memory:');
   operatorId = 'op-test';
+  betLog = new BetLog(db);
+  let _akSeq = 0;
+  registry = new OperatorRegistry(db, {
+    generateSigningKey: () => SIGNING_KEY,
+    generateApiKey: () => `ak-test-${Date.now()}-${++_akSeq}`,
+  });
   const { operator: op } = registry.create({
     operatorId,
     name: 'Test Operator',
@@ -91,29 +93,7 @@ beforeEach(() => {
     currencies: ['EUR', 'USD'],
     status: 'active',
   });
-
-  // Override the signing key to match the stub's default key
-  // (registry.create generates a random key; we patch it directly via update)
-  // We must re-insert with the known key — simplest: use a custom generateSigningKey
-  // Actually, the registry doesn't expose a patch for signing key via update().
-  // Instead, use regenSigningKey path indirectly — but that generates a new random key too.
-  // Best approach: create registry with a fixed generateSigningKey hook.
-  // Rebuild with fixed key:
-  const db2 = new Database(':memory:');
-  betLog = new BetLog(db2);
-  registry = new OperatorRegistry(db2, {
-    generateSigningKey: () => SIGNING_KEY,
-    generateApiKey: () => operatorId,
-  });
-  const { operator: op2 } = registry.create({
-    operatorId,
-    name: 'Test Operator',
-    walletBaseUrl: `http://localhost:${port}`,
-    adapter: 'native',
-    currencies: ['EUR', 'USD'],
-    status: 'active',
-  });
-  operator = op2;
+  operator = op;
 
   deps = {
     betLog,
@@ -480,4 +460,79 @@ it('idempotent re-run after resolution yields all-zero counts', async () => {
   expect(report2.pending).toEqual({ found: 0, resolved: 0, failed: 0, skipped: 0 });
   expect(report2.rollbackPending).toEqual({ found: 0, resolved: 0, failed: 0, skipped: 0 });
   expect(report2.settling).toEqual({ found: 0, resolved: 0, failed: 0, skipped: 0 });
+});
+
+// ---------------------------------------------------------------------------
+// Test 8: throwing clientFactory → one row fails, sweep continues, no throw
+// Proves the per-row invariant: a synchronous throw from a custom clientFactory
+// is contained to that row only and does not abort the sweep.
+// ---------------------------------------------------------------------------
+
+it('throwing clientFactory on row 1 leaves sweep running for row 2 (invariant)', async () => {
+  // Register a second operator (same stub URL, same key) for the second row
+  const operatorId2 = 'op-test-2';
+  registry.create({
+    operatorId: operatorId2,
+    name: 'Test Operator 2',
+    walletBaseUrl: `http://localhost:${port}`,
+    adapter: 'native',
+    currencies: ['EUR', 'USD'],
+    status: 'active',
+  });
+
+  const betId1 = uid('bet');
+  const betTxnId1 = uid('btxn');
+  const betId2 = uid('bet');
+  const betTxnId2 = uid('btxn');
+
+  // Seed two ROLLBACK_PENDING rows for two different operators
+  betLog.create({
+    betId: betId1,
+    operatorId,       // op-test → factory throws on first call
+    playerId: 'pid-1',
+    sessionId: 'sess-pid-1',
+    roundId: uid('round'),
+    currency: 'EUR',
+    amountMinor: 10_000,
+    betTxnId: betTxnId1,
+  });
+  betLog.transition(betId1, 'rollback_started', { errorCode: 'recovery_pending_at_startup' });
+
+  betLog.create({
+    betId: betId2,
+    operatorId: operatorId2, // op-test-2 → factory succeeds on second call
+    playerId: 'pid-2',
+    sessionId: 'sess-pid-2',
+    roundId: uid('round'),
+    currency: 'EUR',
+    amountMinor: 10_000,
+    betTxnId: betTxnId2,
+  });
+  betLog.transition(betId2, 'rollback_started', { errorCode: 'recovery_pending_at_startup' });
+
+  // clientFactory that throws synchronously the first time, works thereafter
+  let callCount = 0;
+  const throwingOnceFactory = (op: Operator) => {
+    callCount++;
+    if (callCount === 1) {
+      throw new Error('simulated-factory-failure-on-first-call');
+    }
+    return new WalletClient(op, { sleep: makeNoop() });
+  };
+
+  // runRecovery must NOT throw — call it directly and let the test fail if it does
+  const report = await runRecovery({
+    ...deps,
+    clientFactory: throwingOnceFactory,
+  });
+
+  // Row 1: still ROLLBACK_PENDING (factory threw → counted as failed)
+  expect(betLog.getById(betId1)?.state).toBe('ROLLBACK_PENDING');
+
+  // Row 2: reached VOIDED (sweep continued past the failure)
+  expect(betLog.getById(betId2)?.state).toBe('VOIDED');
+
+  // Report: rollbackPending.failed=1, rollbackPending.resolved=1
+  expect(report!.rollbackPending.failed).toBe(1);
+  expect(report!.rollbackPending.resolved).toBe(1);
 });

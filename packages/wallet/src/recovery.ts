@@ -113,29 +113,26 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
   // ---------------------------------------------------------------------------
 
   const rollbackPendingRows = betLog.listByState('ROLLBACK_PENDING', maxPerState);
-  report.rollbackPending.found = rollbackPendingRows.length - pendingOriginatedBetIds.size;
-  // We'll increment rollbackPending.found properly below for non-pending-originated rows.
-  // Reset and recount:
   report.rollbackPending.found = rollbackPendingRows.length;
 
   for (const row of rollbackPendingRows) {
     const isPendingOriginated = pendingOriginatedBetIds.has(row.betId);
     const bucket = isPendingOriginated ? report.pending : report.rollbackPending;
 
-    const client = getClient(row.operatorId);
-    if (!client) {
-      log('[recovery] operator not found for ROLLBACK_PENDING row', {
-        betId: row.betId,
-        operatorId: row.operatorId,
-      });
-      bucket.skipped++;
-      continue;
-    }
-
     // Deterministic rollback txnId: use existing or derive from betTxnId (spec §9)
     const rollbackTxnId = row.rollbackTxnId ?? `rb-${row.betTxnId}`;
 
     try {
+      const client = getClient(row.operatorId);
+      if (!client) {
+        log('[recovery] operator not found for ROLLBACK_PENDING row', {
+          betId: row.betId,
+          operatorId: row.operatorId,
+        });
+        bucket.skipped++;
+        continue;
+      }
+
       await client.rollback({
         playerId: row.playerId,
         betTxnId: row.betTxnId,
@@ -184,17 +181,17 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
       continue;
     }
 
-    const client = getClient(row.operatorId);
-    if (!client) {
-      log('[recovery] operator not found for SETTLING row', {
-        betId: row.betId,
-        operatorId: row.operatorId,
-      });
-      report.settling.skipped++;
-      continue;
-    }
-
     try {
+      const client = getClient(row.operatorId);
+      if (!client) {
+        log('[recovery] operator not found for SETTLING row', {
+          betId: row.betId,
+          operatorId: row.operatorId,
+        });
+        report.settling.skipped++;
+        continue;
+      }
+
       const resp = await client.win({
         playerId: row.playerId,
         sessionId: row.sessionId,
