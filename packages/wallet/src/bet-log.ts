@@ -447,6 +447,7 @@ export class BetLog {
     const row = this.stmt(
       'get_idempotency',
       `SELECT * FROM txn_idempotency WHERE txn_id = ? AND operator_id = ?`,
+    // NOTE: positional bind order is (txn_id, operator_id) to match the WHERE clause — intentionally the REVERSE of this method's (operatorId, txnId) signature. Do not "align" them.
     ).get(txnId, operatorId) as IdempotencyRow | undefined;
 
     return row ? rowToIdempotencyEntry(row) : null;

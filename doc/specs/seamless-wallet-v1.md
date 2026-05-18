@@ -254,6 +254,23 @@ The Game POSTs this after every round closes. Operators MAY use it for analytics
 
 Operators authenticate to these with the same `X-API-Key` + signature scheme (§4.2), with the roles swapped (operator signs with their key; Game verifies).
 
+### 6.0 Authentication errors
+
+Operator→Game requests are authenticated by the same §4.2 HMAC scheme with roles swapped: the operator signs with its `signingKey` and the Game verifies. On any failure the Game responds with the §7 error envelope `{ "error": { "code": "...", "message": "..." } }` at the documented HTTP status; the request is not processed.
+
+| HTTP | `code` | When |
+|---|---|---|
+| 401 | `INVALID_REQUEST` | Missing or malformed required signing header (`X-API-Key` / `X-Timestamp` / `X-Nonce` / `X-Signature`), or a header delivered as a non-string (e.g. duplicate header). |
+| 401 | `INVALID_SIGNATURE` | Unknown `X-API-Key`, or HMAC signature does not match the reconstructed signing string (including body-bytes mismatch). |
+| 401 | `STALE_REQUEST` | `X-Timestamp` is not a canonical unsigned-integer seconds string, or the skew \|now − ts\| exceeds the allowed window (default 300 s). |
+| 401 | `NONCE_REUSED` | `X-Nonce` was already seen for this operator within the cache TTL (default 10 min); replay rejected. |
+| 403 | `OPERATOR_PAUSED` | The operator account exists but is paused; calls are refused until resumed. |
+| 500 | `INTERNAL` | Unexpected server error during verification. |
+
+**Security note:** the nonce-replay check runs strictly *after* signature verification passes. A request with an invalid or forged signature never consumes a nonce, so an attacker cannot poison a legitimate operator's nonce cache.
+
+See §4.2 for the canonical signing string construction and §7 for the error envelope shape.
+
 ### 6.1 `GET /v1/health`
 
 ```json
