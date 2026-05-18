@@ -471,4 +471,101 @@ describe('verifyOperatorSignature', () => {
       sandboxOp.operatorId,
     );
   });
+
+  // ─── Test 11: rawBody absent → fail closed ───────────────────────────────
+
+  it('rawBody absent: falls back to empty body hash → 401 INVALID_SIGNATURE, next not called', async () => {
+    const { sharedNonceCache } = freshSetup();
+
+    // Build a correctly-signed request (with a real body)
+    const req = buildSignedReq({
+      apiKey: operatorApiKey,
+      signingKey: operatorSigningKey,
+      body: Buffer.from(JSON.stringify({ playerId: 'pid-1' })),
+    });
+
+    // Remove rawBody so the default extractor falls back to Buffer.alloc(0)
+    delete (req as Record<string, unknown>)['rawBody'];
+
+    const { res, nextCalled } = await runMiddleware(req, {
+      nowSeconds: () => FIXED_NOW_SECONDS,
+      nonceCache: sharedNonceCache,
+    });
+
+    // The empty-body hash ≠ the signed body hash → verify fails → fail closed
+    expect(nextCalled).toBe(false);
+    expect(res.statusCode).toBe(401);
+    expect((res.jsonBody as { error: { code: string } }).error.code).toBe('INVALID_SIGNATURE');
+  });
+
+  // ─── Test 12: array-typed header → INVALID_REQUEST ──────────────────────
+
+  it('array-typed header (x-signature is string[]): 401 INVALID_REQUEST, next not called', async () => {
+    const { sharedNonceCache } = freshSetup();
+
+    const req = buildSignedReq({
+      apiKey: operatorApiKey,
+      signingKey: operatorSigningKey,
+    });
+
+    // Express delivers duplicated headers as string[]; simulate that
+    (req.headers as Record<string, unknown>)['x-signature'] = ['a', 'b'];
+
+    const { res, nextCalled } = await runMiddleware(req, {
+      nowSeconds: () => FIXED_NOW_SECONDS,
+      nonceCache: sharedNonceCache,
+    });
+
+    expect(nextCalled).toBe(false);
+    expect(res.statusCode).toBe(401);
+    expect((res.jsonBody as { error: { code: string } }).error.code).toBe('INVALID_REQUEST');
+  });
+
+  // ─── Test 13: getSignedPath option is honored ────────────────────────────
+
+  it('getSignedPath: injected extractor is used; default req.path fails the same request', async () => {
+    const { sharedNonceCache } = freshSetup();
+
+    // Operator signs for the FULL external path /op/balance
+    const fullPath = '/op/balance';
+    const routerRelativePath = '/balance';
+    const originalUrl = '/op/balance?x=1';
+
+    // Build signed req: signed over fullPath but req.path is router-relative
+    const signedForFullPath = buildSignedReq({
+      apiKey: operatorApiKey,
+      signingKey: operatorSigningKey,
+      path: fullPath, // sign over the full path
+      nonce: 'nonce-getSignedPath-test',
+    });
+
+    // Simulate sub-Router: req.path is router-relative, but originalUrl has the full path
+    (signedForFullPath as Record<string, unknown>)['path'] = routerRelativePath;
+    (signedForFullPath as Record<string, unknown>)['originalUrl'] = originalUrl;
+
+    // Without getSignedPath option: uses req.path ('/balance') → mismatch → 401
+    const nonceCacheA = new NonceCache({ clock: () => FIXED_NOW_SECONDS * 1000 });
+    const { res: resDefault, nextCalled: nextDefault } = await runMiddleware(signedForFullPath, {
+      nowSeconds: () => FIXED_NOW_SECONDS,
+      nonceCache: nonceCacheA,
+    });
+
+    expect(nextDefault).toBe(false);
+    expect(resDefault.statusCode).toBe(401);
+    expect((resDefault.jsonBody as { error: { code: string } }).error.code).toBe('INVALID_SIGNATURE');
+
+    // With getSignedPath option: reconstructs full path from originalUrl → matches → success
+    const nonceCacheB = new NonceCache({ clock: () => FIXED_NOW_SECONDS * 1000 });
+    const { res: resFixed, nextCalled: nextFixed } = await runMiddleware(signedForFullPath, {
+      nowSeconds: () => FIXED_NOW_SECONDS,
+      nonceCache: nonceCacheB,
+      getSignedPath: (r) => (r as unknown as { originalUrl: string }).originalUrl.split('?')[0],
+    });
+
+    expect(nextFixed).toBe(true);
+    expect(resFixed.statusCode).toBe(200);
+    expect((signedForFullPath as unknown as OperatorAuthedRequest).operator.operatorId).toBe(
+      operator.operatorId,
+    );
+  });
 });

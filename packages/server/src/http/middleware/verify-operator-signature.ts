@@ -1,4 +1,10 @@
-// TODO(Phase 3/6): mount on /launch and /op/* once those routes exist; index.ts will also need express.json({verify}) to expose req.rawBody.
+// TODO(Phase 3/6): mount on /launch (Phase 3) and /op/* (Phase 6).
+//   (1) index.ts must add express.json({ verify: (req,_res,buf)=>{ (req as any).rawBody = buf } })
+//       so the raw body bytes are available for the signing string; without it,
+//       any request WITH a body fails closed (401), never silently accepted.
+//   (2) If mounted on a sub-Router (not the root app), req.path is router-relative
+//       and will NOT match the operator-signed full path. Pass
+//       getSignedPath: (req) => req.originalUrl.split('?')[0] at wiring time.
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { verify, NonceCache } from '@crash/wallet';
@@ -26,6 +32,16 @@ export interface VerifyOperatorSignatureOptions {
    * If absent, treats the body as empty Buffer (correct for genuine no-body GETs).
    */
   getRawBody?: (req: Request) => Buffer;
+  /**
+   * Extracts the exact path string the operator signed (spec §4.2 signing
+   * string uses PATH, query excluded). Default: req.path.
+   * IMPORTANT: when this middleware is mounted on a sub-Router, req.path is
+   * router-relative and will NOT equal the full external path the operator
+   * signed. In that case the wiring code MUST pass
+   * getSignedPath: (req) => req.originalUrl.split('?')[0]
+   * (or otherwise reconstruct the full external path, query stripped).
+   */
+  getSignedPath?: (req: Request) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -70,6 +86,7 @@ export function verifyOperatorSignature(
   const nowSeconds = opts?.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
   const nonceCache = opts?.nonceCache ?? new NonceCache();
   const getRawBody = opts?.getRawBody ?? defaultGetRawBody;
+  const getSignedPath = opts?.getSignedPath ?? ((req: Request) => req.path);
 
   return function verifyOperatorSignatureMiddleware(
     req: Request,
@@ -107,7 +124,8 @@ export function verifyOperatorSignature(
       }
 
       // Step 4: Validate timestamp and skew.
-      const ts = parseInt(timestampRaw, 10);
+      // Canonical unsigned-integer seconds only (reject "1.5", "+1", "01").
+      const ts = /^\d+$/.test(timestampRaw) ? Number(timestampRaw) : NaN;
       if (!Number.isInteger(ts) || Math.abs(nowSeconds() - ts) > maxSkewSeconds) {
         sendError(res, 401, 'STALE_REQUEST', 'request timestamp is outside the allowed skew window');
         return;
@@ -120,7 +138,7 @@ export function verifyOperatorSignature(
       const signatureOk = verify(
         {
           method: req.method,
-          path: req.path,
+          path: getSignedPath(req),
           timestamp: ts,
           nonce,
           body: rawBody,
@@ -144,8 +162,13 @@ export function verifyOperatorSignature(
       // Step 8: Success — attach operator to request and proceed.
       (req as OperatorAuthedRequest).operator = operator;
       next();
+      return;
     } catch (err) {
       // Unexpected errors (should not happen in normal flow) → 500.
+      if (res.headersSent) {
+        console.error('[verify-operator-signature] error after response already sent:', err);
+        return;
+      }
       console.error('[verify-operator-signature] unexpected error:', err);
       sendError(res, 500, 'INTERNAL', 'internal server error');
     }
