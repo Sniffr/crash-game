@@ -13,9 +13,20 @@ import type {
 // ---------------------------------------------------------------------------
 
 export class DuplicateApiKeyError extends Error {
+  readonly apiKey: string;
   constructor(apiKey: string) {
-    super(`An operator with api_key '${apiKey}' already exists`);
+    super(`An operator with this api_key already exists`);
     this.name = 'DuplicateApiKeyError';
+    this.apiKey = apiKey;
+  }
+}
+
+export class DuplicateOperatorIdError extends Error {
+  readonly operatorId: string;
+  constructor(operatorId: string) {
+    super(`Operator with id '${operatorId}' already exists`);
+    this.name = 'DuplicateOperatorIdError';
+    this.operatorId = operatorId;
   }
 }
 
@@ -25,6 +36,17 @@ export class OperatorNotFoundError extends Error {
     this.name = 'OperatorNotFoundError';
   }
 }
+
+// ---------------------------------------------------------------------------
+// Derive the Statement type from the prepare() method signature so we don't
+// have to use the Database namespace (which is unavailable via `import type`).
+// ---------------------------------------------------------------------------
+
+type SqliteStatement<P extends unknown[] = unknown[]> = ReturnType<Database['prepare']> & {
+  run(...params: P): { changes: number; lastInsertRowid: number | bigint };
+  get(...params: P): unknown;
+  all(...params: P): unknown[];
+};
 
 // ---------------------------------------------------------------------------
 // Internal row shape (as returned by better-sqlite3)
@@ -131,13 +153,13 @@ export class OperatorRegistry {
   // Prepared-statement helpers (lazy, created once per instance)
   // -------------------------------------------------------------------------
 
-  private _stmts = {} as Record<string, ReturnType<Database['prepare']>>;
+  private _stmts = {} as Record<string, SqliteStatement>;
 
-  private stmt(name: string, sql: string): ReturnType<Database['prepare']> {
-    if (!this._stmts[name]) {
-      this._stmts[name] = this.db.prepare(sql);
+  private stmt<P extends unknown[] = unknown[]>(key: string, sql: string): SqliteStatement<P> {
+    if (!this._stmts[key]) {
+      this._stmts[key] = this.db.prepare(sql) as SqliteStatement;
     }
-    return this._stmts[name];
+    return this._stmts[key] as SqliteStatement<P>;
   }
 
   // -------------------------------------------------------------------------
@@ -187,6 +209,9 @@ export class OperatorRegistry {
         if (msg.includes('UNIQUE constraint failed') && msg.includes('api_key')) {
           throw new DuplicateApiKeyError(apiKey);
         }
+        if (msg.includes('UNIQUE constraint failed') && msg.includes('operator_id')) {
+          throw new DuplicateOperatorIdError(input.operatorId);
+        }
         throw err;
       }
     });
@@ -224,80 +249,78 @@ export class OperatorRegistry {
         `SELECT * FROM operators WHERE status = ? ORDER BY created_at ASC`,
       ).all(opts.status) as OperatorRow[];
     } else {
-      rows = (this.stmt(
-        'list_all',
-        `SELECT * FROM operators ORDER BY created_at ASC`,
-      ) as { all: () => unknown[] }).all() as OperatorRow[];
+      rows = this.stmt<[]>('list_all', `SELECT * FROM operators ORDER BY created_at ASC`).all() as OperatorRow[];
     }
     return rows.map(rowToOperator);
   }
 
   update(operatorId: string, patch: OperatorUpdate): Operator {
-    const existing = this.getById(operatorId);
-    if (!existing) throw new OperatorNotFoundError(operatorId);
+    return this.db.transaction(() => {
+      const now = Math.floor(Date.now() / 1000);
 
-    const now = Math.floor(Date.now() / 1000);
+      const setClauses: string[] = ['updated_at = @updated_at'];
+      const params: Record<string, unknown> = { operator_id: operatorId, updated_at: now };
 
-    const setClauses: string[] = ['updated_at = @updated_at'];
-    const params: Record<string, unknown> = { operator_id: operatorId, updated_at: now };
+      if (patch.name !== undefined) {
+        setClauses.push('name = @name');
+        params['name'] = patch.name;
+      }
+      if (patch.walletBaseUrl !== undefined) {
+        setClauses.push('wallet_base_url = @wallet_base_url');
+        params['wallet_base_url'] = patch.walletBaseUrl;
+      }
+      if (patch.adapter !== undefined) {
+        setClauses.push('adapter = @adapter');
+        params['adapter'] = patch.adapter;
+      }
+      if (patch.currencies !== undefined) {
+        setClauses.push('currencies_json = @currencies_json');
+        params['currencies_json'] = JSON.stringify(patch.currencies);
+      }
+      if (patch.minBetMinor !== undefined) {
+        setClauses.push('min_bet_minor = @min_bet_minor');
+        params['min_bet_minor'] = patch.minBetMinor;
+      }
+      if (patch.maxBetMinor !== undefined) {
+        setClauses.push('max_bet_minor = @max_bet_minor');
+        params['max_bet_minor'] = patch.maxBetMinor;
+      }
+      if (patch.rtpVariant !== undefined) {
+        setClauses.push('rtp_variant = @rtp_variant');
+        params['rtp_variant'] = patch.rtpVariant;
+      }
+      if (patch.jurisdictions !== undefined) {
+        setClauses.push('jurisdictions_json = @jurisdictions_json');
+        params['jurisdictions_json'] = JSON.stringify(patch.jurisdictions);
+      }
+      if (patch.status !== undefined) {
+        setClauses.push('status = @status');
+        params['status'] = patch.status;
+      }
 
-    if (patch.name !== undefined) {
-      setClauses.push('name = @name');
-      params['name'] = patch.name;
-    }
-    if (patch.walletBaseUrl !== undefined) {
-      setClauses.push('wallet_base_url = @wallet_base_url');
-      params['wallet_base_url'] = patch.walletBaseUrl;
-    }
-    if (patch.adapter !== undefined) {
-      setClauses.push('adapter = @adapter');
-      params['adapter'] = patch.adapter;
-    }
-    if (patch.currencies !== undefined) {
-      setClauses.push('currencies_json = @currencies_json');
-      params['currencies_json'] = JSON.stringify(patch.currencies);
-    }
-    if (patch.minBetMinor !== undefined) {
-      setClauses.push('min_bet_minor = @min_bet_minor');
-      params['min_bet_minor'] = patch.minBetMinor;
-    }
-    if (patch.maxBetMinor !== undefined) {
-      setClauses.push('max_bet_minor = @max_bet_minor');
-      params['max_bet_minor'] = patch.maxBetMinor;
-    }
-    if (patch.rtpVariant !== undefined) {
-      setClauses.push('rtp_variant = @rtp_variant');
-      params['rtp_variant'] = patch.rtpVariant;
-    }
-    if (patch.jurisdictions !== undefined) {
-      setClauses.push('jurisdictions_json = @jurisdictions_json');
-      params['jurisdictions_json'] = JSON.stringify(patch.jurisdictions);
-    }
-    if (patch.status !== undefined) {
-      setClauses.push('status = @status');
-      params['status'] = patch.status;
-    }
+      // Build and run the dynamic statement without caching (SQL differs per call)
+      const sql = `UPDATE operators SET ${setClauses.join(', ')} WHERE operator_id = @operator_id`;
+      const info = this.db.prepare(sql).run(params);
+      if (info.changes === 0) throw new OperatorNotFoundError(operatorId);
 
-    // Build and run the dynamic statement without caching (SQL differs per call)
-    const sql = `UPDATE operators SET ${setClauses.join(', ')} WHERE operator_id = @operator_id`;
-    this.db.prepare(sql).run(params);
-
-    return this.getById(operatorId) as Operator;
+      return this.getById(operatorId) as Operator;
+    })();
   }
 
   regenSigningKey(operatorId: string): OperatorCredentials {
-    const existing = this.getById(operatorId);
-    if (!existing) throw new OperatorNotFoundError(operatorId);
-
     const newKey = this.generateSigningKey();
     const newKeyB64 = newKey.toString('base64');
     const now = Math.floor(Date.now() / 1000);
+    const info = this.stmt<[string, number, string]>(
+      'regen_signing_key',
+      `UPDATE operators SET signing_key_b64 = ?, updated_at = ? WHERE operator_id = ?`,
+    ).run(newKeyB64, now, operatorId);
+    if (info.changes === 0) throw new OperatorNotFoundError(operatorId);
 
-    this.db
-      .prepare(`UPDATE operators SET signing_key_b64 = ?, updated_at = ? WHERE operator_id = ?`)
-      .run(newKeyB64, now, operatorId);
-
-    return { apiKey: existing.apiKey, signingKeyBase64: newKeyB64 };
+    // apiKey unchanged. Fetch only to return it.
+    const op = this.getById(operatorId);
+    // op cannot be null at this point — we just confirmed the row exists via changes > 0.
+    return { apiKey: op!.apiKey, signingKeyBase64: newKeyB64 };
   }
 
   delete(operatorId: string): void {

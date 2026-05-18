@@ -3,6 +3,7 @@ import Database from 'better-sqlite3';
 import {
   OperatorRegistry,
   DuplicateApiKeyError,
+  DuplicateOperatorIdError,
   OperatorNotFoundError,
 } from './operator-registry.js';
 
@@ -124,5 +125,49 @@ describe('OperatorRegistry', () => {
     expect(() => registry.update('does_not_exist', { status: 'active' })).toThrow(
       OperatorNotFoundError,
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 7 – create twice with same operatorId throws DuplicateOperatorIdError
+  // -------------------------------------------------------------------------
+  it('create twice with same operatorId throws DuplicateOperatorIdError', () => {
+    // Use a counter-based apiKey generator so the two creates get different api keys
+    // and the collision is on operator_id, not api_key.
+    let counter = 0;
+    const opts = {
+      generateApiKey: () => `ak_test_fixed_${++counter}`,
+    };
+
+    const reg = new OperatorRegistry(makeDb(), opts);
+    reg.create(makeInput({ operatorId: 'op_dup' }));
+
+    expect(() => reg.create(makeInput({ operatorId: 'op_dup' }))).toThrow(DuplicateOperatorIdError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 8 – regenSigningKey returns new credentials; nonexistent throws
+  // -------------------------------------------------------------------------
+  it('regenSigningKey returns new key; getById reflects change; apiKey unchanged; nonexistent throws', () => {
+    const { operator, credentials } = registry.create(makeInput());
+    const originalSigningKey = operator.signingKey;
+    const originalApiKey = credentials.apiKey;
+
+    const newCreds = registry.regenSigningKey(operator.operatorId);
+
+    // Returned credentials have new signing key
+    expect(newCreds.apiKey).toBe(originalApiKey);
+    const newKeyBuf = Buffer.from(newCreds.signingKeyBase64, 'base64');
+    expect(newKeyBuf.length).toBe(32);
+    expect(newKeyBuf.equals(originalSigningKey)).toBe(false);
+
+    // getById reflects the new signing key
+    const fetched = registry.getById(operator.operatorId)!;
+    expect(fetched.apiKey).toBe(originalApiKey);
+    expect(fetched.signingKey.length).toBe(32);
+    expect(fetched.signingKey.equals(originalSigningKey)).toBe(false);
+    expect(fetched.signingKey.toString('base64')).toBe(newCreds.signingKeyBase64);
+
+    // Nonexistent operator throws OperatorNotFoundError
+    expect(() => registry.regenSigningKey('nonexistent')).toThrow(OperatorNotFoundError);
   });
 });
