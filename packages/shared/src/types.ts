@@ -12,6 +12,7 @@ export interface GameConfig {
 
 export interface Bet {
   playerId: string;            // sessionId for real players, "bot-X-Y" for bots
+  /** @deprecated Legacy decimal-credit stake. Use {@link Bet.amountMinor} + {@link Bet.currency}. Removed once all bets flow through the operator wallet (Task 3.x). */
   amount: number;
   autoCashout?: number;
   cashoutMultiplier?: number;
@@ -20,6 +21,19 @@ export interface Bet {
   isBot: boolean;
   botName?: string;
   displayName?: string;        // friendly name from the session (real players only)
+
+  /** Operator that owns this bet's player. Set for real-player B2B bets (Task 1.6+); absent for bots/legacy. */
+  operatorId?: string;
+  /** Stable per-bet id used across wallet calls (Task 1.6+). */
+  betId?: string;
+  /** Idempotency key for the operator /bet debit (Task 1.6+). */
+  betTxnId?: string;
+  /** Idempotency key for the operator /win credit (Task 1.6+). */
+  winTxnId?: string;
+  /** ISO-4217 / asset code for the stake (Task 1.6+). Absent for legacy/bot bets. */
+  currency?: string;
+  /** Stake in integer minor units (Task 1.6+). Canonical going forward; replaces {@link Bet.amount}. */
+  amountMinor?: number;
 }
 
 export interface RoundState {
@@ -32,6 +46,12 @@ export interface RoundState {
   bets: Bet[];
   serverSeedHash?: string;
   serverSeed?: string;
+}
+
+/** Per-round operator context threaded through bet/cashout handlers (Task 1.6+). */
+export interface RoundContext {
+  roundId: string;
+  operatorId: string;
 }
 
 // WebSocket message types
@@ -66,12 +86,21 @@ export interface Session {
   sessionId: string;
   /** Friendly name shown in the player list (e.g. "Lucky Falcon"). */
   displayName: string;
-  /** Current credit balance. */
+  /** @deprecated Legacy decimal-credit balance. Use {@link Session.balanceMinor} + {@link Session.currency}. Becomes operator-sourced in Task 3.1. */
   balance: number;
   /** Unix millis. */
   createdAt: number;
   /** Unix millis. */
   expiresAt: number;
+
+  /** Operator that owns this player (Task 3.1+). */
+  operatorId?: string;
+  /** Operator-scoped player id (Task 3.1+). */
+  playerId?: string;
+  /** Session currency (Task 3.1+). */
+  currency?: string;
+  /** Balance in integer minor units (Task 3.1+). Canonical going forward; replaces {@link Session.balance}. */
+  balanceMinor?: number;
 }
 
 /** Per-session lifetime stats. All counters are non-negative. */

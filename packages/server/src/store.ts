@@ -29,8 +29,11 @@ import type { HistoryEntry, Session, SessionStats } from '@crash/shared/types';
 import { ZERO_STATS } from '@crash/shared/types';
 import {
   ANON_ADJ, ANON_NOUN, BETS_PER_MINUTE, HISTORY_LIMIT,
-  SESSION_TTL_SEC, STARTING_BALANCE,
+  SESSION_TTL_SEC,
 } from '@crash/shared/config';
+
+// TEMP demo seed; Task 3.1 replaces this with the operator authenticate balance.
+export const DEFAULT_DEMO_BALANCE = 1000;
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -141,7 +144,7 @@ export async function createSession(opts: { displayName?: string; balance?: numb
   const session: Session = {
     sessionId,
     displayName: (opts.displayName ?? '').trim() || randomDisplayName(),
-    balance: opts.balance ?? STARTING_BALANCE,
+    balance: opts.balance ?? DEFAULT_DEMO_BALANCE,
     createdAt: now,
     expiresAt: now + SESSION_TTL_SEC * 1000,
   };

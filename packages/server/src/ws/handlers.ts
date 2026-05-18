@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { type Bet, type HistoryEntry } from '@crash/shared/types';
-import { MAX_STAKE, STARTING_BALANCE } from '@crash/shared/config';
+import { MAX_STAKE } from '@crash/shared/config';
 import {
   getSession,
   getStats,
@@ -10,6 +10,7 @@ import {
   appendHistory,
   setBalance,
   StoreOfflineError,
+  DEFAULT_DEMO_BALANCE,
 } from '../store';
 import { safeSend, broadcast } from './hub';
 import { currentRound } from '../game/round';
@@ -152,8 +153,8 @@ export async function handleMessage(
     case 'reset_balance': {
       if (!sessionId) return;
       try {
-        await setBalance(sessionId, STARTING_BALANCE);
-        safeSend(ws, { type: 'balance', data: { sessionId, balance: STARTING_BALANCE } });
+        await setBalance(sessionId, DEFAULT_DEMO_BALANCE);
+        safeSend(ws, { type: 'balance', data: { sessionId, balance: DEFAULT_DEMO_BALANCE } });
       } catch (err) {
         if (err instanceof StoreOfflineError) {
           safeSend(ws, { type: 'error', data: { message: 'Session store offline — reset failed' } });
