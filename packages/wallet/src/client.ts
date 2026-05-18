@@ -29,6 +29,24 @@ import type {
 } from './client-types.js';
 
 // ---------------------------------------------------------------------------
+// Idempotency fingerprint helper
+// ---------------------------------------------------------------------------
+
+/** Volatile transport/timing fields excluded from the idempotency fingerprint:
+ *  they legitimately differ between the original call and a recovery replay of
+ *  the SAME logical transaction (operator dedupes on txnId per spec §9). */
+const VOLATILE_FINGERPRINT_KEYS = ['placedAt', 'settledAt'] as const;
+
+function idempotencyFingerprint(payload: unknown): string {
+  if (payload && typeof payload === 'object') {
+    const clone: Record<string, unknown> = { ...(payload as Record<string, unknown>) };
+    for (const k of VOLATILE_FINGERPRINT_KEYS) delete clone[k];
+    return sha256Hex(Buffer.from(JSON.stringify(clone)));
+  }
+  return sha256Hex(Buffer.from(JSON.stringify(payload)));
+}
+
+// ---------------------------------------------------------------------------
 // Per-endpoint policy table (spec §8)
 // ---------------------------------------------------------------------------
 
@@ -203,7 +221,7 @@ export class WalletClient {
     // Pure passthrough when no betLog supplied — preserves existing behavior exactly
     if (!this.betLog) return exec();
 
-    const requestHash = sha256Hex(Buffer.from(JSON.stringify(requestPayload)));
+    const requestHash = idempotencyFingerprint(requestPayload);
 
     const existing = this.betLog.getIdempotency(txnId);
 
@@ -246,30 +264,40 @@ export class WalletClient {
             balanceMinor: walletErr.balanceMinor,
           },
         });
-        this.betLog.putIdempotency({
-          txnId,
-          operatorId: this.operator.operatorId,
-          kind,
-          requestHash,
-          responseJson,
-          createdAt: this.nowSeconds(),
-        } satisfies IdempotencyEntry);
+        try {
+          this.betLog.putIdempotency({
+            txnId,
+            operatorId: this.operator.operatorId,
+            kind,
+            requestHash,
+            responseJson,
+            createdAt: this.nowSeconds(),
+          } satisfies IdempotencyEntry);
+        } catch (persistErr) {
+          console.error('[WalletClient] putIdempotency failed recording confirmed rejection (safe; original error still thrown):', persistErr);
+        }
       }
       // Non-confirmed (network / 5xx / signature): do NOT persist — leave no row
       // so recovery can retry freely; operator §9 dedupes server-side.
       throw err;
     }
 
-    // Success: persist then return
-    this.betLog.putIdempotency({
-      txnId,
-      operatorId: this.operator.operatorId,
-      kind,
-      requestHash,
-      responseJson: JSON.stringify({ ok: true, value: result }),
-      createdAt: this.nowSeconds(),
-    } satisfies IdempotencyEntry);
-
+    // Success: persist then return (best-effort; operator dedupes on replay per spec §9)
+    try {
+      this.betLog.putIdempotency({
+        txnId,
+        operatorId: this.operator.operatorId,
+        kind,
+        requestHash,
+        responseJson: JSON.stringify({ ok: true, value: result }),
+        createdAt: this.nowSeconds(),
+      } satisfies IdempotencyEntry);
+    } catch (persistErr) {
+      // Operator call succeeded; idempotency persistence is best-effort. A miss
+      // here means a recovery replay will re-send (operator dedupes by txnId
+      // per spec §9, so safe). Never convert a real success into a caller error.
+      console.error('[WalletClient] putIdempotency failed after success (safe; operator deduped on replay):', persistErr);
+    }
     return result;
   }
 

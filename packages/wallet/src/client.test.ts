@@ -852,3 +852,173 @@ it('authenticate and roundEnd with betLog — no idempotency rows written; 2 HTT
   const rows = db.prepare('SELECT * FROM txn_idempotency').all();
   expect(rows).toHaveLength(0);
 });
+
+// ===========================================================================
+// Task 2.2 review hardening tests
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Review Test a: success-path putIdempotency failure does NOT mask success
+// ---------------------------------------------------------------------------
+
+it('success persistence failure does NOT mask success — bet resolves even when putIdempotency throws', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, BET_RESP_BODY, ts);
+      return HttpResponse.json(BET_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  // Stub betLog: getIdempotency returns null (no existing record), putIdempotency throws
+  const stubbedBetLog: BetLog = {
+    getIdempotency: (_txnId: string) => null,
+    putIdempotency: (_entry: unknown) => { throw new Error('DB write failed'); },
+  } as unknown as BetLog;
+
+  nonceCounter = 0;
+  const client = new WalletClient(TEST_OPERATOR, {
+    generateNonce: () => `nonce-${++nonceCounter}`,
+    nowSeconds: () => 1716000000,
+    betLog: stubbedBetLog,
+  });
+
+  // Must resolve (not reject) despite persistence failure
+  const result = await client.bet(BET_REQ);
+  expect(result).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(1); // exactly 1 HTTP call
+});
+
+// ---------------------------------------------------------------------------
+// Review Test b: confirmed-rejection persistence failure still throws the ORIGINAL WalletError
+// ---------------------------------------------------------------------------
+
+it('confirmed-rejection persistence failure — original WalletError propagates unchanged (not persistence error)', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const errBody = {
+        error: { code: 'INSUFFICIENT_FUNDS', message: 'Balance 50 < bet 1000', balanceMinor: 50 },
+      };
+      const signed = makeSignedResponse(409, errBody, ts);
+      return HttpResponse.json(errBody, { status: 409, headers: signed.headers });
+    }),
+  );
+
+  // Stub betLog: getIdempotency returns null, putIdempotency throws
+  const stubbedBetLog: BetLog = {
+    getIdempotency: (_txnId: string) => null,
+    putIdempotency: (_entry: unknown) => { throw new Error('DB write failed'); },
+  } as unknown as BetLog;
+
+  nonceCounter = 0;
+  const client = new WalletClient(TEST_OPERATOR, {
+    generateNonce: () => `nonce-${++nonceCounter}`,
+    nowSeconds: () => 1716000000,
+    betLog: stubbedBetLog,
+  });
+
+  const err = await client.bet(BET_REQ).catch((e) => e);
+
+  // Must be the original WalletError, not the persistence error, not IdempotencyMismatchError
+  expect(err).toBeInstanceOf(WalletError);
+  expect(err.code).toBe('INSUFFICIENT_FUNDS');
+  expect(err.httpStatus).toBe(409);
+  expect(err.balanceMinor).toBe(50);
+  expect(callCount).toBe(1); // exactly 1 HTTP call
+});
+
+// ---------------------------------------------------------------------------
+// Review Test c: replay differing ONLY in volatile timing fields short-circuits (no IdempotencyMismatchError)
+// ---------------------------------------------------------------------------
+
+it('replay differing only in placedAt short-circuits to cached BetResponse (no IdempotencyMismatchError)', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, BET_RESP_BODY, ts);
+      return HttpResponse.json(BET_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  // First call succeeds (1 HTTP call)
+  const r1 = await client.bet(BET_REQ);
+  expect(r1).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(1);
+
+  // Second call: same txnId + everything except placedAt (different timestamp)
+  const reqB = { ...BET_REQ, placedAt: BET_REQ.placedAt + 9999 };
+  // Must short-circuit to cached result without new HTTP call or IdempotencyMismatchError
+  const r2 = await client.bet(reqB);
+  expect(r2).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(1); // no new HTTP call — served from cache
+});
+
+it('replay differing only in settledAt short-circuits to cached WinResponse (no IdempotencyMismatchError)', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/win', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, WIN_RESP_BODY, ts);
+      return HttpResponse.json(WIN_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  // First call succeeds (1 HTTP call)
+  const r1 = await client.win(WIN_REQ);
+  expect(r1).toEqual(WIN_RESP_BODY);
+  expect(callCount).toBe(1);
+
+  // Replay with different settledAt (as recovery.ts would produce with Date.now())
+  const winReqReplay = { ...WIN_REQ, settledAt: WIN_REQ.settledAt + 5000 };
+  const r2 = await client.win(winReqReplay);
+  expect(r2).toEqual(WIN_RESP_BODY);
+  expect(callCount).toBe(1); // no new HTTP call — served from cache
+});
+
+// ---------------------------------------------------------------------------
+// Review Test d: genuine different-transaction (same txnId, different amountMinor) still caught
+// ---------------------------------------------------------------------------
+
+it('genuine different-transaction (same txnId, different amountMinor) still throws IdempotencyMismatchError', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, BET_RESP_BODY, ts);
+      return HttpResponse.json(BET_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  // First call: succeeds (txnId = 'txn-001', amountMinor = 1000)
+  await client.bet(BET_REQ);
+  expect(callCount).toBe(1);
+
+  // Second call: same txnId but DIFFERENT amountMinor — real caller bug
+  const reqC = { ...BET_REQ, amountMinor: 5555 };
+  const err = await client.bet(reqC).catch((e) => e);
+  expect(err).toBeInstanceOf(IdempotencyMismatchError);
+  expect(callCount).toBe(1); // no additional HTTP call was made
+});
