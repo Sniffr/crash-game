@@ -3,10 +3,10 @@
  * Uses supertest — no real network required.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import request from 'supertest';
 import crypto from 'node:crypto';
-import { app, startServer } from './index.js';
+import { app, startServer, resetStubState } from './index.js';
 import type { Server } from 'node:http';
 
 // ---------------------------------------------------------------------------
@@ -53,6 +53,10 @@ beforeAll(() => {
 
 afterAll(() => {
   server.close();
+});
+
+beforeEach(() => {
+  resetStubState();
 });
 
 // ---------------------------------------------------------------------------
@@ -337,5 +341,54 @@ describe('Signature verification', () => {
 
     expect(res.status).toBe(401);
     expect(res.body.error.code).toBe('STALE_REQUEST');
+  });
+
+  it('rejects replayed nonce (NONCE_REUSED)', async () => {
+    const body = { token: 'tok-pid-1', ip: '1.2.3.4', userAgent: 'test', gameId: 'galaxy-crash' };
+    const headers = signedHeaders('POST', '/authenticate', body);
+
+    // First request must succeed
+    const res1 = await request(app).post('/authenticate').set(headers).send(body);
+    expect(res1.status).toBe(200);
+
+    // Exact same request (same headers, same body) must be rejected
+    const res2 = await request(app).post('/authenticate').set(headers).send(body);
+    expect(res2.status).toBe(401);
+    expect(res2.body.error.code).toBe('NONCE_REUSED');
+  });
+});
+
+describe('POST /balance', () => {
+  it('returns 200 with balance and currency for a known player', async () => {
+    const body = { playerId: 'pid-1', sessionId: 'ses-test' };
+    const res = await request(app)
+      .post('/balance')
+      .set(signedHeaders('POST', '/balance', body))
+      .send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body.balance).toBe(100000);
+    expect(res.body.currency).toBe('EUR');
+    expect(res.headers['x-signature']).toBeTruthy();
+  });
+});
+
+describe('POST /round-end', () => {
+  it('returns 204 with X-Signature matching spec §4.3', async () => {
+    const body = { roundId: 'rnd-test', playerId: 'pid-1', bets: [] };
+    const headers = signedHeaders('POST', '/round-end', body);
+    const res = await request(app)
+      .post('/round-end')
+      .set(headers)
+      .send(body);
+
+    expect(res.status).toBe(204);
+    expect(res.headers['x-signature']).toBeTruthy();
+
+    // Verify the signature: HMAC(key, "204\n<x-timestamp>\n<sha256 of empty body>")
+    const timestamp = headers['X-Timestamp'];
+    const emptyBodyHash = sha256Hex(Buffer.alloc(0));
+    const expectedSig = hmacHex(`204\n${timestamp}\n${emptyBodyHash}`);
+    expect(res.headers['x-signature']).toBe(expectedSig);
   });
 });

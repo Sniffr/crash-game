@@ -141,20 +141,33 @@ function signatureMiddleware(req: Request, res: Response, next: NextFunction): v
 
   const nowSec = Math.floor(Date.now() / 1000);
 
+  // Helper: sign an early-reject error response (before res.json is patched).
+  // Uses the request timestamp when available and valid, otherwise now.
+  function sendEarlyError(status: number, code: string, message: string): void {
+    const body = { error: { code, message } };
+    const bodyStr = JSON.stringify(body);
+    const bodyHash = sha256Hex(Buffer.from(bodyStr));
+    const ts = timestamp ?? String(nowSec);
+    const sigString = `${status}\n${ts}\n${bodyHash}`;
+    const sig = hmacSha256Hex(SIGNING_KEY, sigString);
+    res.setHeader('X-Signature', sig);
+    res.status(status).json(body);
+  }
+
   if (!timestamp || !nonce || !incomingSig) {
-    sendError(res, 401, 'INVALID_SIGNATURE', 'Missing required signing headers', timestamp);
+    sendEarlyError(401, 'INVALID_SIGNATURE', 'Missing required signing headers');
     return;
   }
 
   const ts = parseInt(timestamp, 10);
   if (isNaN(ts) || Math.abs(nowSec - ts) > 300) {
-    sendError(res, 401, 'STALE_REQUEST', 'Request timestamp is outside ±300s window', timestamp);
+    sendEarlyError(401, 'STALE_REQUEST', 'Request timestamp is outside ±300s window');
     return;
   }
 
   pruneNonces();
   if (nonceCache.has(nonce)) {
-    sendError(res, 401, 'NONCE_REUSED', 'Nonce has already been used', timestamp);
+    sendEarlyError(401, 'NONCE_REUSED', 'Nonce has already been used');
     return;
   }
 
@@ -164,7 +177,7 @@ function signatureMiddleware(req: Request, res: Response, next: NextFunction): v
   const signingString = `${req.method}\n${req.path}\n${timestamp}\n${nonce}\n${bodyHash}`;
 
   if (!verifyHmac(SIGNING_KEY, signingString, incomingSig)) {
-    sendError(res, 401, 'INVALID_SIGNATURE', 'HMAC-SHA256 signature mismatch', timestamp);
+    sendEarlyError(401, 'INVALID_SIGNATURE', 'HMAC-SHA256 signature mismatch');
     return;
   }
 
@@ -190,25 +203,10 @@ function signatureMiddleware(req: Request, res: Response, next: NextFunction): v
 // Response helpers
 // ---------------------------------------------------------------------------
 
-function sendError(
-  res: Response,
-  status: number,
-  code: string,
-  message: string,
-  timestamp?: string,
-  details?: object,
-): void {
+// sendError is only called from inside route handlers (after signatureMiddleware has run
+// and monkey-patched res.json). The patched res.json handles signing automatically.
+function sendError(res: Response, status: number, code: string, message: string, details?: object): void {
   const body = { error: { code, message, ...details } };
-
-  // Sign the error response if we have a timestamp to sign with
-  if (timestamp) {
-    const bodyStr = JSON.stringify(body);
-    const bodyHash = sha256Hex(Buffer.from(bodyStr));
-    const sigString = `${status}\n${timestamp}\n${bodyHash}`;
-    const sig = hmacSha256Hex(SIGNING_KEY, sigString);
-    res.setHeader('X-Signature', sig);
-  }
-
   res.status(status).json(body);
 }
 
@@ -253,13 +251,13 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.post('/authenticate', signatureMiddleware, (req: Request, res: Response) => {
   const { token } = req.body as { token?: string };
   if (!token) {
-    sendError(res, 400, 'INVALID_REQUEST', 'Missing token', req.headers['x-timestamp'] as string);
+    sendError(res, 400, 'INVALID_REQUEST', 'Missing token');
     return;
   }
 
   const playerId = launchTokens.get(token);
   if (!playerId) {
-    sendError(res, 401, 'INVALID_TOKEN', 'Launch token is invalid or expired', req.headers['x-timestamp'] as string);
+    sendError(res, 401, 'INVALID_TOKEN', 'Launch token is invalid or expired');
     return;
   }
 
@@ -286,7 +284,7 @@ app.post('/balance', signatureMiddleware, (req: Request, res: Response) => {
   const { playerId } = req.body as { playerId?: string };
   const player = players.get(playerId ?? '');
   if (!player) {
-    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${playerId} not found`, req.headers['x-timestamp'] as string);
+    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${playerId} not found`);
     return;
   }
 
@@ -302,7 +300,6 @@ app.post('/bet', signatureMiddleware, (req: Request, res: Response) => {
     currency?: string;
   };
 
-  const ts = req.headers['x-timestamp'] as string;
   const opId = operatorId(req);
 
   // Idempotency check first
@@ -316,32 +313,32 @@ app.post('/bet', signatureMiddleware, (req: Request, res: Response) => {
 
   const player = players.get(body.playerId ?? '');
   if (!player) {
-    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${body.playerId} not found`, ts);
+    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${body.playerId} not found`);
     return;
   }
 
   if (!body.txnId || body.amountMinor === undefined || !body.currency) {
-    sendError(res, 400, 'INVALID_REQUEST', 'Missing required fields', ts);
+    sendError(res, 400, 'INVALID_REQUEST', 'Missing required fields');
     return;
   }
 
   if (body.currency !== player.currency) {
-    sendError(res, 422, 'CURRENCY_MISMATCH', `Player currency is ${player.currency}, got ${body.currency}`, ts);
+    sendError(res, 422, 'CURRENCY_MISMATCH', `Player currency is ${player.currency}, got ${body.currency}`);
     return;
   }
 
   if (body.amountMinor <= 0) {
-    sendError(res, 400, 'INVALID_REQUEST', 'amountMinor must be positive', ts);
+    sendError(res, 400, 'INVALID_REQUEST', 'amountMinor must be positive');
     return;
   }
 
   if (body.amountMinor > 500000) {
-    sendError(res, 409, 'BET_LIMIT_EXCEEDED', `Bet ${body.amountMinor} exceeds max 500000`, ts);
+    sendError(res, 409, 'BET_LIMIT_EXCEEDED', `Bet ${body.amountMinor} exceeds max 500000`);
     return;
   }
 
   if (player.balance < body.amountMinor) {
-    sendError(res, 409, 'INSUFFICIENT_FUNDS', `Balance ${player.balance} < bet ${body.amountMinor}`, ts, {
+    sendError(res, 409, 'INSUFFICIENT_FUNDS', `Balance ${player.balance} < bet ${body.amountMinor}`, {
       balanceMinor: player.balance,
     });
     return;
@@ -367,12 +364,11 @@ app.post('/win', signatureMiddleware, (req: Request, res: Response) => {
     currency?: string;
   };
 
-  const ts = req.headers['x-timestamp'] as string;
   const opId = operatorId(req);
 
   // STUB_FAIL_NEXT_WIN: simulate upstream failure BEFORE idempotency check
   if (shouldFailNextWin()) {
-    sendError(res, 500, 'UPSTREAM_ERROR', 'Simulated failure', ts);
+    sendError(res, 500, 'UPSTREAM_ERROR', 'Simulated failure');
     return;
   }
 
@@ -387,17 +383,22 @@ app.post('/win', signatureMiddleware, (req: Request, res: Response) => {
 
   const player = players.get(body.playerId ?? '');
   if (!player) {
-    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${body.playerId} not found`, ts);
+    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${body.playerId} not found`);
     return;
   }
 
   if (!body.txnId || body.amountMinor === undefined || !body.currency) {
-    sendError(res, 400, 'INVALID_REQUEST', 'Missing required fields', ts);
+    sendError(res, 400, 'INVALID_REQUEST', 'Missing required fields');
     return;
   }
 
   if (body.currency !== player.currency) {
-    sendError(res, 422, 'CURRENCY_MISMATCH', `Player currency is ${player.currency}, got ${body.currency}`, ts);
+    sendError(res, 422, 'CURRENCY_MISMATCH', `Player currency is ${player.currency}, got ${body.currency}`);
+    return;
+  }
+
+  if (body.amountMinor <= 0) {
+    sendError(res, 400, 'INVALID_REQUEST', 'amountMinor must be positive');
     return;
   }
 
@@ -419,7 +420,6 @@ app.post('/rollback', signatureMiddleware, (req: Request, res: Response) => {
     reason?: string;
   };
 
-  const ts = req.headers['x-timestamp'] as string;
   const opId = operatorId(req);
 
   // Idempotency check (txnId is the rollback txnId)
@@ -451,7 +451,7 @@ app.post('/rollback', signatureMiddleware, (req: Request, res: Response) => {
 
   const player = players.get(betRecord.playerId);
   if (!player) {
-    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${betRecord.playerId} not found`, ts);
+    sendError(res, 404, 'PLAYER_NOT_FOUND', `Player ${betRecord.playerId} not found`);
     return;
   }
 
@@ -496,6 +496,27 @@ app.post('/round-end', signatureMiddleware, (req: Request, res: Response) => {
   res.setHeader('X-Signature', resSig);
   res.status(204).send();
 });
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Reset all in-memory state to initial conditions.
+ * Exported for use in test beforeEach hooks — not for production use.
+ */
+export function resetStubState(): void {
+  players.set('pid-1', { currency: 'EUR', balance: 100000, displayName: 'lucky_falcon_42' });
+  players.set('pid-2', { currency: 'USD', balance: 100000, displayName: 'cosmic_otter_7' });
+  players.set('pid-3', { currency: 'BTC', balance: 1000000, displayName: 'void_walker_3' });
+
+  idempotencyTable.clear();
+  nonceCache.clear();
+  roundEndLog.length = 0;
+
+  pendingForceFailWin = false;
+  delete process.env['STUB_FAIL_NEXT_WIN'];
+}
 
 // ---------------------------------------------------------------------------
 // Start
