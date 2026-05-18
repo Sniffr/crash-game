@@ -71,12 +71,23 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
     }
     const op = registry.getById(operatorId);
     if (!op) {
+      log('[recovery] operator not found — caching null', { operatorId });
       clientCache.set(operatorId, null);
       return null;
     }
-    const client = clientFactory(op);
-    clientCache.set(operatorId, client);
-    return client;
+    try {
+      const client = clientFactory(op);
+      clientCache.set(operatorId, client);
+      return client;
+    } catch (err) {
+      log('[recovery] clientFactory threw — caching null for this run', {
+        operatorId,
+        err: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      });
+      clientCache.set(operatorId, null);
+      return null;
+    }
   }
 
   // ---------------------------------------------------------------------------

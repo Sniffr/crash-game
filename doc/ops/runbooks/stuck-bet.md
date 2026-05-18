@@ -113,7 +113,8 @@ If `/win` exhausts all retries (6 attempts with exponential back-off), the row
 transitions to `WIN_FAILED`. Recovery will NOT retry these — they require manual
 intervention.
 
-**Planned tool**: the Task 4.2 admin force-credit endpoint (`POST /admin/bets/:betId/force-credit`)
+**Planned tool**: the Task 4.2 admin force-credit endpoint (`POST /admin/v1/bet-log/:betId/force-credit`)
+(path per plan Task 4.2; may be /admin/v1/bets/:betId/force-credit per studio-backoffice spec §6.3 — reconciled at Task 5.1.)
 will allow operators to manually settle a `WIN_FAILED` row after confirming the credit
 status with the operator's ledger. See the runbook coming in Task 4.3.
 

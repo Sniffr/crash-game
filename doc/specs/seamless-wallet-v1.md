@@ -73,7 +73,7 @@ Every wallet call includes these headers:
 ```
 X-API-Key:    <operator apiKey>
 X-Timestamp:  1716000000          (unix seconds)
-X-Nonce:      9f3e1c2a-...        (uuid v4, single-use within 5 min window)
+X-Nonce:      9f3e1c2a-...        (uuid v4, single-use; operators MUST cache for 10 min (see §4.2 rule 2))
 X-Signature:  <hex-hmac-sha256>
 Content-Type: application/json
 ```

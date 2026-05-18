@@ -463,12 +463,11 @@ it('idempotent re-run after resolution yields all-zero counts', async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 8: throwing clientFactory → one row fails, sweep continues, no throw
-// Proves the per-row invariant: a synchronous throw from a custom clientFactory
-// is contained to that row only and does not abort the sweep.
+// Test 8: throwing clientFactory → row skipped (not failed), sweep continues,
+// no throw; factory called at most once per operator (cache-on-throw).
 // ---------------------------------------------------------------------------
 
-it('throwing clientFactory on row 1 leaves sweep running for row 2 (invariant)', async () => {
+it('throwing clientFactory caches null: row 1 skipped, row 2 resolved, factory called exactly twice', async () => {
   // Register a second operator (same stub URL, same key) for the second row
   const operatorId2 = 'op-test-2';
   registry.create({
@@ -526,13 +525,16 @@ it('throwing clientFactory on row 1 leaves sweep running for row 2 (invariant)',
     clientFactory: throwingOnceFactory,
   });
 
-  // Row 1: still ROLLBACK_PENDING (factory threw → counted as failed)
+  // Row 1: still ROLLBACK_PENDING — factory threw → null cached → counted as skipped
   expect(betLog.getById(betId1)?.state).toBe('ROLLBACK_PENDING');
 
-  // Row 2: reached VOIDED (sweep continued past the failure)
+  // Row 2: reached VOIDED (sweep continued past the skipped operator)
   expect(betLog.getById(betId2)?.state).toBe('VOIDED');
 
-  // Report: rollbackPending.failed=1, rollbackPending.resolved=1
-  expect(report!.rollbackPending.failed).toBe(1);
+  // Report: skipped=1 (factory threw for op-test), resolved=1 (op-test-2 worked)
+  expect(report!.rollbackPending.skipped).toBe(1);
   expect(report!.rollbackPending.resolved).toBe(1);
+
+  // Factory was called exactly twice (once per operator) — proves cache-on-throw
+  expect(callCount).toBe(2);
 });
