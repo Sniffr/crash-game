@@ -4,6 +4,8 @@ import { http, HttpResponse } from 'msw';
 import { WalletClient } from './client.js';
 import { WalletError, WalletNetworkError, ResponseSignatureError } from './errors.js';
 import { sign, signResponse, verify } from './signing.js';
+import { BetLog, IdempotencyMismatchError } from './bet-log.js';
+import Database from 'better-sqlite3';
 import type { Operator } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -494,4 +496,359 @@ it('authenticate — resolves with full player shape on signed 200', async () =>
   expect(result.playerId).toBe('pid-1');
   expect(result.currency).toBe('EUR');
   expect(result.balance).toBe(100000);
+});
+
+// ===========================================================================
+// Idempotency tests — Task 2.2
+// ===========================================================================
+
+// Helper: make a WalletClient with a BetLog
+function makeClientWithBetLog(betLog: BetLog, opts?: {
+  sleep?: (ms: number) => Promise<void>;
+  nowSeconds?: () => number;
+  maxRollbackAttempts?: number;
+}) {
+  nonceCounter = 0;
+  return new WalletClient(TEST_OPERATOR, {
+    generateNonce: () => `nonce-${++nonceCounter}`,
+    nowSeconds: opts?.nowSeconds ?? (() => 1716000000),
+    sleep: opts?.sleep,
+    maxRollbackAttempts: opts?.maxRollbackAttempts,
+    betLog,
+  });
+}
+
+// Fresh in-memory BetLog for each idempotency test
+function makeBetLog(): BetLog {
+  return new BetLog(new Database(':memory:'));
+}
+
+// Win / rollback fixtures
+const WIN_REQ = {
+  playerId: 'pid-1',
+  sessionId: 'ses-abc',
+  roundId: 'rnd-001',
+  betId: 'bet-001',
+  betTxnId: 'txn-001',
+  txnId: 'win-txn-001',
+  amountMinor: 2000,
+  multiplier: 2.0,
+  currency: 'EUR',
+  settledAt: 1716000100,
+};
+
+const WIN_RESP_BODY = {
+  operatorTxnId: 'op-win-001',
+  balanceMinor: 101000,
+  currency: 'EUR',
+};
+
+const ROLLBACK_REQ = {
+  playerId: 'pid-1',
+  betTxnId: 'txn-001',
+  txnId: 'rb-txn-001',
+  reason: 'round_voided' as const,
+};
+
+const ROLLBACK_RESP_BODY = {
+  operatorTxnId: 'op-rb-001',
+  balanceMinor: 100000,
+  currency: 'EUR',
+  status: 'rolled_back' as const,
+};
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 1: no betLog — two identical calls with same txnId → 2 HTTP
+// ---------------------------------------------------------------------------
+
+it('no betLog passthrough — two calls with same txnId make 2 HTTP requests (no deduplication)', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, BET_RESP_BODY, ts);
+      return HttpResponse.json(BET_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const client = makeClient(); // no betLog
+  const r1 = await client.bet(BET_REQ);
+  const r2 = await client.bet(BET_REQ); // same txnId, no betLog → goes to operator again
+
+  expect(r1).toEqual(BET_RESP_BODY);
+  expect(r2).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(2); // proves no idempotency without betLog
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 2: success short-circuits replay (same client, then fresh client)
+// ---------------------------------------------------------------------------
+
+it('success short-circuits replay — 2nd call skips HTTP; fresh client replays from DB', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, BET_RESP_BODY, ts);
+      return HttpResponse.json(BET_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  // First call — should hit HTTP
+  const r1 = await client.bet(BET_REQ);
+  expect(r1).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(1);
+
+  // Second call (same client, same req) — must NOT hit HTTP
+  const r2 = await client.bet(BET_REQ);
+  expect(r2).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(1); // still 1
+
+  // Fresh client (simulates crash/restart) with SAME betLog — must also skip HTTP
+  const freshClient = makeClientWithBetLog(betLog);
+  const r3 = await freshClient.bet(BET_REQ);
+  expect(r3).toEqual(BET_RESP_BODY);
+  expect(callCount).toBe(1); // still 1 — proof of crash-restart safety
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 3: confirmed rejection persists & replays as throw
+// ---------------------------------------------------------------------------
+
+it('confirmed rejection (409) persists and replays as throw with no additional HTTP', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const errBody = {
+        error: { code: 'INSUFFICIENT_FUNDS', message: 'Balance 50 < bet 1000', balanceMinor: 50 },
+      };
+      const signed = makeSignedResponse(409, errBody, ts);
+      return HttpResponse.json(errBody, { status: 409, headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  // First call — hits HTTP, stores confirmed rejection
+  const err1 = await client.bet(BET_REQ).catch((e) => e);
+  expect(err1).toBeInstanceOf(WalletError);
+  expect(err1.code).toBe('INSUFFICIENT_FUNDS');
+  expect(err1.httpStatus).toBe(409);
+  expect(err1.balanceMinor).toBe(50);
+  expect(callCount).toBe(1);
+
+  // Second call — must short-circuit (no HTTP), reconstruct WalletError from cache
+  const err2 = await client.bet(BET_REQ).catch((e) => e);
+  expect(err2).toBeInstanceOf(WalletError);
+  expect(err2.code).toBe('INSUFFICIENT_FUNDS');
+  expect(err2.httpStatus).toBe(409);
+  expect(err2.balanceMinor).toBe(50);
+  expect(callCount).toBe(1); // counter unchanged — no HTTP made
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 4: non-confirmed failure (5xx) does NOT persist; recovery can retry
+// ---------------------------------------------------------------------------
+
+it('non-confirmed failure (5xx) does not persist — recovery can retry freely', async () => {
+  let callCount = 0;
+  const { sleep } = makeFakeSleep(); // instant backoff
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const errBody = { error: { code: 'UPSTREAM_ERROR', message: 'Down' } };
+      const signed = makeSignedResponse(500, errBody, ts);
+      return HttpResponse.json(errBody, { status: 500, headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog, { sleep, maxRollbackAttempts: 1 });
+
+  // First round: 4 attempts (bet maxAttempts)
+  await client.bet(BET_REQ).catch(() => {});
+  const afterFirstRound = callCount;
+  expect(afterFirstRound).toBe(4); // bet exhausts 4 attempts
+
+  // Must NOT have persisted an idempotency row
+  expect(betLog.getIdempotency(BET_REQ.txnId)).toBeNull();
+
+  // Second round: same txnId+body → makes NEW HTTP calls (no short-circuit)
+  await client.bet(BET_REQ).catch(() => {});
+  expect(callCount).toBeGreaterThan(afterFirstRound); // counter increased
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 5: divergent body (same txnId) → IdempotencyMismatchError, no send
+// ---------------------------------------------------------------------------
+
+it('divergent body with same txnId → IdempotencyMismatchError; no additional HTTP call', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, BET_RESP_BODY, ts);
+      return HttpResponse.json(BET_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  // First call: succeeds (txnId = 'txn-001', amountMinor = 1000)
+  await client.bet(BET_REQ);
+  expect(callCount).toBe(1);
+
+  // Second call: same txnId but different amountMinor → mismatch
+  const reqB = { ...BET_REQ, amountMinor: 9999 };
+  const err = await client.bet(reqB).catch((e) => e);
+  expect(err).toBeInstanceOf(IdempotencyMismatchError);
+  expect(callCount).toBe(1); // no HTTP was sent for the divergent request
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 6a: win success persists and replays without HTTP
+// ---------------------------------------------------------------------------
+
+it('win success persists and replays without HTTP', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/win', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, WIN_RESP_BODY, ts);
+      return HttpResponse.json(WIN_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  const r1 = await client.win(WIN_REQ);
+  expect(r1).toEqual(WIN_RESP_BODY);
+  expect(callCount).toBe(1);
+
+  // Replay: must not hit HTTP
+  const r2 = await client.win(WIN_REQ);
+  expect(r2).toEqual(WIN_RESP_BODY);
+  expect(callCount).toBe(1); // no additional HTTP
+
+  // Verify row stored with kind='win' and correct txnId
+  const entry = betLog.getIdempotency(WIN_REQ.txnId);
+  expect(entry).not.toBeNull();
+  expect(entry!.kind).toBe('win');
+  expect(entry!.txnId).toBe(WIN_REQ.txnId);
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 6b: rollback success persists and replays without HTTP
+// ---------------------------------------------------------------------------
+
+it('rollback success persists and replays without HTTP', async () => {
+  let callCount = 0;
+
+  server.use(
+    http.post('http://op.test/rollback', async ({ request }) => {
+      callCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, ROLLBACK_RESP_BODY, ts);
+      return HttpResponse.json(ROLLBACK_RESP_BODY, { headers: signed.headers });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog, { maxRollbackAttempts: 4 });
+
+  const r1 = await client.rollback(ROLLBACK_REQ);
+  expect(r1).toEqual(ROLLBACK_RESP_BODY);
+  expect(callCount).toBe(1);
+
+  // Replay: must not hit HTTP
+  const r2 = await client.rollback(ROLLBACK_REQ);
+  expect(r2).toEqual(ROLLBACK_RESP_BODY);
+  expect(callCount).toBe(1); // no additional HTTP
+
+  // Verify row stored with kind='rollback' and correct txnId
+  const entry = betLog.getIdempotency(ROLLBACK_REQ.txnId);
+  expect(entry).not.toBeNull();
+  expect(entry!.kind).toBe('rollback');
+  expect(entry!.txnId).toBe(ROLLBACK_REQ.txnId);
+});
+
+// ---------------------------------------------------------------------------
+// Idempotency Test 7: authenticate/balance/roundEnd with betLog — 2 HTTP each, no idempotency rows
+// ---------------------------------------------------------------------------
+
+it('authenticate and roundEnd with betLog — no idempotency rows written; 2 HTTP calls each', async () => {
+  let authCount = 0;
+  let roundEndCount = 0;
+
+  const authRespBody = {
+    playerId: 'pid-1',
+    displayName: 'lucky_falcon_42',
+    currency: 'EUR',
+    balance: 100000,
+    country: 'MT',
+    jurisdiction: 'MT',
+    language: 'en',
+    rgLimits: { maxBetMinor: 500000, sessionEndsAt: 1716050000 },
+  };
+
+  server.use(
+    http.post('http://op.test/authenticate', async ({ request }) => {
+      authCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, authRespBody, ts);
+      return HttpResponse.json(authRespBody, { headers: signed.headers });
+    }),
+    http.post('http://op.test/round-end', async ({ request }) => {
+      roundEndCount++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const emptyBuf = Buffer.alloc(0);
+      const { signResponse: _sr, ...signing } = await import('./signing.js');
+      const sig = _sr({ status: 204, timestamp: ts, body: emptyBuf }, TEST_KEY);
+      return new HttpResponse(null, { status: 204, headers: { 'X-Signature': sig } });
+    }),
+  );
+
+  const betLog = makeBetLog();
+  const client = makeClientWithBetLog(betLog);
+
+  const authReq = { token: 'tok-1', ip: '1.2.3.4', userAgent: 'Mozilla/5.0', gameId: 'galaxy-crash' };
+  const roundEndReq = {
+    roundId: 'rnd-001', playerId: 'pid-1', crashPoint: 2.5,
+    serverSeedHash: 'abc', serverSeed: 'xyz', bets: [],
+  };
+
+  // Call authenticate twice — must make 2 HTTP calls (no idempotency)
+  await client.authenticate(authReq);
+  await client.authenticate(authReq);
+  expect(authCount).toBe(2);
+
+  // Call roundEnd twice — must make 2 HTTP calls (no idempotency)
+  await client.roundEnd(roundEndReq);
+  await client.roundEnd(roundEndReq);
+  expect(roundEndCount).toBe(2);
+
+  // No idempotency rows at all
+  // (authenticate/roundEnd have no txnId; we verify the table is empty)
+  const db = (betLog as unknown as { db: import('better-sqlite3').Database }).db;
+  const rows = db.prepare('SELECT * FROM txn_idempotency').all();
+  expect(rows).toHaveLength(0);
 });

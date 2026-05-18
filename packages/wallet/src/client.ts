@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from 'node:crypto';
-import { sign, verifyResponse } from './signing.js';
+import { sign, verifyResponse, sha256Hex } from './signing.js';
 import { type Operator } from './types.js';
 import {
   WalletError,
@@ -13,6 +13,7 @@ import {
   ResponseSignatureError,
   walletErrorFromResponse,
 } from './errors.js';
+import { type BetLog, type IdempotencyEntry, type TxnKind, IdempotencyMismatchError } from './bet-log.js';
 import type {
   AuthenticateRequest,
   AuthenticateResponse,
@@ -108,6 +109,10 @@ export interface WalletClientOptions {
    * The in-process client uses a finite cap. Default 8.
    */
   maxRollbackAttempts?: number;
+  /** When supplied, bet/win/rollback become crash-safe idempotent: a prior
+   *  recorded outcome for the same txnId short-circuits the HTTP call and
+   *  replays the recorded result. Pairs with the Task 1.7 recovery worker. */
+  betLog?: BetLog;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +126,7 @@ export class WalletClient {
   private readonly nowSeconds: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly maxRollbackAttempts: number;
+  private readonly betLog: BetLog | undefined;
 
   constructor(operator: Operator, opts?: WalletClientOptions) {
     this.operator = operator;
@@ -129,6 +135,7 @@ export class WalletClient {
     this.nowSeconds = opts?.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
     this.sleep = opts?.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxRollbackAttempts = opts?.maxRollbackAttempts ?? 8;
+    this.betLog = opts?.betLog;
   }
 
   // -------------------------------------------------------------------------
@@ -148,21 +155,21 @@ export class WalletClient {
   }
 
   bet(req: BetRequest): Promise<BetResponse> {
-    return this.executeWithRetry('bet', (policy) =>
-      this.doRequest<BetResponse>(policy.path, policy.timeoutMs, req),
-    );
+    return this.withIdempotency('bet', req.txnId, req, () =>
+      this.executeWithRetry('bet', (policy) =>
+        this.doRequest<BetResponse>(policy.path, policy.timeoutMs, req)));
   }
 
   win(req: WinRequest): Promise<WinResponse> {
-    return this.executeWithRetry('win', (policy) =>
-      this.doRequest<WinResponse>(policy.path, policy.timeoutMs, req),
-    );
+    return this.withIdempotency('win', req.txnId, req, () =>
+      this.executeWithRetry('win', (policy) =>
+        this.doRequest<WinResponse>(policy.path, policy.timeoutMs, req)));
   }
 
   rollback(req: RollbackRequest): Promise<RollbackResponse> {
-    return this.executeWithRetry('rollback', (policy) =>
-      this.doRequest<RollbackResponse>(policy.path, policy.timeoutMs, req),
-    );
+    return this.withIdempotency('rollback', req.txnId, req, () =>
+      this.executeWithRetry('rollback', (policy) =>
+        this.doRequest<RollbackResponse>(policy.path, policy.timeoutMs, req)));
   }
 
   /** Fire-and-forget per spec §5.6/§8. Never throws to the caller. */
@@ -181,6 +188,89 @@ export class WalletClient {
       }
       throw err; // programming bug — do not hide
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Idempotency wrapper (bet/win/rollback only)
+  // -------------------------------------------------------------------------
+
+  private async withIdempotency<T>(
+    kind: TxnKind,
+    txnId: string,
+    requestPayload: unknown,
+    exec: () => Promise<T>,
+  ): Promise<T> {
+    // Pure passthrough when no betLog supplied — preserves existing behavior exactly
+    if (!this.betLog) return exec();
+
+    const requestHash = sha256Hex(Buffer.from(JSON.stringify(requestPayload)));
+
+    const existing = this.betLog.getIdempotency(txnId);
+
+    if (existing) {
+      if (existing.requestHash === requestHash) {
+        // Short-circuit: replay the recorded result without any HTTP call
+        const envelope = JSON.parse(existing.responseJson) as { ok: boolean; value?: unknown; error?: { code: string; message: string; httpStatus: number; retryable: boolean; balanceMinor?: number } };
+        if (envelope.ok) {
+          return envelope.value as T;
+        }
+        // Confirmed rejection — reconstruct and rethrow the same WalletError
+        throw new WalletError(envelope.error!);
+      }
+      // Same txnId, different body — caller bug; do not send
+      throw new IdempotencyMismatchError(txnId);
+    }
+
+    // No existing record — execute the call
+    let result: T;
+    try {
+      result = await exec();
+    } catch (err) {
+      // Discriminate confirmed rejections using the EXACT same predicate as
+      // placeOperatorBet in packages/server/src/game/bets.ts
+      const isConfirmedRejection =
+        err instanceof WalletError
+        && !(err instanceof WalletNetworkError)
+        && !(err instanceof ResponseSignatureError)
+        && err.httpStatus >= 400 && err.httpStatus < 500;
+
+      if (isConfirmedRejection) {
+        const walletErr = err as WalletError;
+        const responseJson = JSON.stringify({
+          ok: false,
+          error: {
+            code: walletErr.code,
+            message: walletErr.message,
+            httpStatus: walletErr.httpStatus,
+            retryable: walletErr.retryable,
+            balanceMinor: walletErr.balanceMinor,
+          },
+        });
+        this.betLog.putIdempotency({
+          txnId,
+          operatorId: this.operator.operatorId,
+          kind,
+          requestHash,
+          responseJson,
+          createdAt: this.nowSeconds(),
+        } satisfies IdempotencyEntry);
+      }
+      // Non-confirmed (network / 5xx / signature): do NOT persist — leave no row
+      // so recovery can retry freely; operator §9 dedupes server-side.
+      throw err;
+    }
+
+    // Success: persist then return
+    this.betLog.putIdempotency({
+      txnId,
+      operatorId: this.operator.operatorId,
+      kind,
+      requestHash,
+      responseJson: JSON.stringify({ ok: true, value: result }),
+      createdAt: this.nowSeconds(),
+    } satisfies IdempotencyEntry);
+
+    return result;
   }
 
   // -------------------------------------------------------------------------
