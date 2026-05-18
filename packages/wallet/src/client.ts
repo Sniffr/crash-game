@@ -4,6 +4,7 @@
 // implements per-endpoint timeout + retry + backoff per §8.
 // ---------------------------------------------------------------------------
 
+import { randomUUID } from 'node:crypto';
 import { sign, verifyResponse } from './signing.js';
 import { type Operator } from './types.js';
 import {
@@ -12,115 +13,19 @@ import {
   ResponseSignatureError,
   walletErrorFromResponse,
 } from './errors.js';
-
-// ---------------------------------------------------------------------------
-// Request / Response types (spec §5 — field names follow the spec exactly)
-// ---------------------------------------------------------------------------
-
-// §5.1 POST /authenticate
-export interface AuthenticateRequest {
-  token: string;
-  ip: string;
-  userAgent: string;
-  gameId: string;
-}
-
-export interface AuthenticateResponse {
-  playerId: string;
-  displayName: string;
-  currency: string;
-  balance: number;         // minor units
-  country: string;
-  jurisdiction: string;
-  language: string;
-  rgLimits: {
-    maxBetMinor: number;
-    sessionEndsAt: number;
-  };
-}
-
-// §5.2 POST /balance
-export interface BalanceRequest {
-  playerId: string;
-  sessionId: string;
-}
-
-export interface BalanceResponse {
-  balance: number;   // minor units
-  currency: string;
-}
-
-// §5.3 POST /bet
-export interface BetRequest {
-  playerId: string;
-  sessionId: string;
-  roundId: string;
-  betId: string;
-  txnId: string;
-  amountMinor: number;
-  currency: string;
-  gameId: string;
-  placedAt: number;  // unix seconds
-}
-
-export interface BetResponse {
-  operatorTxnId: string;
-  balanceMinor: number;
-  currency: string;
-}
-
-// §5.4 POST /win
-export interface WinRequest {
-  playerId: string;
-  sessionId: string;
-  roundId: string;
-  betId: string;
-  betTxnId: string;
-  txnId: string;
-  amountMinor: number;
-  multiplier: number;
-  currency: string;
-  settledAt: number;  // unix seconds
-}
-
-export interface WinResponse {
-  operatorTxnId: string;
-  balanceMinor: number;
-  currency: string;
-}
-
-// §5.5 POST /rollback
-export interface RollbackRequest {
-  playerId: string;
-  betTxnId: string;
-  txnId: string;
-  reason: 'round_voided' | 'game_error' | 'timeout' | 'manual_void';
-}
-
-export interface RollbackResponse {
-  operatorTxnId: string;
-  balanceMinor: number;
-  currency: string;
-  status: 'rolled_back' | 'noop';
-}
-
-// §5.6 POST /round-end
-export interface RoundEndRequest {
-  roundId: string;
-  playerId: string;
-  crashPoint: number;
-  serverSeedHash: string;
-  serverSeed: string;
-  bets: Array<{
-    betId: string;
-    txnId: string;
-    amountMinor: number;
-    result: string;
-    winTxnId?: string;
-    winAmountMinor?: number;
-    multiplier?: number;
-  }>;
-}
+import type {
+  AuthenticateRequest,
+  AuthenticateResponse,
+  BalanceRequest,
+  BalanceResponse,
+  BetRequest,
+  BetResponse,
+  WinRequest,
+  WinResponse,
+  RollbackRequest,
+  RollbackResponse,
+  RoundEndRequest,
+} from './client-types.js';
 
 // ---------------------------------------------------------------------------
 // Per-endpoint policy table (spec §8)
@@ -220,7 +125,7 @@ export class WalletClient {
   constructor(operator: Operator, opts?: WalletClientOptions) {
     this.operator = operator;
     this.fetchImpl = opts?.fetchImpl ?? globalThis.fetch;
-    this.generateNonce = opts?.generateNonce ?? (() => crypto.randomUUID());
+    this.generateNonce = opts?.generateNonce ?? (() => randomUUID());
     this.nowSeconds = opts?.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
     this.sleep = opts?.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxRollbackAttempts = opts?.maxRollbackAttempts ?? 8;
@@ -270,8 +175,11 @@ export class WalletClient {
         true,  // isRoundEnd — handles 204 empty body
       );
     } catch (err) {
-      // Fire-and-forget: swallow all errors. Log as best-effort telemetry.
-      console.warn('[WalletClient] roundEnd failed (fire-and-forget):', err);
+      if (err instanceof WalletError) {
+        console.warn('[WalletClient] roundEnd failed (fire-and-forget):', err.code, err.message);
+        return;
+      }
+      throw err; // programming bug — do not hide
     }
   }
 
@@ -397,6 +305,7 @@ export class WalletClient {
     if (!sigValid) {
       throw new ResponseSignatureError(
         `Response signature verification failed for ${path} (status ${res.status})`,
+        res.status,
       );
     }
 

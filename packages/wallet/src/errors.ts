@@ -43,11 +43,11 @@ export class WalletNetworkError extends WalletError {
  * Protocol violation — NON-retryable, alert-worthy. code = 'RESPONSE_SIGNATURE_INVALID'.
  */
 export class ResponseSignatureError extends WalletError {
-  constructor(message: string) {
+  constructor(message: string, httpStatus: number) {
     super({
       code: 'RESPONSE_SIGNATURE_INVALID',
       message,
-      httpStatus: 0,
+      httpStatus,
       retryable: false,
     });
     this.name = 'ResponseSignatureError';

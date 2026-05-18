@@ -401,8 +401,9 @@ it('txnId constant across retries — body txnId identical on all attempts, X-No
 // Test 8: Bad response signature → ResponseSignatureError (non-retryable, 1 attempt)
 // ---------------------------------------------------------------------------
 
-it('bad response signature — ResponseSignatureError is thrown; non-retryable; 1 attempt', async () => {
+it('bad response signature — ResponseSignatureError is thrown; non-retryable; 1 attempt; no backoff sleep', async () => {
   let attempts = 0;
+  const { sleep, delays } = makeFakeSleep();
 
   server.use(
     http.post('http://op.test/bet', async () => {
@@ -416,13 +417,15 @@ it('bad response signature — ResponseSignatureError is thrown; non-retryable; 
     }),
   );
 
-  const client = makeClient();
+  const client = makeClient({ sleep });
   const err = await client.bet(BET_REQ).catch((e) => e);
 
   expect(err).toBeInstanceOf(ResponseSignatureError);
   expect(err.code).toBe('RESPONSE_SIGNATURE_INVALID');
   expect(err.retryable).toBe(false);
+  expect(err.httpStatus).toBe(200);
   expect(attempts).toBe(1);
+  expect(delays).toEqual([]);  // non-retryable: no backoff sleep must occur
 });
 
 // ---------------------------------------------------------------------------
