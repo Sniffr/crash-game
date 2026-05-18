@@ -8,6 +8,7 @@ import Database from 'better-sqlite3';
 import { BetLog, OperatorRegistry, runRecovery } from '@crash/wallet';
 import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
+import { WalletClientCache } from './wallet/client-cache';
 import { clients, sessionSockets, safeSend } from './ws/hub';
 import { handleMessage } from './ws/handlers';
 import * as Round from './game/round';
@@ -24,6 +25,7 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
+const walletClientCache = new WalletClientCache(registry, betLog);
 
 const app = express();
 app.use(express.json());
@@ -34,7 +36,7 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 initThemeLoader();
 
 // HTTP routes
-registerPublicRoutes(app);
+registerPublicRoutes(app, { walletClientCache });
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 wss.on('connection', (ws) => {

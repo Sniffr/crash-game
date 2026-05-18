@@ -137,6 +137,39 @@ function quantize(n: number): number {
 
 // ─── Session lifecycle ───────────────────────────────────────────────────────
 
+/** 8-hour TTL for operator-backed iframe sessions (spec §3). */
+const OPERATOR_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+/** Mint a new operator-backed session from a wallet authenticate response (Task 3.1a). */
+export async function createOperatorSession(opts: {
+  operatorId: string;
+  playerId: string;
+  currency: string;
+  balanceMinor: number;
+  displayName: string;
+  rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
+}): Promise<Session> {
+  ensureOnline();
+  const sessionId = newId();
+  const now = Date.now();
+  const session: Session = {
+    sessionId,
+    displayName: opts.displayName,
+    // Populate the legacy `balance` field with balanceMinor so the existing
+    // WS/stats code keeps working. Task 3.2 will teach the client to prefer balanceMinor.
+    balance: opts.balanceMinor,
+    createdAt: now,
+    expiresAt: now + OPERATOR_SESSION_TTL_MS,
+    operatorId: opts.operatorId,
+    playerId: opts.playerId,
+    currency: opts.currency,
+    balanceMinor: opts.balanceMinor,
+  };
+  await jput(sessKey(sessionId), session);
+  await jput(statsKey(sessionId), { ...ZERO_STATS });
+  return session;
+}
+
 export async function createSession(opts: { displayName?: string; balance?: number } = {}): Promise<Session> {
   ensureOnline();
   const sessionId = newId();

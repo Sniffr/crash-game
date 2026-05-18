@@ -1,3 +1,8 @@
+// NOTE: Route mounting order matters.
+// /launch MUST be registered BEFORE the SPA `*` fallback at the bottom of
+// this file so that the launch-error HTML response is returned by /launch
+// and not swallowed by the index.html catch-all.
+
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -9,8 +14,10 @@ import {
   type Commit,
   type Reveal,
 } from '@crash/shared/rng';
+import { WalletError } from '@crash/wallet';
 import {
   createSession,
+  createOperatorSession,
   getSession,
   getStats,
   getHistory,
@@ -20,11 +27,62 @@ import {
 import { getActiveTheme } from '../theme/loader';
 import { getAllHistory } from '../game/history';
 import * as round from '../game/round';
+import type { WalletClientCache } from '../wallet/client-cache';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const clientDist = path.join(__dirname, '../../../client/dist');
+
+// ─── Launch error HTML template (loaded once at module initialisation) ────────
+const LAUNCH_ERROR_TEMPLATE_PATH = path.join(__dirname, '../views/launch-error.html');
+let _launchErrorTemplate: string | null = null;
+
+function getLaunchErrorTemplate(): string {
+  if (_launchErrorTemplate === null) {
+    try {
+      _launchErrorTemplate = fs.readFileSync(LAUNCH_ERROR_TEMPLATE_PATH, 'utf8');
+    } catch {
+      // Fallback in case the file is missing (shouldn't happen in production)
+      _launchErrorTemplate = `<!DOCTYPE html><html><body><p>{{message}}</p>{{lobbyButton}}</body></html>`;
+    }
+  }
+  return _launchErrorTemplate;
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function replaceAll(str: string, search: string, replacement: string): string {
+  return str.split(search).join(replacement);
+}
+
+function renderLaunchError(opts: { title: string; message: string; lobbyUrl?: string }): string {
+  const title = escapeHtml(opts.title);
+  const message = escapeHtml(opts.message);
+  const lobbyButton = opts.lobbyUrl
+    ? `<a href="${escapeHtml(opts.lobbyUrl)}" class="btn">Return to lobby</a>`
+    : '';
+  let html = getLaunchErrorTemplate();
+  html = replaceAll(html, '{{title}}', title);
+  html = replaceAll(html, '{{message}}', message);
+  html = replaceAll(html, '{{lobbyButton}}', lobbyButton);
+  return html;
+}
+
+// ─── Public route deps ────────────────────────────────────────────────────────
+
+export interface PublicRouteDeps {
+  walletClientCache: WalletClientCache;
+}
+
+// ─── Error helper ─────────────────────────────────────────────────────────────
 
 function sendStoreError(res: express.Response, err: unknown) {
   if (err instanceof StoreOfflineError) {
@@ -34,7 +92,9 @@ function sendStoreError(res: express.Response, err: unknown) {
   return res.status(500).json({ error: (err as Error).message });
 }
 
-export function registerPublicRoutes(app: express.Application) {
+// ─── Route registration ───────────────────────────────────────────────────────
+
+export function registerPublicRoutes(app: express.Application, deps: PublicRouteDeps) {
   // ─── Static client ─────────────────────────────────────────────────────────
   app.use(express.static(clientDist));
 
@@ -127,6 +187,113 @@ export function registerPublicRoutes(app: express.Application) {
     } catch (err) {
       return sendStoreError(res, err);
     }
+  });
+
+  // ─── Launch endpoint (spec §3 / §5.1) ─────────────────────────────────────
+  // Must be registered BEFORE the SPA `*` fallback below.
+  app.get('/launch', async (req, res) => {
+    const operator  = String(req.query.operator  ?? '').trim();
+    const token     = String(req.query.token     ?? '').trim();
+    const currency  = String(req.query.currency  ?? '').trim();
+    const lobbyUrl  = String(req.query.lobby_url ?? '').trim();
+    const returnUrl = String(req.query.return_url ?? '').trim();
+    // Optional: lang, jurisdiction, mode — not used server-side yet (Task 3.2 handles client-side)
+
+    // 1. Validate required params
+    if (!operator || !token || !currency) {
+      res.status(400).send(renderLaunchError({
+        title: 'Launch Error',
+        message: 'Missing required launch parameters.',
+        lobbyUrl: lobbyUrl || undefined,
+      }));
+      return;
+    }
+
+    // 2. Resolve the operator's WalletClient (returns null for unknown or paused)
+    const client = deps.walletClientCache.get(operator);
+    if (!client) {
+      res.status(404).send(renderLaunchError({
+        title: 'Unknown Operator',
+        message: 'Unknown operator.',
+        lobbyUrl: lobbyUrl || undefined,
+      }));
+      return;
+    }
+
+    // 3. Authenticate the launch token against the operator's wallet (spec §5.1)
+    let authResp: Awaited<ReturnType<typeof client.authenticate>>;
+    try {
+      authResp = await client.authenticate({
+        token,
+        ip: req.ip ?? '',
+        userAgent: req.get('user-agent') ?? '',
+        gameId: 'galaxy-crash',
+      });
+    } catch (err) {
+      // Translate operator errors to player-friendly messages
+      let message = 'Could not start the game. Please try again.';
+      let status = 500;
+
+      if (err instanceof WalletError) {
+        status = err.httpStatus >= 400 && err.httpStatus < 500 ? 401 : 500;
+        if (err.code === 'INVALID_TOKEN') {
+          message = 'Launch token expired. Please return to the lobby.';
+          status = 401;
+        } else if (err.code === 'PLAYER_BLOCKED') {
+          message = 'Your account is currently restricted. Please contact support.';
+          status = 403;
+        } else if (err.code === 'SESSION_EXPIRED') {
+          message = 'Your session has expired. Please return to the lobby.';
+          status = 401;
+        }
+      }
+
+      console.error(`[launch] authenticate failed for operator=${operator}:`, err instanceof WalletError ? `${err.code} ${err.message}` : err);
+      res.status(status).send(renderLaunchError({
+        title: 'Launch Failed',
+        message,
+        lobbyUrl: lobbyUrl || undefined,
+      }));
+      return;
+    }
+
+    // 4. Currency mismatch check
+    if (authResp.currency !== currency) {
+      res.status(422).send(renderLaunchError({
+        title: 'Currency Mismatch',
+        message: `Currency mismatch: launch URL requested ${escapeHtml(currency)} but operator returned ${escapeHtml(authResp.currency)}.`,
+        lobbyUrl: lobbyUrl || undefined,
+      }));
+      return;
+    }
+
+    // 5. Mint an operator session
+    let session: Awaited<ReturnType<typeof createOperatorSession>>;
+    try {
+      session = await createOperatorSession({
+        operatorId: operator,
+        playerId: authResp.playerId,
+        currency: authResp.currency,
+        balanceMinor: authResp.balance,
+        displayName: authResp.displayName,
+        rgLimits: authResp.rgLimits,
+      });
+    } catch (err) {
+      console.error('[launch] createOperatorSession failed:', err);
+      res.status(500).send(renderLaunchError({
+        title: 'Launch Failed',
+        message: 'Could not start the game. Please try again.',
+        lobbyUrl: lobbyUrl || undefined,
+      }));
+      return;
+    }
+
+    // 6. Redirect into the SPA with the session id + optional lobby/return URLs
+    let location = `/?session=${encodeURIComponent(session.sessionId)}`;
+    if (lobbyUrl)  location += `&lobby=${encodeURIComponent(lobbyUrl)}`;
+    if (returnUrl) location += `&return=${encodeURIComponent(returnUrl)}`;
+
+    res.redirect(302, location);
   });
 
   // ─── SPA fallback ──────────────────────────────────────────────────────────
