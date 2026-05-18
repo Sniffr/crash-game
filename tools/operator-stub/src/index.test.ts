@@ -185,41 +185,60 @@ describe('POST /win', () => {
     expect(winRes.headers['x-signature']).toBeTruthy();
   });
 
-  it('STUB_FAIL_NEXT_WIN — first call returns 500, retry succeeds', async () => {
-    // Manually set the flag (import is live reference)
+  it('STUB_FAIL_NEXT_WIN — first call returns 500, retry with same txnId succeeds', async () => {
+    // Place a bet first so there is a valid betTxnId
+    const betTxnId = crypto.randomUUID();
+    const betBody = {
+      playerId: 'pid-2',
+      sessionId: 'ses-4',
+      roundId: 'rnd-4',
+      betId: 'bet-4',
+      txnId: betTxnId,
+      amountMinor: 500,
+      currency: 'USD',
+      gameId: 'galaxy-crash',
+      placedAt: Math.floor(Date.now() / 1000),
+    };
+    const betRes = await request(app)
+      .post('/bet')
+      .set(signedHeaders('POST', '/bet', betBody))
+      .send(betBody);
+    expect(betRes.status).toBe(200);
+
+    // Arm the forced-failure flag at runtime — shouldFailNextWin() reads it lazily.
     process.env['STUB_FAIL_NEXT_WIN'] = '1';
-    // Re-import would be complex; instead patch via the module's exported behaviour
-    // We test the env flag by toggling the internal variable through a fresh module approach.
-    // Since vitest runs in the same process, we'll test the 500 by directly hitting the endpoint
-    // while the module flag is set. The env var is read at startup; but we can force it via
-    // a small workaround: reset the flag on the running module.
 
-    // Actually the cleanest approach with a single-file module: just hit /win twice
-    // after we know failNextWin is false (it starts false unless STUB_FAIL_NEXT_WIN is set).
-    // We can't easily set it to true post-import in this test runner without refactoring.
-    // Skip the forced-failure part; verify that two /win calls in sequence both succeed.
-
+    const winTxnId = crypto.randomUUID();
     const winBody = {
       playerId: 'pid-2',
       sessionId: 'ses-4',
       roundId: 'rnd-4',
       betId: 'bet-4',
-      betTxnId: crypto.randomUUID(),
-      txnId: crypto.randomUUID(),
-      amountMinor: 500,
+      betTxnId,
+      txnId: winTxnId,
+      amountMinor: 750,
       multiplier: 1.5,
       currency: 'USD',
       settledAt: Math.floor(Date.now() / 1000),
     };
 
-    const res = await request(app)
+    // First call must return 500 — flag is consumed (one-shot).
+    const failRes = await request(app)
       .post('/win')
       .set(signedHeaders('POST', '/win', winBody))
       .send(winBody);
+    expect(failRes.status).toBe(500);
+    expect(failRes.body.error.code).toBe('UPSTREAM_ERROR');
 
-    // STUB_FAIL_NEXT_WIN env is set at process start; here we're testing post-import state.
-    // The flag is reset once used, so either 500 (first hit) or 200 (retry).
-    expect([200, 500]).toContain(res.status);
+    // Retry with the same txnId — failure was NOT cached, so this must succeed.
+    const retryRes = await request(app)
+      .post('/win')
+      .set(signedHeaders('POST', '/win', winBody))
+      .send(winBody);
+    expect(retryRes.status).toBe(200);
+
+    // Guard: flag should already be consumed; clean up just in case.
+    delete process.env['STUB_FAIL_NEXT_WIN'];
   });
 });
 

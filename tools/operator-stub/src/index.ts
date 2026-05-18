@@ -21,8 +21,21 @@ const DEFAULT_KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLWZvcmRldg=='; // "test-stu
 const SIGNING_KEY_B64 = process.env['STUB_SIGNING_KEY'] ?? DEFAULT_KEY_B64;
 const SIGNING_KEY = Buffer.from(SIGNING_KEY_B64, 'base64');
 
-// When truthy, the next /win call returns 500 (cleared after one use).
-let failNextWin = !!process.env['STUB_FAIL_NEXT_WIN'];
+// When truthy, the next /win call returns 500 (one-shot, cleared after use).
+let pendingForceFailWin = false;
+
+function shouldFailNextWin(): boolean {
+  // Arm flag lazily on each call so tests can set the env var at runtime.
+  if (process.env['STUB_FAIL_NEXT_WIN']) {
+    pendingForceFailWin = true;
+    delete process.env['STUB_FAIL_NEXT_WIN'];
+  }
+  if (pendingForceFailWin) {
+    pendingForceFailWin = false;
+    return true;
+  }
+  return false;
+}
 
 // ---------------------------------------------------------------------------
 // In-memory state
@@ -358,9 +371,8 @@ app.post('/win', signatureMiddleware, (req: Request, res: Response) => {
   const opId = operatorId(req);
 
   // STUB_FAIL_NEXT_WIN: simulate upstream failure BEFORE idempotency check
-  if (failNextWin) {
-    failNextWin = false;
-    res.status(500).json({ error: { code: 'UPSTREAM_ERROR', message: 'Simulated failure' } });
+  if (shouldFailNextWin()) {
+    sendError(res, 500, 'UPSTREAM_ERROR', 'Simulated failure', ts);
     return;
   }
 
@@ -476,6 +488,12 @@ app.post('/rollback', signatureMiddleware, (req: Request, res: Response) => {
 // 5.6 POST /round-end
 app.post('/round-end', signatureMiddleware, (req: Request, res: Response) => {
   roundEndLog.push(req.body as object);
+  // 204 has no body; sign with SHA256('') per spec §4.3
+  const timestamp = req.headers['x-timestamp'] as string;
+  const emptyBodyHash = sha256Hex(Buffer.alloc(0));
+  const resSigString = `204\n${timestamp}\n${emptyBodyHash}`;
+  const resSig = hmacSha256Hex(SIGNING_KEY, resSigString);
+  res.setHeader('X-Signature', resSig);
   res.status(204).send();
 });
 
