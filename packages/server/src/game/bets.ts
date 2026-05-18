@@ -222,7 +222,7 @@ export async function cashOutOperatorBet(
   // the /win HTTP call. If the process dies after the operator credits but
   // before win_settled commits, Task 1.7 can read winTxnId from the SETTLING
   // row and safely retry /win without double-credit risk (spec §9).
-  const settlingRow = betLog.transition(input.betId, 'cashout_requested', { winTxnId: input.winTxnId });
+  const settlingRow = betLog.transition(input.betId, 'cashout_requested', { winTxnId: input.winTxnId, multiplier: input.multiplier, winAmountMinor: input.winAmountMinor });
 
   // Call the operator /win endpoint
   try {

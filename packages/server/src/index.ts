@@ -1,6 +1,11 @@
 import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import Database from 'better-sqlite3';
+import { BetLog, OperatorRegistry, runRecovery } from '@crash/wallet';
 import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { clients, sessionSockets, safeSend } from './ws/hub';
@@ -8,6 +13,17 @@ import { handleMessage } from './ws/handlers';
 import * as Round from './game/round';
 const { CONFIG, startBettingPhase } = Round;
 import { getRecentHistory } from './game/history';
+
+// ---------------------------------------------------------------------------
+// Database + crash-recovery
+// ---------------------------------------------------------------------------
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const dbPath = process.env['DB_PATH'] ?? path.join(__dirname, '../../../data/galaxy-crash.db');
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+const db = new Database(dbPath);
+const betLog = new BetLog(db);
+const registry = new OperatorRegistry(db);
 
 const app = express();
 app.use(express.json());
@@ -77,6 +93,17 @@ wss.on('connection', (ws) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 3001;
 const HOST = process.env.HOST ?? '0.0.0.0';
+
+// Run crash-recovery before accepting connections.
+// Failure is non-fatal — log and continue.
+let recoveryReport: unknown = null;
+try {
+  recoveryReport = await runRecovery({ betLog, registry });
+} catch (err) {
+  console.error('[recovery] error during startup sweep (continuing):', err);
+}
+console.log('[recovery] report', JSON.stringify(recoveryReport));
+
 server.listen(PORT, HOST, () => {
   console.log(`[server] listening on ${HOST}:${PORT}`);
   console.log(`[server] RTP=${CONFIG.rtp}  maxMultiplier=${CONFIG.maxMultiplier}  growth=${Round.GROWTH_RATE}`);

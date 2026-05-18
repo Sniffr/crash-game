@@ -6,3 +6,4 @@ export * from './bet-log.js';
 export * from './errors.js';
 export * from './client-types.js';
 export * from './client.js';
+export * from './recovery.js';
