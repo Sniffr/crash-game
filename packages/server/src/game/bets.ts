@@ -104,26 +104,49 @@ export async function tryCashoutBet(
   if (bet.operatorId && bet.betId && bet.currency && typeof bet.amountMinor === 'number') {
     const deps = getOperatorWiringDeps();
     if (!deps) {
-      // Should never happen post-bootstrap — fall back defensively
-      console.error('[tryCashoutBet] OperatorWiringDeps not initialized — falling back to legacy cashout');
-      return cashOutBet(bet, atMultiplier, source);
+      // Should never happen post-bootstrap — this would silently corrupt balances
+      // with minor-unit math if we fell through to legacy cashOutBet.
+      throw new Error('[tryCashoutBet] OperatorWiringDeps not initialized — bootstrap defect');
     }
 
     const client = deps.walletClientCache.get(bet.operatorId);
     if (!client) {
-      // Operator paused or unknown — mark cashed out so we don't loop, surface error
+      // Operator paused or unknown — drive betLog through SETTLING → WIN_FAILED so
+      // Task 4.2 force-credit can recover when the operator is resumed.
+      const winTxnId = randomUUID();
+      const winAmountMinor = Math.round(bet.amountMinor * atMultiplier);
+      try {
+        deps.betLog.transition(bet.betId, 'cashout_requested', { winTxnId, multiplier: atMultiplier, winAmountMinor });
+        deps.betLog.transition(bet.betId, 'win_failed', { winTxnId, errorCode: 'OPERATOR_PAUSED_AT_CASHOUT' });
+      } catch (transitionErr) {
+        // Already terminal (e.g. already SETTLED/LOST/VOIDED) — log and continue
+        console.error('[tryCashoutBet] OPERATOR_PAUSED betLog transition failed (likely already-terminal row):', transitionErr);
+      }
+
       bet.cashedOut = true;
       bet.cashoutMultiplier = atMultiplier;
+      bet.winTxnId = winTxnId;
+
+      // Fire onWinFailed — this IS a WIN_FAILED situation
+      const failedRow = deps.betLog.getById(bet.betId);
+      if (failedRow) {
+        deps.onWinFailed?.(failedRow);
+      }
+
       sendToSession(bet.playerId, {
-        type: 'error',
-        data: { message: 'Operator unavailable — win not credited', code: 'OPERATOR_PAUSED' },
+        type: 'cashout_pending',
+        data: {
+          message: 'Win pending — operator unavailable; will be credited automatically.',
+          code: 'WIN_PENDING',
+          winTxnId,
+        },
       });
       broadcast({
         type: 'cashout',
         data: {
           playerId: bet.playerId,
           multiplier: atMultiplier,
-          profit: 0,
+          profit: winAmountMinor,
           isBot: false,
           displayName: bet.displayName,
           source,
@@ -182,9 +205,8 @@ export async function tryCashoutBet(
 
       const walletErr = err instanceof WalletError ? err : null;
       console.error('[tryCashoutBet] WIN_FAILED for bet', bet.betId, err);
-      if (deps.onWinFailed) {
-        deps.onWinFailed(bet);
-      }
+      // Note: cashOutOperatorBet already called deps.onWinFailed before rethrowing.
+      // Do NOT call it again here — that would fire two alerts per WIN_FAILED (Phase 4.1).
 
       sendToSession(bet.playerId, {
         type: 'cashout_pending',

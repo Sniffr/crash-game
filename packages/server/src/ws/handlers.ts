@@ -182,11 +182,11 @@ export async function handleMessage(
 }
 
 /**
+ * @internal Exported for unit testing only — call handleMessage('place_bet', ...) in production.
+ *
  * Handle place_bet for an operator-backed session.
  * Routes through placeOperatorBet → walletClient.bet → betLog ARMED.
  * On WalletError (e.g. INSUFFICIENT_FUNDS): sends error frame, does NOT push bet.
- *
- * @internal exported for testing
  */
 export async function handlePlaceOperatorBet(
   ws: WebSocket,

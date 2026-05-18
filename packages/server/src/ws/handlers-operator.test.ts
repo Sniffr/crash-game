@@ -53,11 +53,12 @@ import { WalletClientCache } from '../wallet/client-cache.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
 
 import { getSession, checkRateLimit } from '../store.js';
-import { safeSend, broadcast } from './hub.js';
+import { safeSend, broadcast, sendToSession } from './hub.js';
 
 const mockGetSession = vi.mocked(getSession);
 const mockSafeSend = vi.mocked(safeSend);
 const mockBroadcast = vi.mocked(broadcast);
+const mockSendToSession = vi.mocked(sendToSession);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -321,10 +322,16 @@ describe('WS handler operator discrimination', () => {
     const balResp = await walletClient.balance({ playerId: 'pid-2', sessionId });
     expect(balResp.balance).toBe(105_000);
 
-    // cashout_success frame sent
-    expect(mockSafeSend).toHaveBeenCalledWith(
-      fakeWs,
-      expect.anything(), // safeSend is not what sends cashout_success (sendToSession is)
+    // cashout_success frame sent via sendToSession (not safeSend)
+    expect(mockSendToSession).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({
+        type: 'cashout_success',
+        data: expect.objectContaining({
+          multiplier: expect.any(Number),
+          winAmountMinor: expect.any(Number),
+        }),
+      }),
     );
   });
 
@@ -367,6 +374,12 @@ describe('WS handler operator discrimination', () => {
         data: expect.objectContaining({ code: 'INSUFFICIENT_FUNDS' }),
       }),
     );
+
+    // betLog row must be VOIDED (placeOperatorBet transitions PENDING→VOIDED on confirmed rejection)
+    const betId = `bet-${sessionId}-4`;
+    const betRow = betLog.getById(betId);
+    expect(betRow?.state).toBe('VOIDED');
+    expect(betRow?.errorCode).toBeTruthy();
 
     // Stub balance unchanged: 100000
     const walletClient = walletClientCache.get(OPERATOR_ID)!;
