@@ -3,7 +3,7 @@ import {
   commitSeed,
   crashPointFor,
 } from '@crash/shared/rng';
-import { type RoundState, type Bet, type GameConfig } from '@crash/shared/types';
+import { type RoundState, type Bet, type GameConfig, type HistoryEntry } from '@crash/shared/types';
 import { GAME_CONFIG } from '@crash/shared/config';
 import { generateBotBets, type BotBet } from '../bots';
 import { broadcast } from '../ws/hub';
@@ -15,7 +15,6 @@ import {
   getStats,
   StoreOfflineError,
 } from '../store';
-import { type HistoryEntry } from '@crash/shared/types';
 import { sendToSession } from '../ws/hub';
 
 // ─── Game config ──────────────────────────────────────────────────────────────

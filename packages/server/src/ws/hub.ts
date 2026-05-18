@@ -1,7 +1,5 @@
 import { WebSocket } from 'ws';
 
-/** Per-session metadata for real-player bets (display name lookup). */
-export const sessionMeta = new Map<string, { displayName: string }>();
 /** ws lookup by sessionId so auto-cashout can notify the right tabs. */
 export const sessionSockets = new Map<string, Set<WebSocket>>();
 export const clients = new Set<WebSocket>();

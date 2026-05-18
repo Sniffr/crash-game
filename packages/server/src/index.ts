@@ -79,7 +79,7 @@ const PORT = Number(process.env.PORT) || 3001;
 const HOST = process.env.HOST ?? '0.0.0.0';
 server.listen(PORT, HOST, () => {
   console.log(`[server] listening on ${HOST}:${PORT}`);
-  console.log(`[server] RTP=${CONFIG.rtp}  maxMultiplier=${CONFIG.maxMultiplier}  growth=0.06`);
+  console.log(`[server] RTP=${CONFIG.rtp}  maxMultiplier=${CONFIG.maxMultiplier}  growth=${Round.GROWTH_RATE}`);
   startBettingPhase();
 });
 

@@ -11,11 +11,12 @@ import {
   setBalance,
   StoreOfflineError,
 } from '../store';
-import { safeSend } from './hub';
-import { sessionMeta } from './hub';
+import { safeSend, broadcast } from './hub';
 import { currentRound } from '../game/round';
 import { cashOutBet } from '../game/bets';
-import { broadcast } from './hub';
+
+/** Per-session metadata for real-player bets (display name lookup). */
+const sessionMeta = new Map<string, { displayName: string }>();
 
 export async function handleMessage(
   ws: WebSocket,

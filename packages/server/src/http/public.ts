@@ -19,7 +19,6 @@ import {
 } from '../store';
 import { getActiveTheme } from '../theme/loader';
 import { getAllHistory } from '../game/history';
-import { CONFIG } from '../game/round';
 import * as round from '../game/round';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -65,7 +64,7 @@ export function registerPublicRoutes(app: express.Application) {
     const roundNum = parseInt(rn, 10);
     if (!Number.isFinite(roundNum)) return res.status(400).json({ error: 'roundNumber must be an integer' });
     try {
-      const crashPoint = crashPointFor(seed, roundNum, CONFIG);
+      const crashPoint = crashPointFor(seed, roundNum, round.CONFIG);
       const hashCommit = commitSeed(seed);
       res.json({ roundNumber: roundNum, serverSeed: seed, crashPoint, hashCommit });
     } catch (err) {
@@ -82,7 +81,7 @@ export function registerPublicRoutes(app: express.Application) {
       const reveal: Reveal = {
         roundNumber: rn,
         serverSeed: seed,
-        crashPoint: crashPointFor(seed, rn, CONFIG),
+        crashPoint: crashPointFor(seed, rn, round.CONFIG),
       };
       const result = verifyRound(commit, reveal);
       res.json({ ...result, computedCrash: reveal.crashPoint, revealedSeed: seed });
