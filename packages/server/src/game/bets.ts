@@ -13,6 +13,8 @@ import {
   type BetRow,
   WalletError,
   WalletNetworkError,
+  ResponseSignatureError,
+  InvalidTransitionError,
 } from '@crash/wallet';
 
 /** Reference to the current round — set by game/round.ts at runtime. */
@@ -157,18 +159,31 @@ export async function placeOperatorBet(
       betOpTxnId: resp.operatorTxnId,
     });
   } catch (err) {
-    // Step 3b: wallet failure → VOIDED
-    if (err instanceof WalletError) {
-      betLog.transition(input.betId, 'bet_rejected', { errorCode: err.code });
-      throw err;
+    // Step 3b: discriminate confirmed-rejection vs ambiguous failure.
+    //
+    // "Confirmed not debited" = signed 4xx business rejection:
+    //   WalletError (not Network, not signature) with httpStatus 400–499.
+    // Everything else is ambiguous: the operator MAY have debited the player.
+    const walletErr = err instanceof WalletError
+      ? err
+      : new WalletNetworkError(err instanceof Error ? err.message : String(err));
+
+    const isConfirmedRejection =
+      walletErr instanceof WalletError
+      && !(walletErr instanceof WalletNetworkError)
+      && !(walletErr instanceof ResponseSignatureError)
+      && walletErr.httpStatus >= 400 && walletErr.httpStatus < 500;
+
+    if (isConfirmedRejection) {
+      // Signed 4xx: operator definitively says "no debit happened" → VOIDED
+      betLog.transition(input.betId, 'bet_rejected', { errorCode: walletErr.code });
+    } else {
+      // Ambiguous /bet failure — operator may have debited. Task 1.7 issues
+      // /rollback (spec §5.5: unknown txnId => 200 noop).
+      betLog.transition(input.betId, 'rollback_started', { errorCode: walletErr.code });
     }
-    // Unexpected non-WalletError (shouldn't happen — client wraps everything,
-    // but guard defensively)
-    const wrapped = new WalletNetworkError(
-      err instanceof Error ? err.message : String(err),
-    );
-    betLog.transition(input.betId, 'bet_rejected', { errorCode: wrapped.code });
-    throw wrapped;
+
+    throw walletErr;
   }
 }
 
@@ -203,8 +218,11 @@ export async function cashOutOperatorBet(
 ): Promise<BetRow> {
   const { walletClient, betLog } = deps;
 
-  // Transition to SETTLING (validates state machine — throws InvalidTransitionError if illegal)
-  const settlingRow = betLog.transition(input.betId, 'cashout_requested');
+  // Transition to SETTLING, persisting winTxnId as the idempotency key BEFORE
+  // the /win HTTP call. If the process dies after the operator credits but
+  // before win_settled commits, Task 1.7 can read winTxnId from the SETTLING
+  // row and safely retry /win without double-credit risk (spec §9).
+  const settlingRow = betLog.transition(input.betId, 'cashout_requested', { winTxnId: input.winTxnId });
 
   // Call the operator /win endpoint
   try {
@@ -294,8 +312,9 @@ export async function expireOperatorBetsOnCrash(
     try {
       betLog.transition(row.betId, 'round_crashed');
       count++;
-    } catch {
-      // If state changed between listByRound and transition (race), skip
+    } catch (e) {
+      if (!(e instanceof InvalidTransitionError)) throw e;
+      // Row left ARMED/FLYING window or already terminal — skip silently.
     }
   }
 

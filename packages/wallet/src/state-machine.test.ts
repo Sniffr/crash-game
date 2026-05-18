@@ -17,6 +17,7 @@ const LEGAL_TRANSITIONS: [BetState, BetEvent, BetState][] = [
   // PENDING
   ['PENDING', 'bet_accepted',      'ARMED'],
   ['PENDING', 'bet_rejected',      'VOIDED'],
+  ['PENDING', 'rollback_started',  'ROLLBACK_PENDING'],
   // ARMED
   ['ARMED',   'round_started',     'FLYING'],
   ['ARMED',   'cashout_requested', 'SETTLING'],
