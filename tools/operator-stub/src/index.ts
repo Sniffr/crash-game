@@ -17,7 +17,7 @@ import express, { Request, Response, NextFunction } from 'express';
 const PORT = parseInt(process.env['PORT'] ?? '4000', 10);
 
 // 32-byte key. Override via STUB_SIGNING_KEY (base64-encoded).
-const DEFAULT_KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLWZvcmRldg=='; // "test-stub-key-32bytes-fordev"
+const DEFAULT_KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLXYwLXBhZGRpbmc='; // "test-stub-key-32bytes-v0-padding"
 const SIGNING_KEY_B64 = process.env['STUB_SIGNING_KEY'] ?? DEFAULT_KEY_B64;
 const SIGNING_KEY = Buffer.from(SIGNING_KEY_B64, 'base64');
 
@@ -511,6 +511,7 @@ export function resetStubState(): void {
   players.set('pid-3', { currency: 'BTC', balance: 1000000, displayName: 'void_walker_3' });
 
   idempotencyTable.clear();
+  betByTxnId.clear();
   nonceCache.clear();
   roundEndLog.length = 0;
 

@@ -13,7 +13,7 @@ import type { Server } from 'node:http';
 // Signing helpers (mirror spec §4.2)
 // ---------------------------------------------------------------------------
 
-const KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLWZvcmRldg==';
+const KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLXYwLXBhZGRpbmc='; // "test-stub-key-32bytes-v0-padding"
 const KEY = Buffer.from(KEY_B64, 'base64');
 const API_KEY = 'test-operator';
 

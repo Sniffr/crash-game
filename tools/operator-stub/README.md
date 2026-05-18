@@ -55,7 +55,7 @@ Override with `STUB_SIGNING_KEY` (base64-encoded 32-byte secret):
 STUB_SIGNING_KEY="$(openssl rand -base64 32)" npm start
 ```
 
-Default test key (base64): `dGVzdC1zdHViLWtleS0zMmJ5dGVzLWZvcmRldg==`
+Default test key is 32 bytes (constant `test-stub-key-32bytes-v0-padding`), base64: `dGVzdC1zdHViLWtleS0zMmJ5dGVzLXYwLXBhZGRpbmc=`
 
 ---
 
@@ -96,7 +96,7 @@ For quick manual testing you can use the helper script below to sign requests. I
 ```bash
 sign_request() {
   local METHOD=$1 PATH=$2 BODY=$3
-  local KEY_B64="dGVzdC1zdHViLWtleS0zMmJ5dGVzLWZvcmRldg=="
+  local KEY_B64="dGVzdC1zdHViLWtleS0zMmJ5dGVzLXYwLXBhZGRpbmc="  # test-stub-key-32bytes-v0-padding
   local TS=$(date +%s)
   local NONCE=$(uuidgen | tr '[:upper:]' '[:lower:]')
   local BODY_HASH=$(printf '%s' "$BODY" | openssl dgst -sha256 -hex | awk '{print $2}')
