@@ -3,3 +3,5 @@ export * from './operator-registry.js';
 export * from './signing.js';
 export * from './state-machine.js';
 export * from './bet-log.js';
+export * from './errors.js';
+export * from './client.js';
