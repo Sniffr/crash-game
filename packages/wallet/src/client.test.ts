@@ -684,7 +684,7 @@ it('non-confirmed failure (5xx) does not persist — recovery can retry freely',
   expect(afterFirstRound).toBe(4); // bet exhausts 4 attempts
 
   // Must NOT have persisted an idempotency row
-  expect(betLog.getIdempotency(BET_REQ.txnId)).toBeNull();
+  expect(betLog.getIdempotency(TEST_OPERATOR.operatorId, BET_REQ.txnId)).toBeNull();
 
   // Second round: same txnId+body → makes NEW HTTP calls (no short-circuit)
   await client.bet(BET_REQ).catch(() => {});
@@ -750,7 +750,7 @@ it('win success persists and replays without HTTP', async () => {
   expect(callCount).toBe(1); // no additional HTTP
 
   // Verify row stored with kind='win' and correct txnId
-  const entry = betLog.getIdempotency(WIN_REQ.txnId);
+  const entry = betLog.getIdempotency(TEST_OPERATOR.operatorId, WIN_REQ.txnId);
   expect(entry).not.toBeNull();
   expect(entry!.kind).toBe('win');
   expect(entry!.txnId).toBe(WIN_REQ.txnId);
@@ -785,7 +785,7 @@ it('rollback success persists and replays without HTTP', async () => {
   expect(callCount).toBe(1); // no additional HTTP
 
   // Verify row stored with kind='rollback' and correct txnId
-  const entry = betLog.getIdempotency(ROLLBACK_REQ.txnId);
+  const entry = betLog.getIdempotency(TEST_OPERATOR.operatorId, ROLLBACK_REQ.txnId);
   expect(entry).not.toBeNull();
   expect(entry!.kind).toBe('rollback');
   expect(entry!.txnId).toBe(ROLLBACK_REQ.txnId);
@@ -875,7 +875,7 @@ it('success persistence failure does NOT mask success — bet resolves even when
 
   // Stub betLog: getIdempotency returns null (no existing record), putIdempotency throws
   const stubbedBetLog: BetLog = {
-    getIdempotency: (_txnId: string) => null,
+    getIdempotency: (_operatorId: string, _txnId: string) => null,
     putIdempotency: (_entry: unknown) => { throw new Error('DB write failed'); },
   } as unknown as BetLog;
 
@@ -913,7 +913,7 @@ it('confirmed-rejection persistence failure — original WalletError propagates 
 
   // Stub betLog: getIdempotency returns null, putIdempotency throws
   const stubbedBetLog: BetLog = {
-    getIdempotency: (_txnId: string) => null,
+    getIdempotency: (_operatorId: string, _txnId: string) => null,
     putIdempotency: (_entry: unknown) => { throw new Error('DB write failed'); },
   } as unknown as BetLog;
 
@@ -1021,4 +1021,97 @@ it('genuine different-transaction (same txnId, different amountMinor) still thro
   const err = await client.bet(reqC).catch((e) => e);
   expect(err).toBeInstanceOf(IdempotencyMismatchError);
   expect(callCount).toBe(1); // no additional HTTP call was made
+});
+
+// ---------------------------------------------------------------------------
+// Spec §9 cross-operator isolation: two operators, same txnId → independent rows
+// ---------------------------------------------------------------------------
+
+it('spec §9 cross-operator isolation — two operators with same txnId persist independently, each replays its own row', async () => {
+  // Operator B (different from TEST_OPERATOR which is 'test-op')
+  const OP_B_KEY = Buffer.from('fedcba9876543210fedcba9876543210');  // different 32-byte key
+  const OP_B: Operator = {
+    operatorId: 'test-op-B',
+    name: 'Test Operator B',
+    walletBaseUrl: 'http://op-b.test',
+    apiKey: 'ak-test-key-B',
+    signingKey: OP_B_KEY,
+    adapter: 'native',
+    currencies: ['EUR'],
+    minBetMinor: 10,
+    maxBetMinor: 500000,
+    rtpVariant: 97.0,
+    jurisdictions: ['MT'],
+    status: 'sandbox',
+    createdAt: 1700000000,
+    updatedAt: 1700000000,
+  };
+
+  const betReqSharedTxnId = { ...BET_REQ, txnId: 'cross-op-txn-shared' };
+
+  const respBodyA = { operatorTxnId: 'op-A-tx-cross', balanceMinor: 99000, currency: 'EUR' };
+  const respBodyB = { operatorTxnId: 'op-B-tx-cross', balanceMinor: 88000, currency: 'EUR' };
+
+  let callCountA = 0;
+  let callCountB = 0;
+
+  server.use(
+    http.post('http://op.test/bet', async ({ request }) => {
+      callCountA++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      const signed = makeSignedResponse(200, respBodyA, ts);
+      return HttpResponse.json(respBodyA, { headers: signed.headers });
+    }),
+    http.post('http://op-b.test/bet', async ({ request }) => {
+      callCountB++;
+      const ts = parseInt(request.headers.get('x-timestamp') ?? '0', 10);
+      // Sign with op-B's key
+      const bodyStr = JSON.stringify(respBodyB);
+      const bodyBuf = Buffer.from(bodyStr);
+      const sig = signResponse({ status: 200, timestamp: ts, body: bodyBuf }, OP_B_KEY);
+      return HttpResponse.json(respBodyB, { headers: { 'Content-Type': 'application/json', 'X-Signature': sig } });
+    }),
+  );
+
+  // Both clients share the SAME betLog (the key invariant being tested)
+  const betLog = makeBetLog();
+
+  let nonceCounterLocal = 0;
+  const clientA = new WalletClient(TEST_OPERATOR, {
+    generateNonce: () => `nonce-A-${++nonceCounterLocal}`,
+    nowSeconds: () => 1716000000,
+    betLog,
+  });
+  const clientB = new WalletClient(OP_B, {
+    generateNonce: () => `nonce-B-${++nonceCounterLocal}`,
+    nowSeconds: () => 1716000000,
+    betLog,
+  });
+
+  // First call from each operator — both must make HTTP, no cross-contamination
+  const rA1 = await clientA.bet(betReqSharedTxnId);
+  const rB1 = await clientB.bet(betReqSharedTxnId);
+  expect(rA1).toEqual(respBodyA);
+  expect(rB1).toEqual(respBodyB);
+  expect(callCountA).toBe(1); // op-A hit HTTP exactly once
+  expect(callCountB).toBe(1); // op-B hit HTTP exactly once
+
+  // Replay from each operator — must short-circuit to their OWN row, no new HTTP
+  const rA2 = await clientA.bet(betReqSharedTxnId);
+  const rB2 = await clientB.bet(betReqSharedTxnId);
+  expect(rA2).toEqual(respBodyA); // op-A gets op-A's response
+  expect(rB2).toEqual(respBodyB); // op-B gets op-B's response
+  expect(callCountA).toBe(1); // still 1 — op-A's replay short-circuited
+  expect(callCountB).toBe(1); // still 1 — op-B's replay short-circuited
+
+  // Verify both rows exist in the DB, scoped to their respective operators
+  const rowA = betLog.getIdempotency(TEST_OPERATOR.operatorId, betReqSharedTxnId.txnId);
+  const rowB = betLog.getIdempotency(OP_B.operatorId, betReqSharedTxnId.txnId);
+  expect(rowA).not.toBeNull();
+  expect(rowB).not.toBeNull();
+  expect(rowA!.operatorId).toBe(TEST_OPERATOR.operatorId);
+  expect(rowB!.operatorId).toBe(OP_B.operatorId);
+  // Responses are different — no cross-contamination
+  expect(JSON.parse(rowA!.responseJson).value).toEqual(respBodyA);
+  expect(JSON.parse(rowB!.responseJson).value).toEqual(respBodyB);
 });

@@ -190,20 +190,73 @@ describe('BetLog', () => {
 
     log.putIdempotency(entry);
 
-    const fetched = log.getIdempotency(entry.txnId);
+    const fetched = log.getIdempotency(entry.operatorId, entry.txnId);
     expect(fetched).not.toBeNull();
     expect(fetched!.txnId).toBe(entry.txnId);
     expect(fetched!.requestHash).toBe(entry.requestHash);
     expect(fetched!.responseJson).toBe(entry.responseJson);
     expect(fetched!.kind).toBe('bet');
 
-    // Same txnId + same requestHash → silent no-op (no throw)
+    // Same (operatorId, txnId) + same requestHash → silent no-op (no throw)
     expect(() => log.putIdempotency({ ...entry })).not.toThrow();
 
-    // Same txnId + different requestHash → IdempotencyMismatchError
+    // Same (operatorId, txnId) + different requestHash → IdempotencyMismatchError
     expect(() =>
       log.putIdempotency({ ...entry, requestHash: 'hash-bbb' }),
     ).toThrow(IdempotencyMismatchError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 11 – cross-operator isolation: same txnId, different operators
+  // -------------------------------------------------------------------------
+  it('cross-operator isolation: same txnId but different operatorIds are independent rows', () => {
+    const txnId = 'shared-txn-id';
+    const now = Math.floor(Date.now() / 1000);
+
+    const entryA: IdempotencyEntry = {
+      txnId,
+      operatorId: 'op-A',
+      kind: 'bet',
+      requestHash: 'hash-for-op-A',
+      responseJson: '{"ok":true,"value":{"operatorTxnId":"op-A-tx"}}',
+      createdAt: now,
+    };
+    const entryB: IdempotencyEntry = {
+      txnId,
+      operatorId: 'op-B',
+      kind: 'bet',
+      requestHash: 'hash-for-op-B',
+      responseJson: '{"ok":true,"value":{"operatorTxnId":"op-B-tx"}}',
+      createdAt: now,
+    };
+
+    // Both puts must succeed without IdempotencyMismatchError
+    expect(() => log.putIdempotency(entryA)).not.toThrow();
+    expect(() => log.putIdempotency(entryB)).not.toThrow();
+
+    // Each operator retrieves its own row — no cross-contamination
+    const fetchedA = log.getIdempotency('op-A', txnId);
+    expect(fetchedA).not.toBeNull();
+    expect(fetchedA!.operatorId).toBe('op-A');
+    expect(fetchedA!.requestHash).toBe('hash-for-op-A');
+    expect(fetchedA!.responseJson).toBe(entryA.responseJson);
+
+    const fetchedB = log.getIdempotency('op-B', txnId);
+    expect(fetchedB).not.toBeNull();
+    expect(fetchedB!.operatorId).toBe('op-B');
+    expect(fetchedB!.requestHash).toBe('hash-for-op-B');
+    expect(fetchedB!.responseJson).toBe(entryB.responseJson);
+
+    // Same (op-A, txnId) with same hash → still a no-op
+    expect(() => log.putIdempotency({ ...entryA })).not.toThrow();
+
+    // Same (op-A, txnId) with different hash → still throws IdempotencyMismatchError
+    expect(() =>
+      log.putIdempotency({ ...entryA, requestHash: 'different-hash' }),
+    ).toThrow(IdempotencyMismatchError);
+
+    // op-B's different hash does NOT affect op-A (no cross-contamination on put)
+    expect(() => log.putIdempotency({ ...entryB })).not.toThrow();
   });
 
   // -------------------------------------------------------------------------

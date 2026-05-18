@@ -213,12 +213,13 @@ export class BetLog {
       CREATE INDEX IF NOT EXISTS idx_betlog_player ON bet_log(operator_id, player_id, created_at);
 
       CREATE TABLE IF NOT EXISTS txn_idempotency (
-        txn_id        TEXT PRIMARY KEY,
+        txn_id        TEXT NOT NULL,
         operator_id   TEXT NOT NULL,
         kind          TEXT NOT NULL,
         request_hash  TEXT NOT NULL,
         response_json TEXT NOT NULL,
-        created_at    INTEGER NOT NULL
+        created_at    INTEGER NOT NULL,
+        PRIMARY KEY (txn_id, operator_id)
       );
     `);
   }
@@ -430,8 +431,8 @@ export class BetLog {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('UNIQUE constraint failed')) {
-        // Existing row — check hash
-        const existing = this.getIdempotency(entry.txnId);
+        // Existing row — check hash (scoped to this operator)
+        const existing = this.getIdempotency(entry.operatorId, entry.txnId);
         if (existing && existing.requestHash === entry.requestHash) {
           // Same hash: idempotent, do nothing
           return;
@@ -442,11 +443,11 @@ export class BetLog {
     }
   }
 
-  getIdempotency(txnId: string): IdempotencyEntry | null {
+  getIdempotency(operatorId: string, txnId: string): IdempotencyEntry | null {
     const row = this.stmt(
       'get_idempotency',
-      `SELECT * FROM txn_idempotency WHERE txn_id = ?`,
-    ).get(txnId) as IdempotencyRow | undefined;
+      `SELECT * FROM txn_idempotency WHERE txn_id = ? AND operator_id = ?`,
+    ).get(txnId, operatorId) as IdempotencyRow | undefined;
 
     return row ? rowToIdempotencyEntry(row) : null;
   }

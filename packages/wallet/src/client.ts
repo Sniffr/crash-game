@@ -223,7 +223,7 @@ export class WalletClient {
 
     const requestHash = idempotencyFingerprint(requestPayload);
 
-    const existing = this.betLog.getIdempotency(txnId);
+    const existing = this.betLog.getIdempotency(this.operator.operatorId, txnId);
 
     if (existing) {
       if (existing.requestHash === requestHash) {
