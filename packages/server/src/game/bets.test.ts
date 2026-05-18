@@ -332,12 +332,12 @@ it('crash: expireOperatorBetsOnCrash marks ARMED bets as LOST, returns count, id
   expect(betLog.getById(betId)?.state).toBe('ARMED');
 
   // Crash the round — should transition ARMED → LOST
-  const count = await expireOperatorBetsOnCrash(deps, roundId);
+  const count = await expireOperatorBetsOnCrash({ betLog }, roundId);
   expect(count).toBe(1);
   expect(betLog.getById(betId)?.state).toBe('LOST');
 
   // Second call: LOST is terminal, should be skipped silently → returns 0
-  const count2 = await expireOperatorBetsOnCrash(deps, roundId);
+  const count2 = await expireOperatorBetsOnCrash({ betLog }, roundId);
   expect(count2).toBe(0);
 
   // Balance should only reflect the bet debit — no win credit

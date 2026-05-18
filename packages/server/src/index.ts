@@ -9,6 +9,7 @@ import { BetLog, OperatorRegistry, runRecovery } from '@crash/wallet';
 import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { WalletClientCache } from './wallet/client-cache';
+import { setOperatorWiringDeps } from './game/operator-deps';
 import { clients, sessionSockets, safeSend } from './ws/hub';
 import { handleMessage } from './ws/handlers';
 import * as Round from './game/round';
@@ -26,6 +27,7 @@ const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
 const walletClientCache = new WalletClientCache(registry, betLog);
+setOperatorWiringDeps({ walletClientCache, betLog });
 
 const app = express();
 app.use(express.json());

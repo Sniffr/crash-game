@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { type Bet, type HistoryEntry } from '@crash/shared/types';
 import {
   adjustBalance,
@@ -16,6 +17,7 @@ import {
   ResponseSignatureError,
   InvalidTransitionError,
 } from '@crash/wallet';
+import { getOperatorWiringDeps } from './operator-deps';
 
 /** Reference to the current round — set by game/round.ts at runtime. */
 let currentRoundRef: { roundNumber: number; crashPoint: number } | null = null;
@@ -71,11 +73,152 @@ export async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual
   });
 }
 
+/**
+ * Discriminating cashout: if the bet is operator-backed (has operatorId+betId),
+ * routes through cashOutOperatorBet; otherwise calls the legacy cashOutBet.
+ *
+ * Always mutates the Bet object (sets cashedOut, cashoutMultiplier, profit) so the
+ * crash/loss loop and broadcast keep working uniformly.
+ *
+ * On operator WalletError: marks the bet cashedOut to prevent retry and emits a
+ * session-scoped cashout_pending frame with code "WIN_PENDING"
+ * (Task 4.2 force-credit recovers it).
+ *
+ * NOTE: profit semantics are currency-dependent for operator bets —
+ * for operator bets, profit is set to winAmountMinor (integer minor units),
+ * not a decimal credit amount.
+ */
+export async function tryCashoutBet(
+  bet: Bet,
+  atMultiplier: number,
+  source: 'manual' | 'auto',
+): Promise<void> {
+  if (bet.cashedOut) return;
+
+  // Bots always use the legacy path
+  if (bet.isBot) {
+    return cashOutBet(bet, atMultiplier, source);
+  }
+
+  // Operator-backed path
+  if (bet.operatorId && bet.betId && bet.currency && typeof bet.amountMinor === 'number') {
+    const deps = getOperatorWiringDeps();
+    if (!deps) {
+      // Should never happen post-bootstrap — fall back defensively
+      console.error('[tryCashoutBet] OperatorWiringDeps not initialized — falling back to legacy cashout');
+      return cashOutBet(bet, atMultiplier, source);
+    }
+
+    const client = deps.walletClientCache.get(bet.operatorId);
+    if (!client) {
+      // Operator paused or unknown — mark cashed out so we don't loop, surface error
+      bet.cashedOut = true;
+      bet.cashoutMultiplier = atMultiplier;
+      sendToSession(bet.playerId, {
+        type: 'error',
+        data: { message: 'Operator unavailable — win not credited', code: 'OPERATOR_PAUSED' },
+      });
+      broadcast({
+        type: 'cashout',
+        data: {
+          playerId: bet.playerId,
+          multiplier: atMultiplier,
+          profit: 0,
+          isBot: false,
+          displayName: bet.displayName,
+          source,
+          isOperator: true,
+        },
+      });
+      return;
+    }
+
+    const winTxnId = randomUUID();
+    const multiplier = atMultiplier;
+    const winAmountMinor = Math.round(bet.amountMinor * multiplier);
+
+    try {
+      await cashOutOperatorBet(
+        { walletClient: client, betLog: deps.betLog, onWinFailed: deps.onWinFailed },
+        {
+          betId: bet.betId,
+          winTxnId,
+          multiplier,
+          winAmountMinor,
+          settledAt: Math.floor(Date.now() / 1000),
+        },
+      );
+
+      // Success — mutate the bet object so the round loop sees it as cashed out
+      bet.cashedOut = true;
+      bet.cashoutMultiplier = multiplier;
+      // profit carries winAmountMinor (minor units) for operator bets
+      bet.profit = winAmountMinor;
+      bet.winTxnId = winTxnId;
+
+      broadcast({
+        type: 'cashout',
+        data: {
+          playerId: bet.playerId,
+          multiplier,
+          profit: winAmountMinor,
+          isBot: false,
+          displayName: bet.displayName,
+          source,
+          isOperator: true,
+        },
+      });
+
+      sendToSession(bet.playerId, {
+        type: 'cashout_success',
+        data: { multiplier, winAmountMinor, currency: bet.currency, source },
+      });
+    } catch (err) {
+      // WalletError (after retries exhausted) or other error
+      // Mark cashed out to prevent retry; recovery (Task 4.2) will force-credit.
+      bet.cashedOut = true;
+      bet.cashoutMultiplier = multiplier;
+      bet.winTxnId = winTxnId;
+
+      const walletErr = err instanceof WalletError ? err : null;
+      console.error('[tryCashoutBet] WIN_FAILED for bet', bet.betId, err);
+      if (deps.onWinFailed) {
+        deps.onWinFailed(bet);
+      }
+
+      sendToSession(bet.playerId, {
+        type: 'cashout_pending',
+        data: {
+          message: 'Win pending — contact support',
+          code: 'WIN_PENDING',
+          winTxnId,
+          ...(walletErr ? { httpStatus: walletErr.httpStatus } : {}),
+        },
+      });
+
+      // Still broadcast so the UI doesn't show the bet as alive
+      broadcast({
+        type: 'cashout',
+        data: {
+          playerId: bet.playerId,
+          multiplier,
+          profit: winAmountMinor,
+          isBot: false,
+          displayName: bet.displayName,
+          source,
+          isOperator: true,
+        },
+      });
+    }
+    return;
+  }
+
+  // Legacy demo path
+  return cashOutBet(bet, atMultiplier, source);
+}
+
 // =============================================================================
 // OPERATOR-BACKED BET ENGINE
-// TODO(Task 3.1): wire placeOperatorBet into the WS place_bet handler once launch creates operator-backed sessions
-// TODO(Task 3.1): wire cashOutOperatorBet into the WS cashout handler once launch creates operator-backed sessions
-// TODO(Task 3.1): wire expireOperatorBetsOnCrash into the crash handler once launch creates operator-backed sessions
 // =============================================================================
 
 // ---------------------------------------------------------------------------
@@ -295,9 +438,12 @@ export async function cashOutOperatorBet(
  *
  * Returns the count of bets transitioned. Never throws for an already-terminal
  * bet — skips those silently.
+ *
+ * NOTE: walletClient is intentionally not required here — no HTTP call is
+ * needed on crash. The function only needs betLog.
  */
 export async function expireOperatorBetsOnCrash(
-  deps: OperatorBetDeps,
+  deps: { betLog: BetLog },
   roundId: string,
 ): Promise<number> {
   const { betLog } = deps;

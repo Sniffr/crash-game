@@ -7,7 +7,8 @@ import { type RoundState, type Bet, type GameConfig, type HistoryEntry } from '@
 import { GAME_CONFIG } from '@crash/shared/config';
 import { generateBotBets, type BotBet } from '../bots';
 import { broadcast } from '../ws/hub';
-import { cashOutBet, setCurrentRoundRef } from './bets';
+import { cashOutBet, tryCashoutBet, expireOperatorBetsOnCrash, setCurrentRoundRef } from './bets';
+import { getOperatorWiringDeps } from './operator-deps';
 import { pushHistory, getRecentHistory } from './history';
 import {
   recordLoss,
@@ -35,6 +36,17 @@ export let serverSeed = generateServerSeed();
 export let nextServerSeed = generateServerSeed();
 export let prevServerSeed: string | null = null;
 export let prevRoundNumber: number | null = null;
+
+/**
+ * @internal — testing only.
+ * Directly set currentRound without running the full phase transition.
+ * Allows unit tests to inject a synthetic BETTING round without the
+ * timer/broadcast side-effects of startBettingPhase().
+ */
+export function _internal__setCurrentRoundForTesting(round: RoundState | null): void {
+  currentRound = round;
+  setCurrentRoundRef(round);
+}
 
 // ─── Phase transitions ────────────────────────────────────────────────────────
 export function startBettingPhase() {
@@ -150,7 +162,7 @@ function startFlightPhase() {
       if (multiplier < bet.autoCashout) continue;
       if (bet.autoCashout > currentRound.crashPoint) continue;
       // Auto-cashouts are awaited but we don't block the tick on them
-      void cashOutBet(bet, bet.autoCashout, 'auto');
+      void tryCashoutBet(bet, bet.autoCashout, 'auto');
     }
 
     broadcast({ type: 'multiplier_update', data: { multiplier, roundNumber: currentRound.roundNumber } });
@@ -170,9 +182,12 @@ function crashRound() {
   prevServerSeed = serverSeed;
   prevRoundNumber = currentRound.roundNumber;
 
-  // Persist losses for sessions that didn't cash out (best-effort, fire and forget)
+  // Persist losses for sessions that didn't cash out (best-effort, fire and forget).
+  // Operator-backed bets are skipped here — their loss state is recorded in bet_log
+  // by expireOperatorBetsOnCrash below (no RocksDB/wallet call needed).
   for (const bet of currentRound.bets) {
     if (bet.isBot || bet.cashedOut) continue;
+    if (bet.operatorId) continue; // operator bets handled by expireOperatorBetsOnCrash
     const sessionId = bet.playerId;
     void recordLoss(sessionId).catch(() => {});
     void appendHistory(sessionId, {
@@ -186,6 +201,15 @@ function crashRound() {
     void getStats(sessionId).then((stats) => {
       sendToSession(sessionId, { type: 'stats_update', data: { stats } });
     }).catch(() => {});
+  }
+
+  // Expire operator-backed bets on crash: marks ARMED/FLYING → LOST in bet_log
+  const roundId = `rnd-${currentRound.roundNumber}`;
+  const wiringDeps = getOperatorWiringDeps();
+  if (wiringDeps) {
+    void expireOperatorBetsOnCrash({ betLog: wiringDeps.betLog }, roundId).catch((err) => {
+      console.error('[crashRound] expireOperatorBetsOnCrash error:', err);
+    });
   }
 
   broadcast({
