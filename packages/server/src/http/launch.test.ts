@@ -355,4 +355,62 @@ describe('GET /launch', () => {
     expect(res.status).toBe(400);
     expect(res.text).toMatch(/Missing required launch parameters/i);
   });
+
+  // ─── Test 9: javascript: lobby_url is sanitized — no button rendered ──────
+
+  it('javascript: lobby_url is sanitized: error page omits the lobby button', async () => {
+    // Missing token forces 400 error path; lobby_url is javascript: (no HTML chars so
+    // escapeHtml alone would not block it — isSafeReturnUrl must reject it).
+    const res = await request(expressApp)
+      .get('/launch?operator=op-test&currency=EUR&lobby_url=javascript%3Aalert(1)')
+      .redirects(0);
+
+    expect(res.status).toBe(400);
+    // The raw scheme must not appear anywhere in the rendered output
+    expect(res.text).not.toContain('javascript:');
+    // Specifically, no href with that scheme
+    expect(res.text).not.toContain('href="javascript:');
+  });
+
+  // ─── Test 10: javascript: return_url is sanitized in the redirect query ───
+
+  it('javascript: return_url is NOT echoed into the 302 Location query string', async () => {
+    // Happy-path launch; return_url is javascript: — should be silently dropped
+    const res = await request(expressApp)
+      .get('/launch?operator=op-test&token=tok-pid-1&currency=EUR&lobby_url=https%3A%2F%2Fcasino.com%2Flobby&return_url=javascript%3Aalert(1)')
+      .redirects(0);
+
+    expect(res.status).toBe(302);
+    const location = res.headers['location'] as string;
+    // Safe lobby param must still be present
+    expect(location).toContain('&lobby=https%3A%2F%2Fcasino.com%2Flobby');
+    // The javascript: scheme must not appear in the redirect URL (percent-encoded or raw)
+    expect(location).not.toContain('javascript');
+    expect(location).not.toContain('javascript%3A');
+  });
+
+  // ─── Test 11: return_url preferred over lobby_url for the error button ────
+  //   spec §3 — return_url is the primary back destination; lobby_url is fallback
+
+  it('error button uses return_url when both return_url and lobby_url are present (spec §3)', async () => {
+    // Bad token → 401 error page
+    const res = await request(expressApp)
+      .get('/launch?operator=op-test&token=bad-token&currency=EUR&lobby_url=https%3A%2F%2Fcasino.com%2Flobby&return_url=https%3A%2F%2Fcasino.com%2Fback')
+      .redirects(0);
+
+    expect(res.status).toBe(401);
+    // Button must point at return_url, not lobby_url
+    expect(res.text).toContain('href="https://casino.com/back"');
+    expect(res.text).not.toContain('href="https://casino.com/lobby"');
+  });
+
+  it('error button falls back to lobby_url when return_url is absent (spec §3 fallback)', async () => {
+    // Bad token → 401 error page; only lobby_url provided
+    const res = await request(expressApp)
+      .get('/launch?operator=op-test&token=bad-token&currency=EUR&lobby_url=https%3A%2F%2Fcasino.com%2Flobby')
+      .redirects(0);
+
+    expect(res.status).toBe(401);
+    expect(res.text).toContain('href="https://casino.com/lobby"');
+  });
 });

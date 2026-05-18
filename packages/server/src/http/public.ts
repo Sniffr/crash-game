@@ -59,6 +59,23 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
+/**
+ * Returns the URL unchanged if it is http(s), otherwise null.
+ * Blocks javascript:, data:, and any other non-http(s) schemes — escapeHtml
+ * alone does NOT protect href attributes because javascript: contains no
+ * HTML-special characters.
+ * Relative or malformed URLs are rejected (error-page links must be absolute).
+ */
+function isSafeReturnUrl(url: string | undefined | null): string | null {
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    return (u.protocol === 'https:' || u.protocol === 'http:') ? url : null;
+  } catch {
+    return null;  // relative or malformed → reject for error-page link
+  }
+}
+
 function replaceAll(str: string, search: string, replacement: string): string {
   return str.split(search).join(replacement);
 }
@@ -199,12 +216,22 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
     const returnUrl = String(req.query.return_url ?? '').trim();
     // Optional: lang, jurisdiction, mode — not used server-side yet (Task 3.2 handles client-side)
 
+    // Sanitize lobby_url / return_url: reject non-http(s) schemes (e.g. javascript:, data:)
+    // before they are rendered in href attributes or echoed into the redirect query string.
+    // escapeHtml alone is insufficient for href — javascript: contains no HTML-special chars.
+    const safeLobbyUrl  = isSafeReturnUrl(lobbyUrl);
+    const safeReturnUrl = isSafeReturnUrl(returnUrl);
+
+    // Per spec §3, the error-page "Return to lobby" button points at return_url, with
+    // lobby_url as the fallback when return_url is absent.
+    const errorButtonUrl = safeReturnUrl ?? safeLobbyUrl;
+
     // 1. Validate required params
     if (!operator || !token || !currency) {
       res.status(400).send(renderLaunchError({
         title: 'Launch Error',
         message: 'Missing required launch parameters.',
-        lobbyUrl: lobbyUrl || undefined,
+        lobbyUrl: errorButtonUrl ?? undefined,
       }));
       return;
     }
@@ -215,7 +242,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
       res.status(404).send(renderLaunchError({
         title: 'Unknown Operator',
         message: 'Unknown operator.',
-        lobbyUrl: lobbyUrl || undefined,
+        lobbyUrl: errorButtonUrl ?? undefined,
       }));
       return;
     }
@@ -249,10 +276,11 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
       }
 
       console.error(`[launch] authenticate failed for operator=${operator}:`, err instanceof WalletError ? `${err.code} ${err.message}` : err);
+      // Per spec §3: error button uses return_url ∥ lobby_url (errorButtonUrl already set above)
       res.status(status).send(renderLaunchError({
         title: 'Launch Failed',
         message,
-        lobbyUrl: lobbyUrl || undefined,
+        lobbyUrl: errorButtonUrl ?? undefined,
       }));
       return;
     }
@@ -262,7 +290,8 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
       res.status(422).send(renderLaunchError({
         title: 'Currency Mismatch',
         message: `Currency mismatch: launch URL requested ${escapeHtml(currency)} but operator returned ${escapeHtml(authResp.currency)}.`,
-        lobbyUrl: lobbyUrl || undefined,
+        // Per spec §3: error button uses return_url ∥ lobby_url
+        lobbyUrl: errorButtonUrl ?? undefined,
       }));
       return;
     }
@@ -280,18 +309,22 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
       });
     } catch (err) {
       console.error('[launch] createOperatorSession failed:', err);
+      // Per spec §3: error button uses return_url ∥ lobby_url
       res.status(500).send(renderLaunchError({
         title: 'Launch Failed',
         message: 'Could not start the game. Please try again.',
-        lobbyUrl: lobbyUrl || undefined,
+        lobbyUrl: errorButtonUrl ?? undefined,
       }));
       return;
     }
 
-    // 6. Redirect into the SPA with the session id + optional lobby/return URLs
+    // 6. Redirect into the SPA with the session id + optional lobby/return URLs.
+    // Use sanitized URLs so we never echo a javascript: scheme into the redirect
+    // query string (belt-and-suspenders; the SPA has its own safety responsibilities
+    // per Task 3.2, but we don't reflect unsafe URLs from our server).
     let location = `/?session=${encodeURIComponent(session.sessionId)}`;
-    if (lobbyUrl)  location += `&lobby=${encodeURIComponent(lobbyUrl)}`;
-    if (returnUrl) location += `&return=${encodeURIComponent(returnUrl)}`;
+    if (safeLobbyUrl)  location += `&lobby=${encodeURIComponent(safeLobbyUrl)}`;
+    if (safeReturnUrl) location += `&return=${encodeURIComponent(safeReturnUrl)}`;
 
     res.redirect(302, location);
   });
