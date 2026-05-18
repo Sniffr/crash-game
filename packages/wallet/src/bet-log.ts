@@ -305,9 +305,10 @@ export class BetLog {
   }
 
   listByState(state: BetState, limit = 100): BetRow[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM bet_log WHERE state = ? ORDER BY created_at ASC LIMIT ?`)
-      .all(state, limit) as BetLogRow[];
+    const rows = this.stmt(
+      'list_by_state',
+      `SELECT * FROM bet_log WHERE state = ? ORDER BY created_at ASC LIMIT ?`,
+    ).all(state, limit) as BetLogRow[];
     return rows.map(rowToBetRow);
   }
 
@@ -326,14 +327,10 @@ export class BetLog {
   ): BetRow[] {
     const limit = opts?.limit ?? 100;
     const offset = opts?.offset ?? 0;
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM bet_log
-         WHERE operator_id = ? AND player_id = ?
-         ORDER BY created_at DESC
-         LIMIT ? OFFSET ?`,
-      )
-      .all(operatorId, playerId, limit, offset) as BetLogRow[];
+    const rows = this.stmt(
+      'list_by_player',
+      `SELECT * FROM bet_log WHERE operator_id = ? AND player_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+    ).all(operatorId, playerId, limit, offset) as BetLogRow[];
     return rows.map(rowToBetRow);
   }
 
@@ -404,7 +401,7 @@ export class BetLog {
       const sql = `UPDATE bet_log SET ${setClauses.join(', ')} WHERE bet_id = @bet_id`;
       const info = this.db.prepare(sql).run(params);
       if (info.changes !== 1) {
-        throw new BetNotFoundError(betId);
+        throw new Error(`[BetLog] UPDATE affected ${info.changes} rows for bet '${betId}' — expected exactly 1`);
       }
 
       return this.getById(betId) as BetRow;

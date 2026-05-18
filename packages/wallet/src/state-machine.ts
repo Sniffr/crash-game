@@ -29,7 +29,12 @@ export type BetEvent =
 // Terminal states
 // ---------------------------------------------------------------------------
 
-export const TERMINAL_STATES: ReadonlySet<BetState> = new Set([
+const ALL_STATES: readonly BetState[] = [
+  'PENDING', 'ARMED', 'FLYING', 'SETTLING', 'SETTLED',
+  'LOST', 'ROLLBACK_PENDING', 'VOIDED', 'WIN_FAILED',
+];
+
+export const TERMINAL_STATES: ReadonlySet<BetState> = new Set<BetState>([
   'SETTLED',
   'LOST',
   'VOIDED',
@@ -37,9 +42,7 @@ export const TERMINAL_STATES: ReadonlySet<BetState> = new Set([
 ]);
 
 export const NON_TERMINAL_STATES: ReadonlySet<BetState> = new Set(
-  (['PENDING', 'ARMED', 'FLYING', 'SETTLING', 'ROLLBACK_PENDING'] as BetState[]).filter(
-    (s) => !TERMINAL_STATES.has(s),
-  ),
+  ALL_STATES.filter((s) => !TERMINAL_STATES.has(s)),
 );
 
 // ---------------------------------------------------------------------------
@@ -105,10 +108,11 @@ export function nextState(current: BetState, event: BetEvent): BetState {
 }
 
 /**
- * Returns true if state is terminal AND not recoverable
- * (i.e. no further normal transitions are possible).
- * WIN_FAILED is "terminal-but-recoverable" so this returns true for it too —
- * callers that want to allow force-credit must check explicitly.
+ * True when no transition exists on the *normal* event path out of `state`.
+ * Includes WIN_FAILED: it has no normal successor (only the exceptional
+ * admin `win_force_credited` path can move it to SETTLED), so callers that
+ * support force-credit must check for WIN_FAILED explicitly rather than
+ * relying on isTerminal().
  */
 export function isTerminal(state: BetState): boolean {
   return TERMINAL_STATES.has(state);
