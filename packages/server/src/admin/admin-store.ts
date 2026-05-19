@@ -104,6 +104,7 @@ export class AdminAudit {
         payload_json TEXT,
         at           INTEGER NOT NULL
       );
+      CREATE INDEX IF NOT EXISTS idx_audit_at ON admin_audit(at, id);
     `);
   }
 

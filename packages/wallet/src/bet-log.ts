@@ -294,6 +294,7 @@ export class BetLog {
         created_at    INTEGER NOT NULL,
         PRIMARY KEY (txn_id, operator_id)
       );
+      CREATE INDEX IF NOT EXISTS idx_txn_idemp_op ON txn_idempotency(operator_id, created_at);
     `);
   }
 

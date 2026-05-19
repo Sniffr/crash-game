@@ -11,7 +11,7 @@
 
 import { Router } from 'express';
 import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState } from '@crash/wallet';
-import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit } from '@crash/wallet';
+import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
@@ -22,11 +22,9 @@ import {
   signAdminJwt,
 } from './middleware/admin-auth.js';
 
-// Valid BetState values for ?state= filter validation
-const BET_STATES = new Set<string>([
-  'PENDING', 'ARMED', 'FLYING', 'SETTLING', 'SETTLED',
-  'LOST', 'ROLLBACK_PENDING', 'VOIDED', 'WIN_FAILED',
-]);
+// Valid BetState values for ?state= filter validation — derived from the
+// single source of truth in state-machine.ts (prevents drift when new states are added).
+const BET_STATES = new Set<string>(ALL_BET_STATES);
 
 // ---------------------------------------------------------------------------
 // Deps

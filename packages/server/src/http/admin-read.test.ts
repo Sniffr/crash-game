@@ -736,4 +736,98 @@ describe('EXPLAIN QUERY PLAN — index coverage', () => {
     // Accept either 'USING INDEX' or 'USING COVERING INDEX'
     expect(planText.toUpperCase()).toContain('USING INDEX');
   });
+
+  it('uses index for operator-filtered transactions query (no SCAN of txn_idempotency)', () => {
+    const { db } = makeHarness();
+
+    const plan = db.prepare(`EXPLAIN QUERY PLAN
+      SELECT * FROM txn_idempotency
+      WHERE operator_id = ?
+      ORDER BY created_at DESC, txn_id DESC
+      LIMIT 50`).all('any-op') as Array<{ detail: string }>;
+
+    const planText = plan.map((r) => r.detail).join(' | ').toUpperCase();
+    expect(planText).toContain('USING INDEX');
+  });
+});
+
+describe('GET /admin/v1/rounds — HAVING-cursor pagination traversal', () => {
+  it('paginates rounds with HAVING-cursor: 2 pages, no dups, no gaps', async () => {
+    const { app, betLog, adminAudit, adminUsers } = makeHarness();
+    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = seedFixture(betLog, adminAudit);
+    const token = await loginAs(app, 'admin1', 'pw');
+
+    const seenRoundIds = new Set<string>();
+
+    const res1 = await request(app)
+      .get('/admin/v1/rounds?limit=3')
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res1.status).toBe(200);
+    expect(res1.body.items).toHaveLength(3);
+    expect(res1.body.nextCursor).toBeTruthy();
+    for (const r of res1.body.items as Array<{ roundId: string }>) {
+      seenRoundIds.add(r.roundId);
+    }
+
+    const res2 = await request(app)
+      .get(`/admin/v1/rounds?limit=3&cursor=${encodeURIComponent(res1.body.nextCursor as string)}`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res2.status).toBe(200);
+    expect(res2.body.items).toHaveLength(2); // 5 rounds total: 3 + 2
+    expect(res2.body.nextCursor).toBeNull();
+    for (const r of res2.body.items as Array<{ roundId: string }>) {
+      seenRoundIds.add(r.roundId);
+    }
+
+    // Union equals total, no dups, no gaps
+    expect(seenRoundIds.size).toBe(5);
+    for (const expected of seed.rounds) {
+      expect(seenRoundIds.has(expected)).toBe(true);
+    }
+  });
+});
+
+describe('GET /admin/v1/transactions — keyset pagination traversal', () => {
+  it('paginates transactions across 3 pages, no dups, no gaps', async () => {
+    const { app, db, betLog, adminAudit, adminUsers } = makeHarness();
+    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    seedFixture(betLog, adminAudit);
+    const token = await loginAs(app, 'admin1', 'pw');
+
+    // Count fixture txns up front so the assertion is honest about the total.
+    const totalTxns = db.prepare('SELECT COUNT(*) as c FROM txn_idempotency').get() as { c: number };
+    const limit = 10;
+
+    const seenTxnIds = new Set<string>();
+    let cursor: string | undefined;
+    let pages = 0;
+
+    while (true) {
+      const url = cursor
+        ? `/admin/v1/transactions?limit=${limit}&cursor=${encodeURIComponent(cursor)}`
+        : `/admin/v1/transactions?limit=${limit}`;
+
+      const res = await request(app)
+        .get(url)
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).toBe(200);
+
+      for (const item of res.body.items as Array<{ txnId: string }>) {
+        expect(seenTxnIds.has(item.txnId)).toBe(false); // no dup across pages
+        seenTxnIds.add(item.txnId);
+      }
+
+      pages++;
+      if (!res.body.nextCursor) break;
+      cursor = res.body.nextCursor as string;
+      if (pages > 10) throw new Error('runaway pagination');
+    }
+
+    // Union equals total, no dups, no gaps
+    expect(seenTxnIds.size).toBe(totalTxns.c);
+  });
 });

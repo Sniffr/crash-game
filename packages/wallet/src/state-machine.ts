@@ -29,7 +29,7 @@ export type BetEvent =
 // Terminal states
 // ---------------------------------------------------------------------------
 
-const ALL_STATES: readonly BetState[] = [
+export const ALL_BET_STATES: readonly BetState[] = [
   'PENDING', 'ARMED', 'FLYING', 'SETTLING', 'SETTLED',
   'LOST', 'ROLLBACK_PENDING', 'VOIDED', 'WIN_FAILED',
 ];
@@ -42,7 +42,7 @@ export const TERMINAL_STATES: ReadonlySet<BetState> = new Set<BetState>([
 ]);
 
 export const NON_TERMINAL_STATES: ReadonlySet<BetState> = new Set(
-  ALL_STATES.filter((s) => !TERMINAL_STATES.has(s)),
+  ALL_BET_STATES.filter((s) => !TERMINAL_STATES.has(s)),
 );
 
 // ---------------------------------------------------------------------------
