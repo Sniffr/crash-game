@@ -10,7 +10,7 @@
  */
 
 import { Router } from 'express';
-import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState } from '@crash/wallet';
+import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter } from '@crash/wallet';
 import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
@@ -55,6 +55,7 @@ function operatorPublicShape(op: {
   rtpVariant: number;
   jurisdictions: string[];
   status: string;
+  shareBps: number;
   createdAt: number;
   updatedAt: number;
 }) {
@@ -69,6 +70,9 @@ function operatorPublicShape(op: {
     rtpVariant: op.rtpVariant,
     jurisdictions: op.jurisdictions,
     status: op.status,
+    // shareBps is NOT secret (unlike apiKey/signingKey); it is the contractual
+    // revenue-share rate and is safe to return in the public operator shape.
+    shareBps: op.shareBps,
     createdAt: op.createdAt,
     updatedAt: op.updatedAt,
   };
@@ -445,6 +449,15 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
+    // Validate shareBps before calling registry.update (gives a clean 400)
+    if (body['shareBps'] !== undefined) {
+      const s = body['shareBps'];
+      if (typeof s !== 'number' || !Number.isInteger(s) || s < 0 || s > 10000) {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'shareBps must be an integer between 0 and 10000' } });
+        return;
+      }
+    }
+
     try {
       const op = deps.registry.update(id, {
         name: body['name'] as string | undefined,
@@ -455,6 +468,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
         maxBetMinor: body['maxBetMinor'] as number | undefined,
         rtpVariant: body['rtpVariant'] as number | undefined,
         jurisdictions: body['jurisdictions'] as string[] | undefined,
+        shareBps: body['shareBps'] as number | undefined,
       });
 
       deps.adminAudit.record({
@@ -468,6 +482,10 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     } catch (err) {
       if (err instanceof OperatorNotFoundError) {
         res.status(404).json({ error: { code: 'OPERATOR_NOT_FOUND', message: err.message } });
+        return;
+      }
+      if (err instanceof Error && err.message.includes('shareBps')) {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: err.message } });
         return;
       }
       throw err;
@@ -1215,6 +1233,289 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }));
 
     res.status(200).json({ items, nextCursor, count: items.length });
+  });
+
+  // =========================================================================
+  // Y. GET /financial/ggr — finance|admin
+  //    Returns a GGR/NGR report for the given window and groupBy granularity.
+  //    Spec §8.1. NOT audited (read-only).
+  //
+  //    Window cap: 1 year (365 * 86400 seconds). Callers must narrow the window
+  //    or increase groupBy granularity if they need finer breakdown.
+  //
+  //    Stake/win definitions (authoritative):
+  //      STAKE = SUM(amount_minor) for SETTLED, LOST, WIN_FAILED bets.
+  //        WIN_FAILED: debit happened (stake real), credit unconfirmed — stake
+  //        counted, win NOT counted. Force-credit transitions WIN_FAILED → SETTLED,
+  //        after which subsequent reports will include the win.
+  //      WIN   = SUM(win_amount_minor) for SETTLED bets only.
+  //      GGR   = STAKE − WIN
+  //      NGR   = GGR (bonuses = 0 in v1; field reserved)
+  //    VOIDED bets are excluded (stake was refunded in full).
+  // =========================================================================
+
+  router.get('/financial/ggr', requireRole('finance', 'admin'), (req, res): void => {
+    const q = req.query as Record<string, string | undefined>;
+
+    // --- Parse `from` (required, integer unix seconds)
+    if (q['from'] === undefined || q['from'] === '') {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from (unix seconds integer) required' } });
+      return;
+    }
+    const from = Number(q['from']);
+    if (!Number.isInteger(from) || !Number.isFinite(from)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from must be an integer unix seconds timestamp' } });
+      return;
+    }
+
+    // --- Parse `to` (required, integer unix seconds, must be > from)
+    if (q['to'] === undefined || q['to'] === '') {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'to (unix seconds integer) required' } });
+      return;
+    }
+    const to = Number(q['to']);
+    if (!Number.isInteger(to) || !Number.isFinite(to)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'to must be an integer unix seconds timestamp' } });
+      return;
+    }
+    if (to <= from) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'to must be greater than from' } });
+      return;
+    }
+
+    // --- 1-year window cap (365 * 86400 = 31 536 000 seconds)
+    const MAX_WINDOW_SECONDS = 365 * 86400;
+    if (to - from > MAX_WINDOW_SECONDS) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'Query window exceeds the 1-year maximum (365 days). Narrow the from/to range.' } });
+      return;
+    }
+
+    // --- Parse `groupBy` (required, comma-separated subset of operator,currency,day)
+    if (q['groupBy'] === undefined || q['groupBy'] === '') {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: "groupBy (required) must be a comma-separated subset of 'operator,currency,day'" } });
+      return;
+    }
+    const groupByRaw = q['groupBy'].split(',').map((s) => s.trim()).filter(Boolean);
+    const validGroupBy = new Set(['operator', 'currency', 'day']);
+    const badValues = groupByRaw.filter((v) => !validGroupBy.has(v));
+    if (badValues.length > 0 || groupByRaw.length === 0) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: `Invalid groupBy values: ${badValues.join(', ')}. Valid values: operator, currency, day` } });
+      return;
+    }
+    const groupBy = groupByRaw as FinancialFilter['groupBy'];
+
+    // --- Optional filters
+    const operatorId = q['operatorId'] || undefined;
+    const currency = q['currency'] || undefined;
+
+    try {
+      const rows = deps.betLog.financialReport({ operatorId, currency, from, to, groupBy });
+      res.status(200).json({ from, to, groupBy: [...groupBy], rows });
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('groupBy')) {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: err.message } });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  // =========================================================================
+  // Z. GET /financial/settlement?period=YYYY-MM — finance|admin
+  //    Monthly settlement summary per operator per currency.
+  //    Spec §8.2. NOT audited (read-only).
+  //
+  //    Uses financialReport with groupBy=['operator','currency'] (no day granularity
+  //    for settlement — it's a monthly rollup). ourShareMinor is computed as
+  //    floor(ggrMinor * shareBps / 10000) using the operator's shareBps from the
+  //    registry. Currencies are NEVER mixed — totals are per-currency only.
+  // =========================================================================
+
+  router.get('/financial/settlement', requireRole('finance', 'admin'), (req, res): void => {
+    const q = req.query as Record<string, string | undefined>;
+
+    // --- Parse period (required, format YYYY-MM)
+    const period = q['period'];
+    if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: "period (required) must be in YYYY-MM format (e.g. '2026-04')" } });
+      return;
+    }
+    const [yearStr, monthStr] = period.split('-') as [string, string];
+    const year = parseInt(yearStr, 10);
+    const month = parseInt(monthStr, 10);
+    if (month < 1 || month > 12) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'period month must be 01–12' } });
+      return;
+    }
+
+    // Compute inclusive/exclusive UTC window for the calendar month
+    const from = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
+    const to = Math.floor(Date.UTC(year, month, 1) / 1000); // first second of NEXT month (exclusive)
+
+    const rawRows = deps.betLog.financialReport({ from, to, groupBy: ['operator', 'currency'] });
+
+    // Group rows by operatorId, then build nested currencies array per spec §8.2
+    const byOperator = new Map<string, Array<{
+      currency: string;
+      stakeMinor: number;
+      winMinor: number;
+      ggrMinor: number;
+      shareBps: number;
+      ourShareMinor: number;
+    }>>();
+
+    for (const row of rawRows) {
+      const op = deps.registry.getById(row.operatorId);
+      // shareBps: use registry value; fallback 1500 if operator is somehow not found
+      // (shouldn't happen since operatorId in bet_log references an operator, but tolerate it)
+      const shareBps = op?.shareBps ?? 1500;
+      // ourShareMinor uses floor (integer division): basis points → minor units
+      // floor is honest — never over-report the studio's share.
+      const ourShareMinor = Math.floor(row.ggrMinor * shareBps / 10000);
+
+      const existing = byOperator.get(row.operatorId);
+      const currencyEntry = {
+        currency: row.currency,
+        stakeMinor: row.stakeMinor,
+        winMinor: row.winMinor,
+        ggrMinor: row.ggrMinor,
+        shareBps,
+        ourShareMinor,
+      };
+
+      if (existing) {
+        existing.push(currencyEntry);
+      } else {
+        byOperator.set(row.operatorId, [currencyEntry]);
+      }
+    }
+
+    const operators = Array.from(byOperator.entries()).map(([operatorId, currencies]) => ({
+      operatorId,
+      currencies,
+    }));
+
+    res.status(200).json({ period, operators });
+  });
+
+  // =========================================================================
+  // AA. POST /financial/settlement/:period/invoice — finance|admin
+  //     Generate a machine-readable invoice JSON for one operator+period.
+  //     Spec §8.3. IS audited (financial export — chain of custody).
+  //
+  //     Invoices are NOT persisted (Phase-future — accounting system integration).
+  //     The invoice JSON is returned directly to the caller for download/export.
+  //
+  //     totals: per-currency Record<currency, { ggrMinor, ourShareMinor }>.
+  //     We never mix currencies (e.g. EUR + USD into a single number); the totals
+  //     map preserves per-currency isolation per spec §2.3.
+  // =========================================================================
+
+  router.post('/financial/settlement/:period/invoice', requireRole('finance', 'admin'), (req, res): void => {
+    const { period } = req.params as { period: string };
+
+    // --- Validate period format
+    if (!/^\d{4}-\d{2}$/.test(period)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: "period must be in YYYY-MM format (e.g. '2026-04')" } });
+      return;
+    }
+    const [yearStr, monthStr] = period.split('-') as [string, string];
+    const year = parseInt(yearStr, 10);
+    const month = parseInt(monthStr, 10);
+    if (month < 1 || month > 12) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'period month must be 01–12' } });
+      return;
+    }
+
+    // --- Parse body
+    const body = (req.body ?? {}) as { operatorId?: unknown };
+    if (typeof body.operatorId !== 'string' || !body.operatorId.trim()) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'operatorId (non-empty string) required' } });
+      return;
+    }
+    const operatorId = body.operatorId.trim();
+
+    // --- Compute window
+    const from = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
+    const to = Math.floor(Date.UTC(year, month, 1) / 1000);
+
+    // --- Run financial report for this operator+period
+    const rawRows = deps.betLog.financialReport({ operatorId, from, to, groupBy: ['operator', 'currency'] });
+
+    if (rawRows.length === 0) {
+      res.status(404).json({
+        error: {
+          code: 'NO_SETTLEMENT_DATA',
+          message: `No financial activity for operator '${operatorId}' in period '${period}'`,
+        },
+      });
+      return;
+    }
+
+    // --- Look up operator details
+    const op = deps.registry.getById(operatorId);
+    const shareBps = op?.shareBps ?? 1500;
+    const operatorName = op?.name ?? operatorId;
+
+    // --- Build per-currency rows for the invoice
+    const currencies = rawRows.map((row) => {
+      const ourShareMinor = Math.floor(row.ggrMinor * shareBps / 10000);
+      return {
+        currency: row.currency,
+        stakeMinor: row.stakeMinor,
+        winMinor: row.winMinor,
+        ggrMinor: row.ggrMinor,
+        shareBps,
+        ourShareMinor,
+      };
+    });
+
+    // --- Build totals per currency (never mix currencies — per spec §2.3)
+    // totals is a Record<currency, { ggrMinor, ourShareMinor }> for machine export.
+    // Each currency is independent; summing across currencies would mix monetary units.
+    const totals: Record<string, { ggrMinor: number; ourShareMinor: number }> = {};
+    for (const c of currencies) {
+      const existing = totals[c.currency];
+      if (existing) {
+        // Multiple rows for same currency (shouldn't happen with groupBy=['currency'] but be safe)
+        existing.ggrMinor += c.ggrMinor;
+        existing.ourShareMinor += c.ourShareMinor;
+      } else {
+        totals[c.currency] = { ggrMinor: c.ggrMinor, ourShareMinor: c.ourShareMinor };
+      }
+    }
+
+    const generatedAt = deps.nowSeconds ? deps.nowSeconds() : Math.floor(Date.now() / 1000);
+    const invoiceId = `inv-${period}-${operatorId}-${Date.now()}`;
+
+    const invoice = {
+      invoiceId,
+      period,
+      operatorId,
+      operator: { name: operatorName },
+      generatedAt,
+      currencies,
+      totals,
+    };
+
+    // --- Audit (financial export — chain of custody)
+    const totalGgrMinorForAudit = currencies.reduce((sum, c) => sum + c.ggrMinor, 0);
+    deps.adminAudit.record({
+      actor: req.admin!.username,
+      action: 'financial.invoice.generated',
+      target: `operator:${operatorId}:period:${period}`,
+      payload: {
+        period,
+        operatorId,
+        invoiceId,
+        currencyCount: currencies.length,
+        // NOTE: totalGgrMinorForAudit mixes currencies for audit summary only (string blob)
+        // — this is acceptable in an audit log field but NOT in the invoice totals map.
+        totalGgrMinorForAudit,
+      },
+    });
+
+    res.status(200).json(invoice);
   });
 
   return router;

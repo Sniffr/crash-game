@@ -65,6 +65,7 @@ interface OperatorRow {
   rtp_variant: number;
   jurisdictions_json: string;
   status: string;
+  share_bps: number;
   created_at: number;
   updated_at: number;
 }
@@ -87,6 +88,10 @@ function rowToOperator(row: OperatorRow): Operator {
     rtpVariant: row.rtp_variant,
     jurisdictions: JSON.parse(row.jurisdictions_json) as string[],
     status: row.status as OperatorStatus,
+    // share_bps: basis points for revenue share (default 1500 = 15%). The column has
+    // a DEFAULT 1500 in the CREATE TABLE and the idempotent ALTER below, so existing
+    // rows without an explicit value will read as 1500 automatically.
+    shareBps: row.share_bps,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -142,11 +147,25 @@ export class OperatorRegistry {
         rtp_variant      REAL    NOT NULL DEFAULT 97.0,
         jurisdictions_json TEXT NOT NULL DEFAULT '[]',
         status           TEXT    NOT NULL DEFAULT 'active',
+        share_bps        INTEGER NOT NULL DEFAULT 1500,
         created_at       INTEGER NOT NULL,
         updated_at       INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_operators_api_key ON operators(api_key);
     `);
+
+    // Idempotent forward-compat column addition for existing dev databases that
+    // were created before share_bps was added. Phase 8 owns proper migrations;
+    // this one-shot defensive ALTER is the conventional SQLite-bootstrap pattern
+    // used throughout this codebase ("no migration framework" stance). better-sqlite3
+    // throws a SqliteError when the column already exists, which we suppress — making
+    // this call idempotent regardless of whether the DB is fresh or existing.
+    try {
+      this.db.exec(`ALTER TABLE operators ADD COLUMN share_bps INTEGER NOT NULL DEFAULT 1500`);
+    } catch {
+      // Column already exists in the schema (fresh DB just created above, or an
+      // existing dev DB that was already migrated). This is expected — not an error.
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -178,11 +197,11 @@ export class OperatorRegistry {
       `INSERT INTO operators (
         operator_id, name, wallet_base_url, api_key, signing_key_b64,
         adapter, currencies_json, min_bet_minor, max_bet_minor,
-        rtp_variant, jurisdictions_json, status, created_at, updated_at
+        rtp_variant, jurisdictions_json, status, share_bps, created_at, updated_at
       ) VALUES (
         @operator_id, @name, @wallet_base_url, @api_key, @signing_key_b64,
         @adapter, @currencies_json, @min_bet_minor, @max_bet_minor,
-        @rtp_variant, @jurisdictions_json, @status, @created_at, @updated_at
+        @rtp_variant, @jurisdictions_json, @status, @share_bps, @created_at, @updated_at
       )`,
     );
 
@@ -201,6 +220,7 @@ export class OperatorRegistry {
           rtp_variant: input.rtpVariant ?? 97.0,
           jurisdictions_json: JSON.stringify(input.jurisdictions ?? []),
           status,
+          share_bps: input.shareBps ?? 1500,
           created_at: now,
           updated_at: now,
         });
@@ -296,6 +316,13 @@ export class OperatorRegistry {
       if (patch.status !== undefined) {
         setClauses.push('status = @status');
         params['status'] = patch.status;
+      }
+      if (patch.shareBps !== undefined) {
+        if (!Number.isInteger(patch.shareBps) || patch.shareBps < 0 || patch.shareBps > 10000) {
+          throw new Error('shareBps must be an integer between 0 and 10000');
+        }
+        setClauses.push('share_bps = @share_bps');
+        params['share_bps'] = patch.shareBps;
       }
 
       // Build and run the dynamic statement without caching (SQL differs per call)

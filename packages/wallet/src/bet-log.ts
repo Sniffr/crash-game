@@ -118,6 +118,59 @@ export interface IdempotencyWithBet {
   winAmountMinor: number | null;
 }
 
+// ---------------------------------------------------------------------------
+// Financial report types (Task 5.4 — spec §8.1 / §8.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * A single row in a financial GGR/NGR report.
+ *
+ * Stake/win definitions (mirrored in SQL below):
+ *   STAKE = sum(amount_minor) for SETTLED, LOST, WIN_FAILED rows.
+ *     - SETTLED: debit happened, credit happened — fully closed.
+ *     - LOST: debit happened, no credit (multiplier < cashout) — fully closed.
+ *     - WIN_FAILED: debit happened, credit PENDING (operator hasn't responded) —
+ *       the debit is real so we count the stake. We do NOT count the win because
+ *       the operator has not confirmed credit. When force-credit later transitions
+ *       WIN_FAILED → SETTLED, future reports will include the win.
+ *     - VOIDED: full rollback — stake was refunded; exclude from stake.
+ *     - Mid-flight (PENDING/ARMED/FLYING/SETTLING/ROLLBACK_PENDING): not financially
+ *       closed; exclude entirely.
+ *   WIN = sum(win_amount_minor) for SETTLED rows only.
+ *   GGR = STAKE − WIN.
+ *   NGR = GGR − bonuses; bonuses = 0 in v1 (field reserved for future use).
+ *
+ * NEVER mix currencies in a single row. All sums are per (operatorId, currency).
+ */
+export interface FinancialRow {
+  operatorId: string;
+  currency: string;
+  /** UTC date 'YYYY-MM-DD'; null when 'day' is not in groupBy. */
+  day: string | null;
+  /** Count of financially-closed bets (SETTLED | LOST | WIN_FAILED). */
+  betCount: number;
+  stakeMinor: number;
+  winMinor: number;
+  /** stakeMinor − winMinor */
+  ggrMinor: number;
+  /** GGR − bonuses; bonuses = 0 in v1 */
+  ngrMinor: number;
+}
+
+export interface FinancialFilter {
+  operatorId?: string;
+  currency?: string;
+  /** Unix seconds inclusive lower bound on bet created_at */
+  from?: number;
+  /** Unix seconds exclusive upper bound on bet created_at */
+  to?: number;
+  /**
+   * At least one required. Controls GROUP BY granularity.
+   * Unknown values throw (caller should 400).
+   */
+  groupBy: ReadonlyArray<'operator' | 'currency' | 'day'>;
+}
+
 export interface CreateBetInput {
   betId: string;
   operatorId: string;
@@ -834,5 +887,150 @@ export class BetLog {
     }
 
     return { rows, nextCursor };
+  }
+
+  // -------------------------------------------------------------------------
+  // Financial reporting (Task 5.4 — spec §8.1 / §8.2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Aggregate bet_log rows into a financial GGR/NGR report.
+   *
+   * Stake/win/GGR definitions:
+   *   STAKE = SUM(amount_minor) WHERE state IN ('SETTLED', 'LOST', 'WIN_FAILED')
+   *     VOIDED → excluded (stake was refunded).
+   *     WIN_FAILED → stake included; WIN excluded (operator hasn't confirmed credit yet).
+   *   WIN   = SUM(win_amount_minor) WHERE state = 'SETTLED'
+   *     WIN_FAILED → excluded from win (see above; may be force-credited later).
+   *   GGR   = STAKE − WIN
+   *   NGR   = GGR − bonuses (v1: bonuses always 0; field reserved)
+   *
+   * Results are capped at 100 000 rows and ordered deterministically by the groupBy columns.
+   * Never mixes currencies in one row.
+   *
+   * @throws Error when groupBy is empty or contains unknown values (caller should 400).
+   */
+  financialReport(filter: FinancialFilter): FinancialRow[] {
+    const VALID_GROUP_BY = new Set(['operator', 'currency', 'day']);
+
+    if (!filter.groupBy || filter.groupBy.length === 0) {
+      throw new Error('groupBy must be a non-empty array containing at least one of: operator, currency, day');
+    }
+    for (const g of filter.groupBy) {
+      if (!VALID_GROUP_BY.has(g)) {
+        throw new Error(`Unknown groupBy value '${g}'. Valid values: operator, currency, day`);
+      }
+    }
+
+    const byOperator = filter.groupBy.includes('operator');
+    const byCurrency = filter.groupBy.includes('currency');
+    const byDay = filter.groupBy.includes('day');
+
+    // Build SELECT list and GROUP BY clauses dynamically from groupBy.
+    // We always return operatorId and currency in the result (NULL when not in groupBy).
+    // day is only computed when 'day' is in groupBy (otherwise NULL).
+    const selectClauses: string[] = [];
+    const groupByClauses: string[] = [];
+    const orderByClauses: string[] = [];
+
+    if (byOperator) {
+      selectClauses.push('operator_id');
+      groupByClauses.push('operator_id');
+      orderByClauses.push('operator_id ASC');
+    } else {
+      selectClauses.push("NULL AS operator_id");
+    }
+
+    if (byCurrency) {
+      selectClauses.push('currency');
+      groupByClauses.push('currency');
+      orderByClauses.push('currency ASC');
+    } else {
+      selectClauses.push("NULL AS currency");
+    }
+
+    if (byDay) {
+      selectClauses.push("strftime('%Y-%m-%d', created_at, 'unixepoch') AS day");
+      groupByClauses.push("strftime('%Y-%m-%d', created_at, 'unixepoch')");
+      orderByClauses.push('day ASC');
+    } else {
+      selectClauses.push("NULL AS day");
+    }
+
+    // Financial aggregations per spec §8.1:
+    //   STAKE: amount_minor for SETTLED, LOST, WIN_FAILED (debit happened, never refunded)
+    //   WIN:   win_amount_minor for SETTLED only (confirmed operator credit)
+    //   WIN_FAILED note: stake counted, win NOT counted (operator credit unconfirmed)
+    selectClauses.push(`
+      SUM(CASE WHEN state IN ('SETTLED', 'LOST', 'WIN_FAILED') THEN 1 ELSE 0 END) AS bet_count,
+      SUM(CASE WHEN state IN ('SETTLED', 'LOST', 'WIN_FAILED') THEN amount_minor ELSE 0 END) AS stake_minor,
+      SUM(CASE WHEN state = 'SETTLED' THEN COALESCE(win_amount_minor, 0) ELSE 0 END) AS win_minor
+    `);
+
+    // WHERE conditions
+    const whereConds: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.operatorId !== undefined) {
+      whereConds.push('operator_id = ?');
+      params.push(filter.operatorId);
+    }
+    if (filter.currency !== undefined) {
+      whereConds.push('currency = ?');
+      params.push(filter.currency);
+    }
+    if (filter.from !== undefined) {
+      whereConds.push('created_at >= ?');
+      params.push(filter.from);
+    }
+    if (filter.to !== undefined) {
+      // 'to' is exclusive per spec
+      whereConds.push('created_at < ?');
+      params.push(filter.to);
+    }
+
+    const where = whereConds.length > 0 ? `WHERE ${whereConds.join(' AND ')}` : '';
+    const groupBy = groupByClauses.length > 0 ? `GROUP BY ${groupByClauses.join(', ')}` : '';
+    const orderBy = orderByClauses.length > 0 ? `ORDER BY ${orderByClauses.join(', ')}` : '';
+
+    const sql = `
+      SELECT
+        ${selectClauses.join(',\n        ')}
+      FROM bet_log
+      ${where}
+      ${groupBy}
+      ${orderBy}
+      -- Defensive cap: this is a report query; callers should narrow the window via
+      -- groupBy granularity rather than relying on this limit. 100 000 rows is ~274
+      -- operator-currency-day cells over a full year, which no realistic deployment
+      -- should exceed. If it does, narrow the query window.
+      LIMIT 100000
+    `;
+
+    // Dynamic SQL — cannot use the prepared-statement cache (SQL differs per groupBy combo).
+    const raw = this.db.prepare(sql).all(...params) as Array<{
+      operator_id: string | null;
+      currency: string | null;
+      day: string | null;
+      bet_count: number;
+      stake_minor: number;
+      win_minor: number;
+    }>;
+
+    return raw.map((r) => {
+      const stakeMinor = r.stake_minor ?? 0;
+      const winMinor = r.win_minor ?? 0;
+      const ggrMinor = stakeMinor - winMinor;
+      return {
+        operatorId: r.operator_id ?? '',
+        currency: r.currency ?? '',
+        day: r.day,
+        betCount: r.bet_count ?? 0,
+        stakeMinor,
+        winMinor,
+        ggrMinor,
+        ngrMinor: ggrMinor, // bonuses = 0 in v1; NGR = GGR
+      };
+    });
   }
 }

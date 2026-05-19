@@ -41,12 +41,15 @@ describe('OperatorRegistry', () => {
     expect(operator.apiKey.length).toBeGreaterThan(0);
     expect(Buffer.isBuffer(operator.signingKey)).toBe(true);
     expect(operator.signingKey.length).toBe(32);
+    // shareBps defaults to 1500 when not provided
+    expect(operator.shareBps).toBe(1500);
 
     const fetched = registry.getById('op_test_001');
     expect(fetched).not.toBeNull();
     expect(fetched!.operatorId).toBe(operator.operatorId);
     expect(fetched!.apiKey).toBe(credentials.apiKey);
     expect(fetched!.signingKey.length).toBe(32);
+    expect(fetched!.shareBps).toBe(1500);
   });
 
   // -------------------------------------------------------------------------
@@ -169,5 +172,31 @@ describe('OperatorRegistry', () => {
 
     // Nonexistent operator throws OperatorNotFoundError
     expect(() => registry.regenSigningKey('nonexistent')).toThrow(OperatorNotFoundError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Test 9 – shareBps: custom value at create; update; out-of-range throws
+  // -------------------------------------------------------------------------
+  it('shareBps custom value at create; update via patch; out-of-range throws', () => {
+    // Custom shareBps at create time
+    const { operator } = registry.create(makeInput({ operatorId: 'op_share_001', shareBps: 2500 }));
+    expect(operator.shareBps).toBe(2500);
+    expect(registry.getById('op_share_001')!.shareBps).toBe(2500);
+
+    // Update shareBps via patch
+    const updated = registry.update('op_share_001', { shareBps: 3000 });
+    expect(updated.shareBps).toBe(3000);
+    expect(registry.getById('op_share_001')!.shareBps).toBe(3000);
+
+    // shareBps = 0 and 10000 are valid edge-case boundaries
+    registry.update('op_share_001', { shareBps: 0 });
+    expect(registry.getById('op_share_001')!.shareBps).toBe(0);
+    registry.update('op_share_001', { shareBps: 10000 });
+    expect(registry.getById('op_share_001')!.shareBps).toBe(10000);
+
+    // Out-of-range throws
+    expect(() => registry.update('op_share_001', { shareBps: -1 })).toThrow();
+    expect(() => registry.update('op_share_001', { shareBps: 10001 })).toThrow();
+    expect(() => registry.update('op_share_001', { shareBps: 1500.5 })).toThrow();
   });
 });

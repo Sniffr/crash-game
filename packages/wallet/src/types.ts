@@ -14,6 +14,8 @@ export interface Operator {
   rtpVariant: number;            // e.g. 97.0
   jurisdictions: string[];
   status: OperatorStatus;
+  /** Revenue share in basis points (0–10000). Default 1500 = 15%. Used for settlement §8.2. */
+  shareBps: number;
   createdAt: number;             // unix seconds
   updatedAt: number;
 }
@@ -29,6 +31,8 @@ export interface OperatorCreate {
   rtpVariant?: number;           // default 97.0
   jurisdictions?: string[];      // default []
   status?: OperatorStatus;       // default 'sandbox'
+  /** Revenue share basis points (0–10000). Default 1500 = 15%. */
+  shareBps?: number;
 }
 
 export interface OperatorUpdate {
@@ -41,6 +45,8 @@ export interface OperatorUpdate {
   rtpVariant?: number;
   jurisdictions?: string[];
   status?: OperatorStatus;
+  /** Revenue share basis points (0–10000). */
+  shareBps?: number;
 }
 
 /** Returned ONCE on create + rotate. Never re-emitted. */
