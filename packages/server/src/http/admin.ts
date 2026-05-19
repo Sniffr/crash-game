@@ -15,7 +15,7 @@ import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFou
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
-import { AdminUsers, DuplicateAdminError, AdminNotFoundError } from '../admin/admin-store.js';
+import { AdminUsers, DuplicateAdminError, AdminNotFoundError, isAdminRole } from '../admin/admin-store.js';
 import {
   requireAdminJwt,
   requireRole,
@@ -79,6 +79,13 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
 
   // One-shot credentials cache: operatorId → { apiKey, signingKey }
   // Populated by create + regen-signing-key; consumed (and deleted) by GET /credentials.
+  //
+  // IMPORTANT LIMITATIONS (tracked for Phase 6/8):
+  //   (a) In-process only — creating an operator on one instance and calling
+  //       GET /credentials on a different instance returns 404 (single-instance
+  //       only; multi-instance horizontal scaling, Phase 8 Dockerfile, breaks retrieval).
+  //   (b) No TTL — entries persist until consumed; Phase 6/8 should add TTL-based
+  //       eviction to prevent unbounded growth on un-retrieved credentials.
   const oneShot = new Map<string, { apiKey: string; signingKey: string }>();
 
   // =========================================================================
@@ -146,8 +153,8 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // =========================================================================
 
   router.post('/auth/logout', async (req, res): Promise<void> => {
-    // Stash the jti from the request — added to admin-auth.ts as adminJti
-    const jti = (req as unknown as { adminJti?: string }).adminJti;
+    // Stash the jti from the request — augmented onto Request in admin-auth.ts
+    const jti = req.adminJti;
     if (jti) {
       deps.revoked.add(jti);
     }
@@ -199,7 +206,19 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
 
     const username = body.username;
     const password = body.password;
-    const roles = body.roles as AdminRole[];
+    const rawRoles = body.roles;
+
+    // Validate roles: non-empty array of known AdminRole values.
+    if (rawRoles.length === 0 || !rawRoles.every((r: unknown) => typeof r === 'string' && isAdminRole(r))) {
+      res.status(400).json({
+        error: {
+          code: 'INVALID_REQUEST',
+          message: 'roles must be a non-empty array of: admin, finance, support, viewer',
+        },
+      });
+      return;
+    }
+    const roles = rawRoles as AdminRole[];
 
     try {
       const hash = await bcrypt.hash(password, 10);
@@ -660,7 +679,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
           payload: { reason, result: 'not_found' },
         });
         res.status(404).json({
-          error: { code: 'BET_NOT_FOUND' },
+          error: { code: 'BET_NOT_FOUND', message: 'No bet-log row for the given betId' },
         });
         return;
       }
@@ -717,7 +736,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
           payload: { reason, result: 'operator_unavailable', operatorId: row.operatorId },
         });
         res.status(503).json({
-          error: { code: 'OPERATOR_UNAVAILABLE' },
+          error: { code: 'OPERATOR_UNAVAILABLE', message: 'Operator wallet client unavailable (operator paused or deregistered)' },
         });
         return;
       }
@@ -786,7 +805,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
           },
         });
         res.status(409).json({
-          error: { code: 'TRANSITION_FAILED' },
+          error: { code: 'TRANSITION_FAILED', message: 'Operator credited the player but the bet-log row could not transition to SETTLED — data-integrity event; see audit row' },
         });
         return;
       }
@@ -823,7 +842,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
         // best-effort only
       }
       if (!res.headersSent) {
-        res.status(500).json({ error: { code: 'INTERNAL' } });
+        res.status(500).json({ error: { code: 'INTERNAL', message: 'Unexpected server error during force-credit' } });
       }
     }
   });

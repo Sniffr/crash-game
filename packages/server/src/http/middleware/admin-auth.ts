@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { RequestHandler, Request } from 'express';
+import type { RequestHandler } from 'express';
 import { SignJWT, jwtVerify } from 'jose';
 import type { AdminRole } from '../../admin/admin-store.js';
 
@@ -112,12 +112,12 @@ export function requireAdminJwt(opts: {
       }
 
       // Attach admin identity to request.
-      (req as Request & { admin: { username: string; roles: AdminRole[] } }).admin = {
+      req.admin = {
         username: payload.sub,
         roles: payload.roles,
       };
       // Stash jti for logout to add to the revocation set.
-      (req as Request & { adminJti: string }).adminJti = payload.jti;
+      req.adminJti = payload.jti;
 
       next();
     } catch (err) {
@@ -145,7 +145,7 @@ export function requireAdminJwt(opts: {
  */
 export function requireRole(...allowed: AdminRole[]): RequestHandler {
   return function requireRoleMiddleware(req, res, next): void {
-    const admin = (req as Request & { admin?: { username: string; roles: AdminRole[] } }).admin;
+    const admin = req.admin;
     if (!admin) {
       // Should not reach here without requireAdminJwt first, but guard defensively.
       res.status(401).json({ error: { code: 'INVALID_JWT', message: 'Not authenticated' } });

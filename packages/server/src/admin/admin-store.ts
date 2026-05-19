@@ -16,6 +16,12 @@ type SqliteStatement<P extends unknown[] = unknown[]> = ReturnType<Database['pre
 
 export type AdminRole = 'admin' | 'finance' | 'support' | 'viewer';
 
+export const ADMIN_ROLES = ['admin', 'finance', 'support', 'viewer'] as const;
+
+export function isAdminRole(s: string): s is AdminRole {
+  return (ADMIN_ROLES as readonly string[]).includes(s);
+}
+
 export interface AdminUser {
   username: string;
   roles: AdminRole[];

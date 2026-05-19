@@ -598,6 +598,23 @@ describe('/admin/v1/admins CRUD', () => {
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('ADMIN_NOT_FOUND');
   });
+
+  it('POST /admins with invalid role → 400 INVALID_REQUEST', async () => {
+    const { app, adminUsers } = makeHarness();
+    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+
+    const { token } = await loginAs(app, 'alice', 'pw');
+
+    const res = await request(app)
+      .post('/admin/v1/admins')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ username: 'wizard', password: 'pw', roles: ['admin', 'bogus'] });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_REQUEST');
+    expect(typeof res.body.error.message).toBe('string');
+    expect(res.body.error.message.length).toBeGreaterThan(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

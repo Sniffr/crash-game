@@ -11,7 +11,7 @@ import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
 import { createAdminRouter } from './http/admin';
-import { AdminAudit, AdminUsers } from './admin/admin-store';
+import { AdminAudit, AdminUsers, isAdminRole } from './admin/admin-store';
 import * as bcrypt from 'bcryptjs';
 import type { AdminRole } from './admin/admin-store';
 import { WalletClientCache } from './wallet/client-cache';
@@ -148,10 +148,18 @@ try {
     const u = bootstrapEnv.slice(0, colonIdx1);
     const p = bootstrapEnv.slice(colonIdx1 + 1, colonIdx2);
     const rolesStr = bootstrapEnv.slice(colonIdx2 + 1);
-    const roles = (rolesStr || 'admin').split(',').map((r) => r.trim()) as AdminRole[];
-    const hash = await bcrypt.hash(p, 10);
-    adminUsers.create(u, hash, roles);
-    console.log(`[admin] bootstrapped initial admin '${u}'`);
+    const parsedRoles = (rolesStr || 'admin').split(',').map((r) => r.trim());
+    const invalidRoles = parsedRoles.filter((r) => !isAdminRole(r));
+    if (invalidRoles.length > 0) {
+      console.error(
+        `[admin] bootstrap skipped: ADMIN_BOOTSTRAP_USER has invalid role(s) ${invalidRoles.join(', ')}; expected admin|finance|support|viewer`,
+      );
+    } else {
+      const roles = parsedRoles as AdminRole[];
+      const hash = await bcrypt.hash(p, 10);
+      adminUsers.create(u, hash, roles);
+      console.log(`[admin] bootstrapped initial admin '${u}'`);
+    }
   }
 } catch (err) {
   console.error('[admin] bootstrap failed (continuing):', err);
