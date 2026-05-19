@@ -10,8 +10,8 @@
  */
 
 import { Router } from 'express';
-import type { WalletClient, BetLog, WinRequest, OperatorStatus } from '@crash/wallet';
-import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError } from '@crash/wallet';
+import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState } from '@crash/wallet';
+import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
@@ -21,6 +21,12 @@ import {
   requireRole,
   signAdminJwt,
 } from './middleware/admin-auth.js';
+
+// Valid BetState values for ?state= filter validation
+const BET_STATES = new Set<string>([
+  'PENDING', 'ARMED', 'FLYING', 'SETTLING', 'SETTLED',
+  'LOST', 'ROLLBACK_PENDING', 'VOIDED', 'WIN_FAILED',
+]);
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -847,5 +853,398 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }
   });
 
+  // =========================================================================
+  // Shared pagination helper — parse cursor + limit from query params,
+  // returning 400 on bad cursor. Usage: const page = readPage(req, res); if (!page) return;
+  // =========================================================================
+
+  function readPage(
+    req: import('express').Request,
+    res: import('express').Response,
+  ): { limit: number; cursor: import('@crash/wallet').Cursor | undefined } | null {
+    const limit = parseLimit(req.query['limit'], 50, 200);
+    const rawCursor = req.query['cursor'];
+    if (rawCursor !== undefined && typeof rawCursor === 'string' && rawCursor !== '') {
+      const cursor = decodeCursor(rawCursor);
+      if (!cursor) {
+        res.status(400).json({ error: { code: 'INVALID_CURSOR', message: 'Cursor is malformed or expired — restart pagination' } });
+        return null;
+      }
+      return { limit, cursor };
+    }
+    return { limit, cursor: undefined };
+  }
+
+  // =========================================================================
+  // S. GET /rounds — derived from bet_log GROUP BY round_id
+  // =========================================================================
+
+  router.get('/rounds', (req, res): void => {
+    const page = readPage(req, res);
+    if (!page) return;
+
+    const q = req.query as Record<string, string | undefined>;
+
+    // Parse numeric filters
+    const from = q['from'] !== undefined ? Number(q['from']) : undefined;
+    const to = q['to'] !== undefined ? Number(q['to']) : undefined;
+    const minMultiplier = q['minMultiplier'] !== undefined ? Number(q['minMultiplier']) : undefined;
+    const maxMultiplier = q['maxMultiplier'] !== undefined ? Number(q['maxMultiplier']) : undefined;
+
+    if (
+      (from !== undefined && !Number.isFinite(from)) ||
+      (to !== undefined && !Number.isFinite(to)) ||
+      (minMultiplier !== undefined && !Number.isFinite(minMultiplier)) ||
+      (maxMultiplier !== undefined && !Number.isFinite(maxMultiplier))
+    ) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from, to, minMultiplier, maxMultiplier must be numeric' } });
+      return;
+    }
+
+    const { rows, nextCursor } = deps.betLog.listRoundsFiltered(
+      { operatorId: q['operatorId'], from, to, minMultiplier, maxMultiplier },
+      page,
+    );
+
+    const items = rows.map((r) => ({
+      roundId: r.roundId,
+      // operatorId: first in the list (multi-operator rounds are unusual but possible)
+      operatorId: r.operatorIds[0] ?? null,
+      operatorIds: r.operatorIds,
+      // roundNumber: not persisted — no rounds table (Phase-future gap)
+      // not persisted (Phase-future): roundNumber requires a dedicated rounds table
+      roundNumber: null,
+      // crashPoint: not persisted — RNG seeds live in the in-memory game loop (Phase-future gap)
+      // not persisted (Phase-future): crashPoint/serverSeed come from the live RNG loop, not bet_log
+      crashPoint: null,
+      betCount: r.betCount,
+      totalStakeMinor: r.totalAmountMinorByCurrency,
+      // totalPayoutMinor: not persisted — win_amount_minor per bet exists but payout aggregation
+      // is not pre-computed; omitted rather than fabricated (Phase-future gap)
+      totalPayoutMinor: null,
+      startedAt: r.firstAt,
+      crashedAt: r.lastAt,
+      distinctPlayers: r.distinctPlayers,
+      maxMultiplier: r.maxMultiplier,
+      // serverSeedHash: not persisted (Phase-future)
+      serverSeedHash: null,
+    }));
+
+    res.status(200).json({ items, nextCursor, count: items.length });
+  });
+
+  // =========================================================================
+  // T. GET /rounds/:roundId — full detail
+  // =========================================================================
+
+  router.get('/rounds/:roundId', (req, res): void => {
+    const { roundId } = req.params as { roundId: string };
+
+    const bets = deps.betLog.listByRound(roundId);
+    if (bets.length === 0) {
+      res.status(404).json({ error: { code: 'ROUND_NOT_FOUND', message: `No bets found for round '${roundId}'` } });
+      return;
+    }
+
+    const operatorIds = [...new Set(bets.map((b) => b.operatorId))];
+    const playerIds = new Set(bets.map((b) => b.playerId));
+    const createdAts = bets.map((b) => b.createdAt);
+    const firstAt = Math.min(...createdAts);
+    const lastAt = Math.max(...createdAts);
+    const multipliers = bets.map((b) => b.multiplier).filter((m): m is number => m !== null);
+    const maxMultiplier = multipliers.length > 0 ? Math.max(...multipliers) : null;
+
+    const totalAmountMinorByCurrency: Record<string, number> = {};
+    for (const bet of bets) {
+      totalAmountMinorByCurrency[bet.currency] = (totalAmountMinorByCurrency[bet.currency] ?? 0) + bet.amountMinor;
+    }
+
+    const round = {
+      roundId,
+      operatorId: operatorIds[0] ?? null,
+      operatorIds,
+      roundNumber: null,              // not persisted (Phase-future): no rounds table
+      crashPoint: null,               // not persisted (Phase-future): RNG crash point not stored in bet_log
+      betCount: bets.length,
+      totalStakeMinor: totalAmountMinorByCurrency,
+      totalPayoutMinor: null,         // not persisted (Phase-future): payout not aggregated
+      startedAt: firstAt,
+      crashedAt: lastAt,
+      distinctPlayers: playerIds.size,
+      maxMultiplier,
+      serverSeedHash: null,           // not persisted (Phase-future): RNG seeds live in game loop memory only
+      serverSeed: null,               // not persisted (Phase-future): RNG seeds not stored in bet_log
+      clientSeedRef: null,            // not persisted (Phase-future)
+      rngFormulaVersion: null,        // not persisted (Phase-future)
+    };
+
+    const betItems = bets.map(toBetItem);
+
+    res.status(200).json({ round, bets: betItems });
+  });
+
+  // =========================================================================
+  // U. GET /bets — filtered + paginated
+  // =========================================================================
+
+  router.get('/bets', (req, res): void => {
+    const page = readPage(req, res);
+    if (!page) return;
+
+    const q = req.query as Record<string, string | undefined>;
+
+    // Validate ?state=
+    const stateRaw = q['state'];
+    if (stateRaw !== undefined && !BET_STATES.has(stateRaw)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: `Unknown state '${stateRaw}'. Valid states: ${[...BET_STATES].join(', ')}` } });
+      return;
+    }
+
+    const from = q['from'] !== undefined ? Number(q['from']) : undefined;
+    const to = q['to'] !== undefined ? Number(q['to']) : undefined;
+    if (
+      (from !== undefined && !Number.isFinite(from)) ||
+      (to !== undefined && !Number.isFinite(to))
+    ) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from and to must be numeric unix seconds' } });
+      return;
+    }
+
+    const { rows, nextCursor } = deps.betLog.listBetsFiltered(
+      {
+        operatorId: q['operatorId'],
+        playerId: q['playerId'],
+        state: stateRaw as BetState | undefined,
+        betId: q['betId'],
+        betTxnId: q['txnId'],  // spec §6.1 filter is txnId → maps to betTxnId
+        from,
+        to,
+      },
+      page,
+    );
+
+    res.status(200).json({
+      items: rows.map(toBetItem),
+      nextCursor,
+      count: rows.length,
+    });
+  });
+
+  // =========================================================================
+  // V. GET /bets/:betId — single bet + derived timeline + walletCalls
+  // =========================================================================
+
+  router.get('/bets/:betId', (req, res): void => {
+    const { betId } = req.params as { betId: string };
+
+    const bet = deps.betLog.getById(betId);
+    if (!bet) {
+      res.status(404).json({ error: { code: 'BET_NOT_FOUND', message: `No bet with id '${betId}'` } });
+      return;
+    }
+
+    // §6.2 timeline: per-transition history is NOT persisted (Phase-future gap).
+    // We derive a minimal 2-entry timeline: creation (PENDING) + current state.
+    // Full per-transition timestamps would require a dedicated bet_state_transitions table.
+    // See Phase-future: add bet_state_transitions table for complete audit trail.
+    const timeline: Array<{
+      state: string;
+      at: number;
+      actor: string;
+      operatorTxnId?: string | null;
+    }> = [
+      { state: 'PENDING', at: bet.createdAt, actor: 'system' },
+    ];
+    // Add a second entry if the state has changed (i.e., updatedAt > createdAt or state !== PENDING)
+    if (bet.state !== 'PENDING' || bet.updatedAt !== bet.createdAt) {
+      const entry: { state: string; at: number; actor: string; operatorTxnId?: string | null } = {
+        state: bet.state,
+        at: bet.updatedAt,
+        actor: 'system',
+      };
+      // Include the operatorTxnId for ARMED (bet_op_txn_id) or SETTLED (win_op_txn_id)
+      if (bet.state === 'ARMED' || bet.state === 'SETTLED') {
+        entry.operatorTxnId = bet.state === 'ARMED' ? bet.betOpTxnId : bet.winOpTxnId;
+      }
+      if (entry.state !== 'PENDING') {
+        timeline.push(entry);
+      }
+    }
+
+    // walletCalls: derive from txn_idempotency for the txn ids present on this bet
+    const walletCalls: Array<{
+      kind: string;
+      txnId: string;
+      request: unknown;
+      response: unknown;
+      attempts: null;
+      totalMs: null;
+    }> = [];
+
+    const txnIds: Array<{ kind: string; txnId: string; operatorId: string }> = [];
+    if (bet.betTxnId) txnIds.push({ kind: 'bet', txnId: bet.betTxnId, operatorId: bet.operatorId });
+    if (bet.winTxnId) txnIds.push({ kind: 'win', txnId: bet.winTxnId, operatorId: bet.operatorId });
+    if (bet.rollbackTxnId) txnIds.push({ kind: 'rollback', txnId: bet.rollbackTxnId, operatorId: bet.operatorId });
+
+    for (const { kind, txnId, operatorId } of txnIds) {
+      const entry = deps.betLog.getIdempotency(operatorId, txnId);
+      if (entry) {
+        let req: unknown = null;
+        let resp: unknown = null;
+        try { resp = JSON.parse(entry.responseJson); } catch { resp = entry.responseJson; }
+        // request body is hashed, not stored — not persisted (Phase-future gap)
+        // not persisted (Phase-future): request body is stored as a hash only; full request not available
+        req = null;
+        walletCalls.push({
+          kind,
+          txnId,
+          request: req,
+          response: resp,
+          attempts: null,     // not persisted (Phase-future): retry count not stored in txn_idempotency
+          totalMs: null,      // not persisted (Phase-future): latency not stored in txn_idempotency
+        });
+      }
+    }
+
+    res.status(200).json({ bet: toBetItem(bet), timeline, walletCalls });
+  });
+
+  // =========================================================================
+  // W. GET /transactions — finance|admin only
+  // =========================================================================
+
+  router.get('/transactions', requireRole('finance', 'admin'), (req, res): void => {
+    const page = readPage(req, res);
+    if (!page) return;
+
+    const q = req.query as Record<string, string | undefined>;
+
+    const kindRaw = q['kind'];
+    if (kindRaw !== undefined && !['bet', 'win', 'rollback'].includes(kindRaw)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: "kind must be 'bet', 'win', or 'rollback'" } });
+      return;
+    }
+
+    const from = q['from'] !== undefined ? Number(q['from']) : undefined;
+    const to = q['to'] !== undefined ? Number(q['to']) : undefined;
+    if (
+      (from !== undefined && !Number.isFinite(from)) ||
+      (to !== undefined && !Number.isFinite(to))
+    ) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from and to must be numeric unix seconds' } });
+      return;
+    }
+
+    const { rows, nextCursor } = deps.betLog.listIdempotencyFiltered(
+      {
+        operatorId: q['operatorId'],
+        playerId: q['playerId'],
+        kind: kindRaw as 'bet' | 'win' | 'rollback' | undefined,
+        from,
+        to,
+      },
+      page,
+    );
+
+    const items = rows.map((r) => {
+      // Derive status from response_json shape
+      // Stored entries are confirmed — either OK or FAILED (NOOP is not distinguishable from stored rows)
+      let status: 'OK' | 'FAILED' | 'NOOP' = 'OK';
+      let errorCode: string | null = null;
+      try {
+        const resp = JSON.parse(r.responseJson) as Record<string, unknown>;
+        if (resp['ok'] === false) {
+          status = 'FAILED';
+          const errObj = resp['error'] as Record<string, unknown> | undefined;
+          errorCode = (errObj?.['code'] as string) ?? null;
+        }
+      } catch {
+        // leave as OK
+      }
+
+      return {
+        txnId: r.txnId,
+        operatorId: r.operatorId,
+        operatorTxnId: r.operatorTxnId,
+        kind: r.kind,
+        playerId: r.playerId,
+        betId: r.betId,
+        amountMinor: r.kind === 'win' ? r.winAmountMinor : r.amountMinor,
+        currency: r.currency,
+        status,
+        errorCode,
+        attempts: null,     // not persisted (Phase-future): retry count not stored
+        totalMs: null,      // not persisted (Phase-future): latency not stored
+        createdAt: r.createdAt,
+      };
+    });
+
+    res.status(200).json({ items, nextCursor, count: items.length });
+  });
+
+  // =========================================================================
+  // X. GET /audit — admin only
+  // =========================================================================
+
+  router.get('/audit', requireRole('admin'), (req, res): void => {
+    const page = readPage(req, res);
+    if (!page) return;
+
+    const q = req.query as Record<string, string | undefined>;
+
+    const from = q['from'] !== undefined ? Number(q['from']) : undefined;
+    const to = q['to'] !== undefined ? Number(q['to']) : undefined;
+    if (
+      (from !== undefined && !Number.isFinite(from)) ||
+      (to !== undefined && !Number.isFinite(to))
+    ) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from and to must be numeric unix seconds' } });
+      return;
+    }
+
+    const { rows, nextCursor } = deps.adminAudit.listFiltered(
+      { actor: q['actor'], action: q['action'], target: q['target'], from, to },
+      page,
+    );
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      actor: r.actor,
+      action: r.action,
+      target: r.target,
+      payload: r.payload ?? null,
+      at: r.at,
+    }));
+
+    res.status(200).json({ items, nextCursor, count: items.length });
+  });
+
   return router;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: map BetRow to the §6.1 API item shape
+// ---------------------------------------------------------------------------
+
+function toBetItem(bet: import('@crash/wallet').BetRow) {
+  return {
+    betId: bet.betId,
+    operatorId: bet.operatorId,
+    playerId: bet.playerId,
+    sessionId: bet.sessionId,
+    roundId: bet.roundId,
+    currency: bet.currency,
+    amountMinor: bet.amountMinor,
+    state: bet.state,
+    betTxnId: bet.betTxnId,
+    winTxnId: bet.winTxnId,
+    rollbackTxnId: bet.rollbackTxnId,
+    betOpTxnId: bet.betOpTxnId,
+    winOpTxnId: bet.winOpTxnId,
+    winAmountMinor: bet.winAmountMinor,
+    multiplier: bet.multiplier,
+    errorCode: bet.errorCode,
+    createdAt: bet.createdAt,
+    updatedAt: bet.updatedAt,
+  };
 }

@@ -1,4 +1,6 @@
 import type { Database } from 'better-sqlite3';
+import type { Cursor } from '@crash/wallet';
+import { encodeCursor } from '@crash/wallet';
 
 // ---------------------------------------------------------------------------
 // Derive Statement type without importing the namespace type (mirrors bet-log.ts)
@@ -168,24 +170,81 @@ export class AdminAudit {
       `SELECT * FROM admin_audit ORDER BY id DESC LIMIT ?`,
     ).all(limit) as AuditRow[];
 
-    return rows.map((row) => {
-      let payload: unknown = undefined;
-      if (row.payload_json !== null) {
-        try {
-          payload = JSON.parse(row.payload_json);
-        } catch {
-          payload = row.payload_json; // return raw string if unparseable
-        }
+    return rows.map((row) => this._rowToEntry(row));
+  }
+
+  /**
+   * Filtered + cursor-paginated list of audit rows (§12.1).
+   * Keyset: ORDER BY at DESC, id DESC.
+   * nextCursor is null when fewer than `limit` rows are returned.
+   */
+  listFiltered(
+    f: { actor?: string; action?: string; target?: string; from?: number; to?: number },
+    page: { limit: number; cursor?: Cursor },
+  ): { rows: Array<AuditEntry & { id: number; at: number }>; nextCursor: string | null } {
+    const conds: string[] = [];
+    const params: unknown[] = [];
+
+    // Keyset cursor on (at DESC, id DESC)
+    if (page.cursor) {
+      conds.push('(at < ? OR (at = ? AND id < ?))');
+      params.push(page.cursor.ts, page.cursor.ts, Number(page.cursor.id));
+    }
+    if (f.actor !== undefined) {
+      conds.push('actor = ?');
+      params.push(f.actor);
+    }
+    if (f.action !== undefined) {
+      conds.push('action = ?');
+      params.push(f.action);
+    }
+    if (f.target !== undefined) {
+      conds.push('target = ?');
+      params.push(f.target);
+    }
+    if (f.from !== undefined) {
+      conds.push('at >= ?');
+      params.push(f.from);
+    }
+    if (f.to !== undefined) {
+      conds.push('at <= ?');
+      params.push(f.to);
+    }
+
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+    // Dynamic SQL — cannot use the prepared-statement cache for dynamic WHERE clauses
+    const sql = `SELECT * FROM admin_audit ${where} ORDER BY at DESC, id DESC LIMIT ?`;
+    params.push(page.limit);
+
+    const rows = this.db.prepare(sql).all(...params) as AuditRow[];
+    const entries = rows.map((row) => this._rowToEntry(row));
+
+    let nextCursor: string | null = null;
+    if (entries.length === page.limit) {
+      const last = entries[entries.length - 1]!;
+      nextCursor = encodeCursor({ ts: last.at, id: String(last.id) });
+    }
+
+    return { rows: entries, nextCursor };
+  }
+
+  private _rowToEntry(row: AuditRow): AuditEntry & { id: number; at: number } {
+    let payload: unknown = undefined;
+    if (row.payload_json !== null) {
+      try {
+        payload = JSON.parse(row.payload_json);
+      } catch {
+        payload = row.payload_json; // return raw string if unparseable
       }
-      return {
-        id: row.id,
-        actor: row.actor,
-        action: row.action,
-        target: row.target,
-        payload,
-        at: row.at,
-      };
-    });
+    }
+    return {
+      id: row.id,
+      actor: row.actor,
+      action: row.action,
+      target: row.target,
+      payload,
+      at: row.at,
+    };
   }
 }
 

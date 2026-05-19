@@ -1,5 +1,7 @@
 import type { Database } from 'better-sqlite3';
 import { type BetState, type BetEvent, nextState, InvalidTransitionError } from './state-machine.js';
+import { type Cursor, encodeCursor, decodeCursor as _decodeCursor } from './cursor.js';
+export type { Cursor } from './cursor.js';
 
 // ---------------------------------------------------------------------------
 // Custom errors
@@ -76,6 +78,46 @@ export interface BetRow {
   updatedAt: number;
 }
 
+/**
+ * RoundSummary: derived by GROUP BY round_id over bet_log rows.
+ * There is NO rounds table — rounds exist only as groups of bet_log rows.
+ * Fields unavailable from bet_log (server seeds, crash point from RNG, roundNumber)
+ * are omitted — the live round loop's RNG seeds are NOT persisted (Phase-future gap).
+ */
+export interface RoundSummary {
+  roundId: string;
+  /** All distinct operator ids that have bets in this round */
+  operatorIds: string[];
+  betCount: number;
+  distinctPlayers: number;
+  /** Total amount wagered, per currency */
+  totalAmountMinorByCurrency: Record<string, number>;
+  /** Max multiplier seen across settled bets in this round (null if no settled bets) */
+  maxMultiplier: number | null;
+  firstAt: number;   // unix seconds
+  lastAt: number;    // unix seconds
+}
+
+/**
+ * A txn_idempotency row joined with bet_log fields for the §7.1 transactions API.
+ */
+export interface IdempotencyWithBet {
+  txnId: string;
+  operatorId: string;
+  kind: TxnKind;
+  requestHash: string;
+  responseJson: string;
+  createdAt: number;
+  // Joined from bet_log:
+  playerId: string | null;
+  betId: string | null;
+  // Derived per-kind from bet_log:
+  operatorTxnId: string | null;
+  amountMinor: number | null;
+  currency: string | null;
+  winAmountMinor: number | null;
+}
+
 export interface CreateBetInput {
   betId: string;
   operatorId: string;
@@ -130,6 +172,36 @@ interface IdempotencyRow {
   request_hash: string;
   response_json: string;
   created_at: number;
+}
+
+interface IdempotencyWithBetRow {
+  txn_id: string;
+  operator_id: string;
+  kind: string;
+  request_hash: string;
+  response_json: string;
+  created_at: number;
+  // Joined from bet_log:
+  player_id: string | null;
+  bet_id: string | null;
+  bet_op_txn_id: string | null;
+  win_op_txn_id: string | null;
+  rollback_txn_id: string | null;
+  amount_minor: number | null;
+  currency: string | null;
+  win_amount_minor: number | null;
+}
+
+interface RoundSummaryRow {
+  round_id: string;
+  operator_ids: string;  // JSON array of distinct operator_ids
+  bet_count: number;
+  distinct_players: number;
+  currencies: string;    // JSON array of distinct currencies
+  total_amounts: string; // JSON array of {currency, total} objects
+  max_multiplier: number | null;
+  first_at: number;
+  last_at: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,9 +280,10 @@ export class BetLog {
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idx_betlog_round  ON bet_log(round_id);
-      CREATE INDEX IF NOT EXISTS idx_betlog_state  ON bet_log(state);
-      CREATE INDEX IF NOT EXISTS idx_betlog_player ON bet_log(operator_id, player_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_betlog_round    ON bet_log(round_id);
+      CREATE INDEX IF NOT EXISTS idx_betlog_state    ON bet_log(state);
+      CREATE INDEX IF NOT EXISTS idx_betlog_player   ON bet_log(operator_id, player_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_betlog_operator ON bet_log(operator_id, created_at);
 
       CREATE TABLE IF NOT EXISTS txn_idempotency (
         txn_id        TEXT NOT NULL,
@@ -451,5 +524,314 @@ export class BetLog {
     ).get(txnId, operatorId) as IdempotencyRow | undefined;
 
     return row ? rowToIdempotencyEntry(row) : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // Cursor-paginated filtered queries (Task 5.3 — admin read API)
+  // -------------------------------------------------------------------------
+
+  /**
+   * List bets with optional filters and keyset cursor pagination.
+   * Keyset: ORDER BY created_at DESC, bet_id DESC (uses idx_betlog_player /
+   *   idx_betlog_state / idx_betlog_operator as available).
+   * nextCursor is null when fewer than `limit` rows are returned (last page).
+   *
+   * NOTE: We add idx_betlog_operator(operator_id, created_at) in _ensureSchema
+   * because EXPLAIN QUERY PLAN showed a full table scan for operatorId-only
+   * filters (the existing idx_betlog_player covers operator_id+player_id+created_at
+   * but not operator_id alone).
+   */
+  listBetsFiltered(
+    f: {
+      operatorId?: string;
+      playerId?: string;
+      state?: BetState;
+      betId?: string;
+      betTxnId?: string;
+      from?: number;
+      to?: number;
+    },
+    page: { limit: number; cursor?: Cursor },
+  ): { rows: BetRow[]; nextCursor: string | null } {
+    const conds: string[] = [];
+    const params: unknown[] = [];
+
+    // Keyset cursor — lexicographic (created_at DESC, bet_id DESC)
+    if (page.cursor) {
+      conds.push('(created_at < ? OR (created_at = ? AND bet_id < ?))');
+      params.push(page.cursor.ts, page.cursor.ts, page.cursor.id);
+    }
+    if (f.operatorId !== undefined) {
+      conds.push('operator_id = ?');
+      params.push(f.operatorId);
+    }
+    if (f.playerId !== undefined) {
+      conds.push('player_id = ?');
+      params.push(f.playerId);
+    }
+    if (f.state !== undefined) {
+      conds.push('state = ?');
+      params.push(f.state);
+    }
+    if (f.betId !== undefined) {
+      conds.push('bet_id = ?');
+      params.push(f.betId);
+    }
+    if (f.betTxnId !== undefined) {
+      conds.push('bet_txn_id = ?');
+      params.push(f.betTxnId);
+    }
+    if (f.from !== undefined) {
+      conds.push('created_at >= ?');
+      params.push(f.from);
+    }
+    if (f.to !== undefined) {
+      conds.push('created_at <= ?');
+      params.push(f.to);
+    }
+
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+    // Dynamic SQL — cannot use the prepared-statement cache (filters vary per call).
+    // We accept this: these are admin read paths, not hot write paths.
+    const sql = `SELECT * FROM bet_log ${where} ORDER BY created_at DESC, bet_id DESC LIMIT ?`;
+    params.push(page.limit);
+
+    const raw = this.db.prepare(sql).all(...params) as BetLogRow[];
+    const rows = raw.map(rowToBetRow);
+
+    let nextCursor: string | null = null;
+    if (rows.length === page.limit) {
+      const last = rows[rows.length - 1]!;
+      nextCursor = encodeCursor({ ts: last.createdAt, id: last.betId });
+    }
+
+    return { rows, nextCursor };
+  }
+
+  /**
+   * List rounds derived by GROUP BY round_id over bet_log.
+   * Keyset: ORDER BY last_at DESC, round_id DESC.
+   * minMultiplier/maxMultiplier filter on the round's max multiplier (HAVING).
+   *
+   * NOTE on multi-currency: totalAmountMinorByCurrency is built post-query
+   * because SQLite does not support JSON aggregation; we do a second query
+   * per round only if needed — or build it from the group-by result by
+   * further grouping. For correctness we run one query per round for currency
+   * breakdown (acceptable for admin read API, bounded by limit ≤ 200).
+   *
+   * NOTE: RNG seeds (server seed, crash point) are NOT persisted in bet_log;
+   * those fields are emitted as null from the route layer (Phase-future gap).
+   */
+  listRoundsFiltered(
+    f: {
+      operatorId?: string;
+      from?: number;
+      to?: number;
+      minMultiplier?: number;
+      maxMultiplier?: number;
+    },
+    page: { limit: number; cursor?: Cursor },
+  ): { rows: RoundSummary[]; nextCursor: string | null } {
+    const conds: string[] = [];
+    const havingConds: string[] = [];
+    const params: unknown[] = [];
+    const havingParams: unknown[] = [];
+
+    if (f.operatorId !== undefined) {
+      conds.push('operator_id = ?');
+      params.push(f.operatorId);
+    }
+    if (f.from !== undefined) {
+      conds.push('created_at >= ?');
+      params.push(f.from);
+    }
+    if (f.to !== undefined) {
+      conds.push('created_at <= ?');
+      params.push(f.to);
+    }
+    // Keyset cursor on (last_at DESC, round_id DESC)
+    if (page.cursor) {
+      conds.push('(MAX(created_at) < ? OR (MAX(created_at) = ? AND round_id < ?))');
+      // These go in HAVING, not WHERE
+      conds.pop();
+      havingConds.push('(MAX(created_at) < ? OR (MAX(created_at) = ? AND round_id < ?))');
+      havingParams.push(page.cursor.ts, page.cursor.ts, page.cursor.id);
+    }
+    if (f.minMultiplier !== undefined) {
+      havingConds.push('MAX(COALESCE(multiplier, 0)) >= ?');
+      havingParams.push(f.minMultiplier);
+    }
+    if (f.maxMultiplier !== undefined) {
+      havingConds.push('MAX(COALESCE(multiplier, 0)) <= ?');
+      havingParams.push(f.maxMultiplier);
+    }
+
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+    const having = havingConds.length > 0 ? `HAVING ${havingConds.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT
+        round_id,
+        GROUP_CONCAT(DISTINCT operator_id) AS operator_ids_csv,
+        COUNT(*) AS bet_count,
+        COUNT(DISTINCT player_id) AS distinct_players,
+        MAX(COALESCE(multiplier, 0)) AS max_multiplier,
+        MIN(created_at) AS first_at,
+        MAX(created_at) AS last_at
+      FROM bet_log
+      ${where}
+      GROUP BY round_id
+      ${having}
+      ORDER BY MAX(created_at) DESC, round_id DESC
+      LIMIT ?
+    `;
+
+    const allParams = [...params, ...havingParams, page.limit];
+    const raw = this.db.prepare(sql).all(...allParams) as Array<{
+      round_id: string;
+      operator_ids_csv: string;
+      bet_count: number;
+      distinct_players: number;
+      max_multiplier: number | null;
+      first_at: number;
+      last_at: number;
+    }>;
+
+    // Build per-round currency totals (separate query per round, bounded by limit≤200)
+    const rows: RoundSummary[] = raw.map((r) => {
+      const currencyTotals = this.db.prepare(
+        `SELECT currency, SUM(amount_minor) as total FROM bet_log WHERE round_id = ? GROUP BY currency`,
+      ).all(r.round_id) as Array<{ currency: string; total: number }>;
+
+      const totalAmountMinorByCurrency: Record<string, number> = {};
+      for (const ct of currencyTotals) {
+        totalAmountMinorByCurrency[ct.currency] = ct.total;
+      }
+
+      return {
+        roundId: r.round_id,
+        operatorIds: r.operator_ids_csv ? r.operator_ids_csv.split(',').filter(Boolean) : [],
+        betCount: r.bet_count,
+        distinctPlayers: r.distinct_players,
+        totalAmountMinorByCurrency,
+        // max_multiplier=0 means no settled bets; return null in that case
+        maxMultiplier: r.max_multiplier !== null && r.max_multiplier > 0 ? r.max_multiplier : null,
+        firstAt: r.first_at,
+        lastAt: r.last_at,
+      };
+    });
+
+    let nextCursor: string | null = null;
+    if (rows.length === page.limit) {
+      const last = rows[rows.length - 1]!;
+      nextCursor = encodeCursor({ ts: last.lastAt, id: last.roundId });
+    }
+
+    return { rows, nextCursor };
+  }
+
+  /**
+   * List txn_idempotency rows joined with bet_log for the §7.1 transactions API.
+   * Keyset: ORDER BY txn_idempotency.created_at DESC, txn_id DESC.
+   *
+   * NOTE: attempts and totalMs are NOT persisted in txn_idempotency (Phase-future gap).
+   * status is derived from response_json: NOOP is not detectable from stored rows,
+   * so we return 'OK' for all stored entries (they were stored on success/first call).
+   * operatorTxnId is derived per-kind from bet_log (bet_op_txn_id / win_op_txn_id).
+   */
+  listIdempotencyFiltered(
+    f: {
+      operatorId?: string;
+      playerId?: string;
+      kind?: TxnKind;
+      from?: number;
+      to?: number;
+    },
+    page: { limit: number; cursor?: Cursor },
+  ): { rows: IdempotencyWithBet[]; nextCursor: string | null } {
+    const conds: string[] = [];
+    const params: unknown[] = [];
+
+    // Keyset cursor on (created_at DESC, txn_id DESC)
+    if (page.cursor) {
+      conds.push('(ti.created_at < ? OR (ti.created_at = ? AND ti.txn_id < ?))');
+      params.push(page.cursor.ts, page.cursor.ts, page.cursor.id);
+    }
+    if (f.operatorId !== undefined) {
+      conds.push('ti.operator_id = ?');
+      params.push(f.operatorId);
+    }
+    if (f.kind !== undefined) {
+      conds.push('ti.kind = ?');
+      params.push(f.kind);
+    }
+    if (f.from !== undefined) {
+      conds.push('ti.created_at >= ?');
+      params.push(f.from);
+    }
+    if (f.to !== undefined) {
+      conds.push('ti.created_at <= ?');
+      params.push(f.to);
+    }
+    // playerId filter requires joining through bet_log
+    if (f.playerId !== undefined) {
+      conds.push('bl.player_id = ?');
+      params.push(f.playerId);
+    }
+
+    const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+
+    // JOIN: bet-side txnId is bet_txn_id; win-side is win_txn_id; rollback is rollback_txn_id
+    // We LEFT JOIN to get the bet_log row that produced this txn.
+    const sql = `
+      SELECT
+        ti.txn_id, ti.operator_id, ti.kind, ti.request_hash, ti.response_json, ti.created_at,
+        bl.player_id, bl.bet_id,
+        bl.bet_op_txn_id, bl.win_op_txn_id, bl.rollback_txn_id,
+        bl.amount_minor, bl.currency, bl.win_amount_minor
+      FROM txn_idempotency ti
+      LEFT JOIN bet_log bl ON (
+        (ti.kind = 'bet'      AND bl.bet_txn_id      = ti.txn_id AND bl.operator_id = ti.operator_id) OR
+        (ti.kind = 'win'      AND bl.win_txn_id      = ti.txn_id AND bl.operator_id = ti.operator_id) OR
+        (ti.kind = 'rollback' AND bl.rollback_txn_id = ti.txn_id AND bl.operator_id = ti.operator_id)
+      )
+      ${where}
+      ORDER BY ti.created_at DESC, ti.txn_id DESC
+      LIMIT ?
+    `;
+    params.push(page.limit);
+
+    const raw = this.db.prepare(sql).all(...params) as IdempotencyWithBetRow[];
+
+    const rows: IdempotencyWithBet[] = raw.map((r) => {
+      // Derive operatorTxnId per kind from bet_log columns
+      let operatorTxnId: string | null = null;
+      if (r.kind === 'bet') operatorTxnId = r.bet_op_txn_id ?? null;
+      else if (r.kind === 'win') operatorTxnId = r.win_op_txn_id ?? null;
+      // rollback: no separate op txn column exists — not persisted (Phase-future gap)
+
+      return {
+        txnId: r.txn_id,
+        operatorId: r.operator_id,
+        kind: r.kind as TxnKind,
+        requestHash: r.request_hash,
+        responseJson: r.response_json,
+        createdAt: r.created_at,
+        playerId: r.player_id ?? null,
+        betId: r.bet_id ?? null,
+        operatorTxnId,
+        amountMinor: r.amount_minor ?? null,
+        currency: r.currency ?? null,
+        winAmountMinor: r.win_amount_minor ?? null,
+      };
+    });
+
+    let nextCursor: string | null = null;
+    if (rows.length === page.limit) {
+      const last = rows[rows.length - 1]!;
+      nextCursor = encodeCursor({ ts: last.createdAt, id: last.txnId });
+    }
+
+    return { rows, nextCursor };
   }
 }
