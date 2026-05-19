@@ -405,15 +405,15 @@ describe('POST /op/v1/sessions/:sessionId/terminate', () => {
     // In-memory bet must be marked cashedOut
     expect(inMemoryBet.cashedOut).toBe(true);
 
-    // betLog row must be VOIDED (rollback succeeded via stub)
+    // betLog row must be deterministically VOIDED — the operator stub rollback
+    // completes synchronously over localhost before the await resolves. An OR
+    // branch here would mask broken rollback wiring (wrong port / signing key).
     const row = betLog.getById(betId);
-    expect(row?.state === 'VOIDED' || row?.state === 'ROLLBACK_PENDING').toBe(true);
+    expect(row?.state).toBe('VOIDED');
 
     // Stub balance must reflect the refund: 100000 - 10000 + 10000 = 100000
-    if (row?.state === 'VOIDED') {
-      const balResp = await client.balance({ playerId: PLAYER_ID, sessionId });
-      expect(balResp.balance).toBe(100_000);
-    }
+    const balResp = await client.balance({ playerId: PLAYER_ID, sessionId });
+    expect(balResp.balance).toBe(100_000);
 
     // WS closed
     expect(fakeWs.close).toHaveBeenCalledWith(4001, 'session_terminated');
@@ -541,5 +541,76 @@ describe('POST /op/v1/sessions/:sessionId/terminate', () => {
     expect(res.body.error.code).toBe('INVALID_REQUEST');
 
     expect(vi.mocked(sendToSession)).not.toHaveBeenCalled();
+  });
+
+  // ─── Test 8 (Fix 1 — RG enforcement): voidOperatorBet throws → still 204; socket closed ──
+
+  it('Fix 1 RG-enforcement: voidOperatorBet throws for every bet → still 204; session_terminated sent; ws closed; sessionSockets cleared', async () => {
+    // Strategy: temporarily null-out OperatorWiringDeps so that voidOperatorBet
+    // hits its bootstrap-defect `throw new Error(...)` path. This is deterministic
+    // and requires no out-of-scope file changes.
+    // The per-bet try/catch added in Fix 1 must catch that throw and allow the
+    // socket-close + 204 to proceed unconditionally.
+
+    const sessionId = 'sess-terminate-void-throws';
+    makeOpASession(sessionId);
+
+    // Inject an in-memory ARMED bet with a betId (no real betLog row needed;
+    // voidOperatorBet will throw before it reaches getById because deps is null).
+    const betId = `bet-${sessionId}-throw`;
+    const inMemoryBet = {
+      playerId: sessionId,
+      operatorId: OPERATOR_A_ID,
+      betId,
+      betTxnId: crypto.randomUUID(),
+      amountMinor: 5_000,
+      currency: CURRENCY,
+      amount: 50,
+      cashedOut: false,
+      isBot: false,
+    };
+    _internal__setCurrentRoundForTesting({
+      roundNumber: 200,
+      phase: 'BETTING',
+      crashPoint: 2.0,
+      currentMultiplier: 1.0,
+      startTime: Date.now(),
+      bets: [inMemoryBet as import('@crash/shared/types').Bet],
+      serverSeedHash: 'xyz',
+    });
+
+    const fakeWs = makeFakeWs();
+    sessionSockets.set(sessionId, new Set([fakeWs]));
+
+    // Null the deps — voidOperatorBet will throw 'bootstrap defect'
+    setOperatorWiringDeps(null);
+    try {
+      const body = { reason: 'aml_hold', message: 'AML hold applied.' };
+      const res = await request(testApp)
+        .post(terminatePath(sessionId))
+        .set(signedTerminate(sessionId, body))
+        .send(body);
+
+      // Fix 1: must still be 204 even though voidOperatorBet threw
+      expect(res.status).toBe(204);
+
+      // session_terminated frame must have been sent
+      expect(vi.mocked(sendToSession)).toHaveBeenCalledWith(
+        sessionId,
+        expect.objectContaining({ type: 'session_terminated' }),
+      );
+
+      // ws.close must have been called — player is disconnected
+      expect(fakeWs.close).toHaveBeenCalledWith(4001, 'session_terminated');
+
+      // sessionSockets must be cleared
+      expect(sessionSockets.has(sessionId)).toBe(false);
+
+      // in-memory bet must be marked cashedOut (set before voidOperatorBet is called)
+      expect(inMemoryBet.cashedOut).toBe(true);
+    } finally {
+      // Always restore deps so subsequent tests (if any) are unaffected
+      setOperatorWiringDeps({ walletClientCache, betLog });
+    }
   });
 });

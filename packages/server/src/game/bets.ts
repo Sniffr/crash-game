@@ -490,9 +490,11 @@ export async function cashOutOperatorBet(
  * terminal, it's a no-op. Used by operator-initiated session terminate (Task 3.3)
  * and the Phase 6 backoffice.
  *
- * NEVER throws — best-effort. On rollback failure, leaves the row in
- * ROLLBACK_PENDING for the recovery worker to re-drive (spec §9 idempotency
- * means it's safe to retry).
+ * Best-effort: returns 'skipped' on already-terminal / missing client / rollback
+ * WalletError (left ROLLBACK_PENDING for the Phase 1.7 recovery worker).
+ * Throws only on a bootstrap defect (deps not wired) or an unexpected BetLog
+ * error (e.g. SQLite failure) — callers that must not fail (operator terminate)
+ * wrap this in try/catch.
  *
  * Rollback txnId derivation mirrors recovery.ts: use existing row.rollbackTxnId
  * if present (from a prior attempt), else derive `rb-<betTxnId>` (deterministic,
@@ -564,6 +566,7 @@ export async function voidOperatorBet(
     return 'voided';
   } catch (err) {
     // Leave in ROLLBACK_PENDING for the Phase 1.7 recovery worker to re-drive.
+    // TODO(Task 4.1): replace with Alerter
     console.error('[voidOperatorBet] rollback failed, left ROLLBACK_PENDING for recovery:', err);
     return 'skipped';
   }

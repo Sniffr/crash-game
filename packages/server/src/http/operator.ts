@@ -28,10 +28,11 @@ export function createOperatorRouter(): Router {
       const operator = (req as OperatorAuthedRequest).operator;
       const { sessionId } = req.params;
 
-      // Parse optional body fields
-      const body = (req.body ?? {}) as { reason?: string; message?: string };
-      const terminateReason = body.reason ?? 'operator_terminated';
-      const terminateMessage = body.message ?? 'Session closed by operator.';
+      // Parse optional body fields — coerce to strings to guard against
+      // non-string operator payloads flowing into the session_terminated WS frame.
+      const body = (req.body ?? {}) as { reason?: unknown; message?: unknown };
+      const terminateReason = typeof body.reason === 'string' ? body.reason : 'operator_terminated';
+      const terminateMessage = typeof body.message === 'string' ? body.message : 'Session closed by operator.';
 
       // 1. Look up the session
       const session = await getSession(sessionId);
@@ -60,8 +61,14 @@ export function createOperatorRouter(): Router {
         // Mark cashedOut immediately so the round loop won't touch it again
         bet.cashedOut = true;
         if (bet.betId) {
-          // Best-effort; voidOperatorBet never throws (logs + returns 'skipped' on failure)
-          await voidOperatorBet(bet.betId, 'manual_void');
+          try {
+            await voidOperatorBet(bet.betId, 'manual_void');
+          } catch (err) {
+            // RG enforcement: a bet-void failure must NOT block terminating the
+            // session. The betLog row stays non-terminal and the Phase 1.7 recovery
+            // worker re-drives it. Log and continue closing the socket.
+            console.error('[operator] terminate: voidOperatorBet threw; continuing socket close', { betId: bet.betId, err });
+          }
         }
       }
 
