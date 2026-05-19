@@ -512,7 +512,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
 
       deps.adminAudit.record({
         actor: req.admin!.username,
-        action: 'operator.regen_signing_key',
+        action: 'operator.regen-signing-key',
         target: `operator:${id}`,
         payload: { rotatedAt },
       });
