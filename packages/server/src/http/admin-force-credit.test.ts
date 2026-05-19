@@ -394,6 +394,42 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(res.body.error.code).toBe('INVALID_ADMIN_TOKEN');
   });
 
+  it('array X-Admin-Token header → 401 INVALID_ADMIN_TOKEN', async () => {
+    // supertest collapses duplicate headers into a comma-joined string rather than
+    // delivering a true string[] — so we invoke requireAdminToken directly with a
+    // fake request object that has string[] in the header, matching the Express type.
+    // This is the same pattern used in verify-operator-signature.test.ts.
+    //
+    // We use a single-element array [VALID_TOKEN] deliberately: its .toString() is
+    // VALID_TOKEN, so if a future refactor ever added implicit string coercion before
+    // the comparison (e.g. `headerToken.toString()`), the token would match and auth
+    // would be bypassed.  The typeof !== 'string' guard in require-admin-token.ts is
+    // the load-bearing line that prevents this; this test proves it is intentional.
+    const mw = requireAdminToken();
+    let statusCode = 0;
+    let jsonBody: unknown = undefined;
+    let nextCalled = false;
+
+    const fakeReq = {
+      headers: { 'x-admin-token': [VALID_TOKEN] },  // string[] — the typeof guard branch
+    } as unknown as import('express').Request;
+
+    const fakeRes = {
+      headersSent: false,
+      status(code: number) { statusCode = code; return fakeRes; },
+      json(body: unknown) { jsonBody = body; return fakeRes; },
+    } as unknown as import('express').Response;
+
+    await new Promise<void>((resolve) => {
+      mw(fakeReq, fakeRes, () => { nextCalled = true; resolve(); });
+      if (!nextCalled) resolve();
+    });
+
+    expect(nextCalled).toBe(false);
+    expect(statusCode).toBe(401);
+    expect((jsonBody as { error: { code: string } }).error.code).toBe('INVALID_ADMIN_TOKEN');
+  });
+
   // ─── Test 3: valid token, missing/blank reason → 400 INVALID_REQUEST ─────────
 
   it('valid token, missing reason → 400 INVALID_REQUEST (no audit row)', async () => {

@@ -97,7 +97,15 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
           actor,
           action: 'force_credit',
           target: betId,
-          payload: { reason, result: 'not_reconstructible' },
+          payload: {
+            reason,
+            result: 'not_reconstructible',
+            missingFields: [
+              row.winTxnId == null ? 'winTxnId' : null,
+              row.winAmountMinor == null ? 'winAmountMinor' : null,
+              row.multiplier == null ? 'multiplier' : null,
+            ].filter((s): s is string => s !== null),
+          },
         });
         res.status(409).json({
           error: {
