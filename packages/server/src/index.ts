@@ -8,6 +8,8 @@ import Database from 'better-sqlite3';
 import { BetLog, OperatorRegistry, runRecovery } from '@crash/wallet';
 import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
+import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
+import { createOperatorRouter } from './http/operator';
 import { WalletClientCache } from './wallet/client-cache';
 import { setOperatorWiringDeps } from './game/operator-deps';
 import { clients, sessionSockets, safeSend } from './ws/hub';
@@ -30,14 +32,26 @@ const walletClientCache = new WalletClientCache(registry, betLog);
 setOperatorWiringDeps({ walletClientCache, betLog });
 
 const app = express();
-app.use(express.json());
+// Capture raw body bytes for HMAC signing (verifyOperatorSignature §4.2).
+// Behaviour-neutral for all other routes: JSON still parsed identically.
+app.use(express.json({ verify: (req, _res, buf) => { (req as unknown as { rawBody: Buffer }).rawBody = buf; } }));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 // Theme autoload + fs.watch
 initThemeLoader();
 
-// HTTP routes
+// ─── Operator API (must be BEFORE registerPublicRoutes, which adds the SPA * fallback) ──
+// getSignedPath uses req.originalUrl (full external path) because this router is
+// sub-mounted at /op/v1 — req.path would be router-relative and would NOT match
+// the path the operator signed (per the Task 2.1 TODO/spec §4.2 note).
+app.use(
+  '/op/v1',
+  verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
+  createOperatorRouter(),
+);
+
+// HTTP routes (SPA * fallback is inside; must come AFTER /op/v1)
 registerPublicRoutes(app, { walletClientCache });
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────

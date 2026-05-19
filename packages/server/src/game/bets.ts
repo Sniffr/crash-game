@@ -16,6 +16,7 @@ import {
   WalletNetworkError,
   ResponseSignatureError,
   InvalidTransitionError,
+  TERMINAL_STATES,
 } from '@crash/wallet';
 import { getOperatorWiringDeps } from './operator-deps';
 
@@ -476,6 +477,95 @@ export async function cashOutOperatorBet(
     }
 
     throw wrapped;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// voidOperatorBet
+// ---------------------------------------------------------------------------
+
+/**
+ * Void a single operator-backed bet: betLog ARMED|FLYING|PENDING -> ROLLBACK_PENDING
+ * -> (walletClient.rollback) -> VOIDED. Idempotent-safe: if the row is already
+ * terminal, it's a no-op. Used by operator-initiated session terminate (Task 3.3)
+ * and the Phase 6 backoffice.
+ *
+ * NEVER throws — best-effort. On rollback failure, leaves the row in
+ * ROLLBACK_PENDING for the recovery worker to re-drive (spec §9 idempotency
+ * means it's safe to retry).
+ *
+ * Rollback txnId derivation mirrors recovery.ts: use existing row.rollbackTxnId
+ * if present (from a prior attempt), else derive `rb-<betTxnId>` (deterministic,
+ * dedupes via spec §9 on later retry).
+ *
+ * @returns 'voided' | 'skipped' (already terminal / not found / rollback failed)
+ */
+export async function voidOperatorBet(
+  betId: string,
+  reason: 'manual_void' | 'game_error',
+): Promise<'voided' | 'skipped'> {
+  const deps = getOperatorWiringDeps();
+  if (!deps) {
+    throw new Error('[voidOperatorBet] OperatorWiringDeps not initialized — bootstrap defect');
+  }
+
+  const row = deps.betLog.getById(betId);
+  if (!row) return 'skipped';
+
+  // Already terminal — nothing to do
+  if (TERMINAL_STATES.has(row.state)) return 'skipped';
+
+  // Get the wallet client — if operator vanished/paused, drive to ROLLBACK_PENDING
+  // and leave it for the recovery worker; terminate must not fail on this.
+  const client = deps.walletClientCache.get(row.operatorId);
+  if (!client) {
+    try {
+      deps.betLog.transition(betId, 'rollback_started', { errorCode: reason });
+    } catch (err) {
+      // InvalidTransitionError: row already moved (race); skip silently
+      if (!(err instanceof InvalidTransitionError)) {
+        console.error('[voidOperatorBet] unexpected error driving ROLLBACK_PENDING (no client):', err);
+      }
+    }
+    console.error('[voidOperatorBet] operator client not available — left ROLLBACK_PENDING for recovery:', {
+      betId,
+      operatorId: row.operatorId,
+      reason,
+    });
+    return 'skipped';
+  }
+
+  // Transition to ROLLBACK_PENDING, persisting reason as errorCode
+  try {
+    deps.betLog.transition(betId, 'rollback_started', { errorCode: reason });
+  } catch (err) {
+    if (err instanceof InvalidTransitionError) {
+      // Row already moved — skip silently (idempotent)
+      return 'skipped';
+    }
+    throw err;
+  }
+
+  // Deterministic rollback txnId — mirrors recovery.ts line 134:
+  //   const rollbackTxnId = row.rollbackTxnId ?? `rb-${row.betTxnId}`;
+  // This ensures a later recovery pass dedupes via spec §9 instead of double-refunding.
+  const freshRow = deps.betLog.getById(betId);
+  const rollbackTxnId = freshRow?.rollbackTxnId ?? `rb-${row.betTxnId}`;
+
+  try {
+    await client.rollback({
+      playerId: row.playerId,
+      betTxnId: row.betTxnId,
+      txnId: rollbackTxnId,
+      reason,
+    });
+
+    deps.betLog.transition(betId, 'rollback_completed', { rollbackTxnId });
+    return 'voided';
+  } catch (err) {
+    // Leave in ROLLBACK_PENDING for the Phase 1.7 recovery worker to re-drive.
+    console.error('[voidOperatorBet] rollback failed, left ROLLBACK_PENDING for recovery:', err);
+    return 'skipped';
   }
 }
 
