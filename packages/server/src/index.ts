@@ -10,6 +10,9 @@ import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
+import { requireAdminToken } from './http/middleware/require-admin-token';
+import { createAdminRouter } from './http/admin';
+import { AdminAudit } from './admin/admin-store';
 import { WalletClientCache } from './wallet/client-cache';
 import { setOperatorWiringDeps } from './game/operator-deps';
 import { clients, sessionSockets, safeSend } from './ws/hub';
@@ -28,6 +31,7 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
+const adminAudit = new AdminAudit(db);
 const walletClientCache = new WalletClientCache(registry, betLog);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter });
 
@@ -51,7 +55,13 @@ app.use(
   createOperatorRouter(),
 );
 
-// HTTP routes (SPA * fallback is inside; must come AFTER /op/v1)
+// ─── Admin API (Phase-4 stub; must be BEFORE registerPublicRoutes SPA * fallback) ──
+// Auth: X-Admin-Token vs ADMIN_API_TOKEN env secret (constant-time).
+// If ADMIN_API_TOKEN is unset, the entire /admin/v1 surface responds 503 ADMIN_DISABLED.
+// Phase 5.2 replaces requireAdminToken with real JWT + roles.
+app.use('/admin/v1', requireAdminToken(), createAdminRouter({ walletClientCache, betLog, adminAudit }));
+
+// HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache });
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
