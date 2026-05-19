@@ -26,7 +26,7 @@ vi.mock('../ws/hub.js', () => ({
   sendToSession: vi.fn(),
 }));
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { WalletClient, BetLog, WalletError, WalletNetworkError, type Alerter, type AlertEvent } from '@crash/wallet';
 import type { Operator } from '@crash/wallet';
@@ -516,4 +516,170 @@ it('SETTLING: winTxnId is persisted to betLog BEFORE the /win HTTP call complete
   expect(cashoutResult.row.state).toBe('SETTLED');
   expect(cashoutResult.row.winTxnId).toBe(winTxnId);
   expect(cashoutResult.row.winOpTxnId).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Test 7 (Fix 3 / Gap-2): forgotten-wiring — no alerter field still alerts
+// ---------------------------------------------------------------------------
+
+it('forgotten-wiring: cashOutOperatorBet with no alerter field surfaces win_failed via ConsoleAlerter fallback (never silently swallowed)', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+
+  // Build a WalletClient whose /win always rejects — simulates exhausted retries.
+  const alwaysThrowFetch: typeof fetch = async (_input, _init) => {
+    throw new Error('econnrefused');
+  };
+  const failingClient = new WalletClient(
+    {
+      operatorId: 'op-test',
+      name: 'Test Operator',
+      walletBaseUrl: `http://localhost:${port}`,
+      apiKey: 'op-test',
+      signingKey: SIGNING_KEY,
+      adapter: 'native' as const,
+      currencies: ['EUR'],
+      minBetMinor: 1,
+      maxBetMinor: 10_000_000,
+      rtpVariant: 97,
+      jurisdictions: [],
+      status: 'active' as const,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    { fetchImpl: alwaysThrowFetch, sleep: async () => {} },
+  );
+
+  // Place the bet using the real stub so the row reaches ARMED.
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-1',
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor: 5_000,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  expect(betLog.getById(betId)?.state).toBe('ARMED');
+
+  // deps WITHOUT an alerter field — the ConsoleAlerter fallback must fire.
+  const depsNoAlerter: OperatorBetDeps = {
+    walletClient: failingClient,
+    betLog,
+    // intentionally no alerter
+  };
+
+  const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await cashOutOperatorBet(depsNoAlerter, {
+      betId,
+      winTxnId,
+      multiplier: 2.0,
+      winAmountMinor: 10_000,
+      settledAt: Math.floor(Date.now() / 1000),
+    });
+  } catch {
+    // expected — win exhausted
+  }
+
+  // Bet must be WIN_FAILED in the log
+  expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+
+  // ConsoleAlerter fallback must have written a [alert] win_failed line to stderr
+  const alertLine = consoleSpy.mock.calls.find(
+    (args) => typeof args[0] === 'string' && args[0].includes('[alert] win_failed'),
+  );
+  expect(alertLine).toBeDefined();
+
+  consoleSpy.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// Test 8 (Fix 4 / Gap-1): positive shape assertion — exactly one cashout-exhaustion alert
+// ---------------------------------------------------------------------------
+
+it('cashout-exhaustion alert: injected alerter receives exactly one win_failed call with correct shape (no double-alert)', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+
+  // WalletClient whose /win always rejects after retries.
+  const alwaysThrowFetch: typeof fetch = async () => {
+    throw new Error('econnrefused');
+  };
+  const failingClient = new WalletClient(
+    {
+      operatorId: 'op-test',
+      name: 'Test Operator',
+      walletBaseUrl: `http://localhost:${port}`,
+      apiKey: 'op-test',
+      signingKey: SIGNING_KEY,
+      adapter: 'native' as const,
+      currencies: ['EUR'],
+      minBetMinor: 1,
+      maxBetMinor: 10_000_000,
+      rtpVariant: 97,
+      jurisdictions: [],
+      status: 'active' as const,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    { fetchImpl: alwaysThrowFetch, sleep: async () => {} },
+  );
+
+  // Place using the real stub so the row reaches ARMED.
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-1',
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor: 5_000,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  expect(betLog.getById(betId)?.state).toBe('ARMED');
+
+  // Inject a fresh vi.fn() alerter to capture exactly what is emitted.
+  const emitSpy = vi.fn();
+  const spiedAlerter: Alerter = { emit: emitSpy };
+  const depsWithSpy: OperatorBetDeps = {
+    walletClient: failingClient,
+    betLog,
+    alerter: spiedAlerter,
+  };
+
+  try {
+    await cashOutOperatorBet(depsWithSpy, {
+      betId,
+      winTxnId,
+      multiplier: 2.0,
+      winAmountMinor: 10_000,
+      settledAt: Math.floor(Date.now() / 1000),
+    });
+  } catch {
+    // expected
+  }
+
+  // Exactly ONE alert emitted — no double-alert (single-alert invariant)
+  expect(emitSpy).toHaveBeenCalledTimes(1);
+
+  // Shape must match the cashout-exhaustion win_failed spec
+  expect(emitSpy).toHaveBeenCalledWith({
+    kind: 'win_failed',
+    source: 'cashout',
+    betRow: expect.objectContaining({ betId }),
+    error: expect.any(String),
+  });
+
+  // Confirm the row also reached WIN_FAILED in the log
+  expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
 });

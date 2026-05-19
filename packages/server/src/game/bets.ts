@@ -401,6 +401,17 @@ export interface CashOutOperatorBetResult {
   currency: string;
 }
 
+// ---------------------------------------------------------------------------
+// Internal helper: emit a win_failed cashout alert via the injected alerter
+// (or the consoleAlerter fallback). Both exhaustion branches inside
+// cashOutOperatorBet differ ONLY in which error code they pass — sharing this
+// helper enforces the single-alert invariant at compile time.
+// ---------------------------------------------------------------------------
+
+function emitWinFailed(alerter: Alerter | undefined, failedRow: BetRow, errorCode: string): void {
+  (alerter ?? consoleAlerter).emit({ kind: 'win_failed', betRow: failedRow, source: 'cashout', error: errorCode });
+}
+
 /**
  * Cash out an operator-backed bet.
  *
@@ -457,12 +468,7 @@ export async function cashOutOperatorBet(
         errorCode: err.code,
       });
 
-      (deps.alerter ?? consoleAlerter).emit({
-        kind: 'win_failed',
-        betRow: failedRow,
-        source: 'cashout',
-        error: err.code,
-      });
+      emitWinFailed(deps.alerter, failedRow, err.code);
 
       throw err;
     }
@@ -476,12 +482,7 @@ export async function cashOutOperatorBet(
       errorCode: wrapped.code,
     });
 
-    (deps.alerter ?? consoleAlerter).emit({
-      kind: 'win_failed',
-      betRow: failedRow,
-      source: 'cashout',
-      error: wrapped.code,
-    });
+    emitWinFailed(deps.alerter, failedRow, wrapped.code);
 
     throw wrapped;
   }

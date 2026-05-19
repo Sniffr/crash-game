@@ -27,12 +27,17 @@ export interface Alerter {
 export class ConsoleAlerter implements Alerter {
   emit(event: AlertEvent): void {
     try {
-      const { kind } = event;
       // Single structured line so log scrapers / Phase 8 can pick it up.
-      // JSON.stringify is inside the try so any serialisation oddity is swallowed.
-      console.error(`[alert] ${kind}`, JSON.stringify({ ...event }));
+      // JSON.stringify is inside the try so any serialisation oddity is caught below.
+      console.error(`[alert] ${event.kind}`, JSON.stringify({ ...event }));
     } catch {
-      /* alerter must never throw */
+      // JSON.stringify (or console.error) threw — degrade to a minimal partial-signal
+      // line that still names the kind and bet id so on-call can grep it.
+      // Uses only primitives so this inner path cannot throw.
+      try {
+        const betId = (event as { betRow?: { betId?: unknown } })?.betRow?.betId;
+        console.error(`[alert] ${event?.kind ?? 'unknown'} (serialization failed)`, String(betId ?? '?'));
+      } catch { /* truly nothing more we can do */ }
     }
   }
 }

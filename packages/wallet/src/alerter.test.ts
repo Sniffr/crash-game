@@ -4,8 +4,10 @@
  * Covers:
  * 1. ConsoleAlerter.emit logs a single structured line to console.error.
  * 2. ConsoleAlerter.emit does NOT throw on a normal BetRow.
- * 3. ConsoleAlerter.emit does NOT throw even when JSON.stringify fails (circular ref guard).
- * 4. consoleAlerter is a shared Alerter instance.
+ * 3. ConsoleAlerter.emit does NOT throw even when console.error itself throws.
+ * 4. ConsoleAlerter.emit does NOT throw when JSON.stringify throws and emits a
+ *    partial-signal fallback line ("[alert] <kind> (serialization failed) <betId>").
+ * 5. consoleAlerter is a shared Alerter instance.
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
@@ -94,26 +96,55 @@ describe('ConsoleAlerter', () => {
     expect(parsed.betRow.betId).toBe('bet-456');
   });
 
-  it('emit does NOT throw even when the event causes JSON.stringify to fail (circular guard)', () => {
-    // Force JSON.stringify to throw by making the BetRow circular.
-    // The try/catch in ConsoleAlerter.emit must swallow the error.
-    const spy = vi.spyOn(console, 'error').mockImplementation(() => {
-      // Simulate stringify failing inside emit by replacing JSON.stringify
-      throw new TypeError('circular structure');
+  it('emit never throws even if console.error itself throws', () => {
+    // Exercises the outer try/catch: console.error throws (not JSON.stringify).
+    // The event is JSON-safe, so stringify succeeds; it is console.error that blows up.
+    vi.spyOn(console, 'error').mockImplementation(() => {
+      throw new TypeError('console is broken');
     });
 
     const alerter = new ConsoleAlerter();
     const event: AlertEvent = {
       kind: 'win_failed',
-      betRow: makeBetRow('bet-circular'),
+      betRow: makeBetRow('bet-console-throws'),
       source: 'recovery',
+    };
+
+    // Must not throw regardless of console.error blowing up
+    expect(() => alerter.emit(event)).not.toThrow();
+  });
+
+  it('emit does NOT throw when JSON.stringify throws and emits a partial-signal fallback line', () => {
+    // Genuinely forces JSON.stringify to throw (not console.error).
+    // Asserts: (a) emit does not throw, (b) the partial-signal fallback line is
+    // written to console.error with "[alert] <kind> (serialization failed)" + betId.
+    const stringifySpy = vi.spyOn(JSON, 'stringify').mockImplementation(() => {
+      throw new TypeError('boom — simulated BigInt/circular serialization failure');
+    });
+
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const alerter = new ConsoleAlerter();
+    const betId = 'bet-stringify-throws';
+    const event: AlertEvent = {
+      kind: 'win_failed',
+      betRow: makeBetRow(betId),
+      source: 'cashout',
     };
 
     // Must not throw
     expect(() => alerter.emit(event)).not.toThrow();
+
+    // The fallback line must have been emitted via the inner catch
+    expect(consoleSpy).toHaveBeenCalledOnce();
+    const [prefix, idStr] = consoleSpy.mock.calls[0];
+    expect(prefix).toBe('[alert] win_failed (serialization failed)');
+    expect(String(idStr)).toBe(betId);
+
+    stringifySpy.mockRestore();
   });
 
-  it('consoleAlerter is a shared Alerter instance that satisfies the Alerter interface', () => {
+  it('consoleAlerter (shared instance) satisfies the Alerter interface and emits normally', () => {
     // Type check: consoleAlerter implements Alerter
     const alerter: Alerter = consoleAlerter;
 
