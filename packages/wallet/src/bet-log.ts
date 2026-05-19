@@ -143,9 +143,11 @@ export interface IdempotencyWithBet {
  * NEVER mix currencies in a single row. All sums are per (operatorId, currency).
  */
 export interface FinancialRow {
-  operatorId: string;
-  currency: string;
-  /** UTC date 'YYYY-MM-DD'; null when 'day' is not in groupBy. */
+  /** null when 'operator' is not in the groupBy axes (cross-operator aggregate). */
+  operatorId: string | null;
+  /** null when 'currency' is not in the groupBy axes (cross-currency aggregate). */
+  currency: string | null;
+  /** null when 'day' is not in the groupBy axes (cross-day aggregate). */
   day: string | null;
   /** Count of financially-closed bets (SETTLED | LOST | WIN_FAILED). */
   betCount: number;
@@ -1022,8 +1024,8 @@ export class BetLog {
       const winMinor = r.win_minor ?? 0;
       const ggrMinor = stakeMinor - winMinor;
       return {
-        operatorId: r.operator_id ?? '',
-        currency: r.currency ?? '',
+        operatorId: r.operator_id,
+        currency: r.currency,
         day: r.day,
         betCount: r.bet_count ?? 0,
         stakeMinor,

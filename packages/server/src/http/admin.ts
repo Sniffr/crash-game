@@ -1365,7 +1365,13 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }>>();
 
     for (const row of rawRows) {
-      const op = deps.registry.getById(row.operatorId);
+      // groupBy=['operator','currency'] guarantees both dimensions are present (non-null).
+      // The non-null assertions below reflect that contract — FinancialRow.operatorId/currency
+      // are string | null in general, but never null when their axis is in groupBy.
+      const operatorIdNonNull = row.operatorId!;
+      const currencyNonNull = row.currency!;
+
+      const op = deps.registry.getById(operatorIdNonNull);
       // shareBps: use registry value; fallback 1500 if operator is somehow not found
       // (shouldn't happen since operatorId in bet_log references an operator, but tolerate it)
       const shareBps = op?.shareBps ?? 1500;
@@ -1373,9 +1379,9 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       // floor is honest — never over-report the studio's share.
       const ourShareMinor = Math.floor(row.ggrMinor * shareBps / 10000);
 
-      const existing = byOperator.get(row.operatorId);
+      const existing = byOperator.get(operatorIdNonNull);
       const currencyEntry = {
-        currency: row.currency,
+        currency: currencyNonNull,
         stakeMinor: row.stakeMinor,
         winMinor: row.winMinor,
         ggrMinor: row.ggrMinor,
@@ -1386,7 +1392,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       if (existing) {
         existing.push(currencyEntry);
       } else {
-        byOperator.set(row.operatorId, [currencyEntry]);
+        byOperator.set(operatorIdNonNull, [currencyEntry]);
       }
     }
 
@@ -1458,10 +1464,11 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     const operatorName = op?.name ?? operatorId;
 
     // --- Build per-currency rows for the invoice
+    // groupBy=['operator','currency'] guarantees currency is non-null for every row.
     const currencies = rawRows.map((row) => {
       const ourShareMinor = Math.floor(row.ggrMinor * shareBps / 10000);
       return {
-        currency: row.currency,
+        currency: row.currency!,
         stakeMinor: row.stakeMinor,
         winMinor: row.winMinor,
         ggrMinor: row.ggrMinor,

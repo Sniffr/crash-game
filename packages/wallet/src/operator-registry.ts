@@ -162,9 +162,13 @@ export class OperatorRegistry {
     // this call idempotent regardless of whether the DB is fresh or existing.
     try {
       this.db.exec(`ALTER TABLE operators ADD COLUMN share_bps INTEGER NOT NULL DEFAULT 1500`);
-    } catch {
-      // Column already exists in the schema (fresh DB just created above, or an
-      // existing dev DB that was already migrated). This is expected — not an error.
+    } catch (err) {
+      // "duplicate column name: share_bps" is the EXPECTED idempotent case — the
+      // column already exists (fresh DB created above, or an existing dev DB that
+      // was already migrated). Anything else is a real bootstrap failure (permissions,
+      // disk full, locked DB) — surface it loudly so the operator notices.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('duplicate column')) throw err;
     }
   }
 
