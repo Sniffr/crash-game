@@ -10,9 +10,10 @@ import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
-import { requireAdminToken } from './http/middleware/require-admin-token';
 import { createAdminRouter } from './http/admin';
-import { AdminAudit } from './admin/admin-store';
+import { AdminAudit, AdminUsers } from './admin/admin-store';
+import * as bcrypt from 'bcryptjs';
+import type { AdminRole } from './admin/admin-store';
 import { WalletClientCache } from './wallet/client-cache';
 import { setOperatorWiringDeps } from './game/operator-deps';
 import { clients, sessionSockets, safeSend } from './ws/hub';
@@ -32,6 +33,8 @@ const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
 const adminAudit = new AdminAudit(db);
+const adminUsers = new AdminUsers(db);
+const revoked = new Set<string>();
 const walletClientCache = new WalletClientCache(registry, betLog);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter });
 
@@ -55,11 +58,10 @@ app.use(
   createOperatorRouter(),
 );
 
-// ─── Admin API (Phase-4 stub; must be BEFORE registerPublicRoutes SPA * fallback) ──
-// Auth: X-Admin-Token vs ADMIN_API_TOKEN env secret (constant-time).
-// If ADMIN_API_TOKEN is unset, the entire /admin/v1 surface responds 503 ADMIN_DISABLED.
-// Phase 5.2 replaces requireAdminToken with real JWT + roles.
-app.use('/admin/v1', requireAdminToken(), createAdminRouter({ walletClientCache, betLog, adminAudit }));
+// ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──
+// Auth is internal to the router: /auth/login is public; router.use(requireAdminJwt)
+// gates everything else. No top-level auth middleware here.
+app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, revoked }));
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache });
@@ -131,6 +133,29 @@ try {
   console.error('[recovery] error during startup sweep (continuing):', err);
 }
 console.log('[recovery] report', JSON.stringify(recoveryReport));
+
+// ─── Bootstrap first admin from env ──────────────────────────────────────────
+// ADMIN_BOOTSTRAP_USER=username:password:role1,role2
+// Idempotent: skipped if admin table already has any users, or env is unset.
+try {
+  const bootstrapEnv = process.env['ADMIN_BOOTSTRAP_USER'];
+  if (bootstrapEnv && adminUsers.count() === 0) {
+    const colonIdx1 = bootstrapEnv.indexOf(':');
+    const colonIdx2 = bootstrapEnv.indexOf(':', colonIdx1 + 1);
+    if (colonIdx1 < 0 || colonIdx2 < 0) {
+      throw new Error('ADMIN_BOOTSTRAP_USER must be "username:password:role1,role2"');
+    }
+    const u = bootstrapEnv.slice(0, colonIdx1);
+    const p = bootstrapEnv.slice(colonIdx1 + 1, colonIdx2);
+    const rolesStr = bootstrapEnv.slice(colonIdx2 + 1);
+    const roles = (rolesStr || 'admin').split(',').map((r) => r.trim()) as AdminRole[];
+    const hash = await bcrypt.hash(p, 10);
+    adminUsers.create(u, hash, roles);
+    console.log(`[admin] bootstrapped initial admin '${u}'`);
+  }
+} catch (err) {
+  console.error('[admin] bootstrap failed (continuing):', err);
+}
 
 server.listen(PORT, HOST, () => {
   console.log(`[server] listening on ${HOST}:${PORT}`);

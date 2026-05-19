@@ -1,11 +1,11 @@
 /**
- * Integration tests for POST /admin/v1/bet-log/:betId/force-credit (Task 4.2).
+ * Integration tests for POST /admin/v1/bet-log/:betId/force-credit (Task 4.2 → 5.2).
  *
- * Tests the full middleware+handler stack:
- *   requireAdminToken → createAdminRouter → handler
+ * Migrated from X-Admin-Token to JWT (Task 5.2): setup creates an admin user,
+ * calls POST /admin/v1/auth/login, and sends Authorization: Bearer <token>.
  *
  * Uses a real operator stub (startServer(0)), real OperatorRegistry + BetLog
- * (:memory: SQLite), real WalletClientCache, AdminAudit on the same `:memory:` db.
+ * (:memory: SQLite), real WalletClientCache, AdminAudit + AdminUsers on the same `:memory:` db.
  *
  * Mirror of operator-terminate.test.ts harness.
  */
@@ -75,6 +75,7 @@ import Database from 'better-sqlite3';
 import { BetLog, OperatorRegistry, WalletClient } from '@crash/wallet';
 import type { Operator } from '@crash/wallet';
 import type { Server } from 'node:http';
+import * as bcrypt from 'bcryptjs';
 
 import {
   startServer,
@@ -84,9 +85,8 @@ import {
 import { WalletClientCache } from '../wallet/client-cache.js';
 import { setOperatorWiringDeps } from '../game/operator-deps.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
-import { requireAdminToken } from './middleware/require-admin-token.js';
 import { createAdminRouter } from './admin.js';
-import { AdminAudit } from '../admin/admin-store.js';
+import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
 
 // Also import helpers to place/settle bets in tests
 import { placeOperatorBet, cashOutOperatorBet } from '../game/bets.js';
@@ -102,7 +102,9 @@ const PLAYER_ID = 'pid-1';
 const CURRENCY = 'EUR';
 const INITIAL_BALANCE = 100_000;
 
-const VALID_TOKEN = 'test-admin-secret-token';
+const TEST_ADMIN_USER = 'tester';
+const TEST_ADMIN_PASS = 'pw';
+const TEST_JWT_SECRET = 'test-force-credit-secret';
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -115,13 +117,18 @@ let db: InstanceType<typeof Database>;
 let registry: OperatorRegistry;
 let betLog: BetLog;
 let adminAudit: AdminAudit;
+let adminUsers: AdminUsers;
 let walletClientCache: WalletClientCache;
+let revoked: Set<string>;
 
 // WalletClient instances (for placing bets in tests)
 let goodClient: WalletClient;
 
 // The express app under test
 let testApp: express.Application;
+
+// JWT token obtained at login
+let authToken: string;
 
 // ---------------------------------------------------------------------------
 // Suite setup
@@ -135,11 +142,13 @@ beforeAll(async () => {
   stubPort = typeof addr === 'object' && addr !== null ? addr.port : 0;
   if (!stubPort) throw new Error('Could not determine stub port');
 
-  // 2. In-memory SQLite: registry + betLog + adminAudit share the same db
+  // 2. In-memory SQLite: registry + betLog + adminAudit + adminUsers share the same db
   db = new Database(':memory:');
   betLog = new BetLog(db);
   registry = new OperatorRegistry(db);
   adminAudit = new AdminAudit(db);
+  adminUsers = new AdminUsers(db);
+  revoked = new Set<string>();
 
   // Register operator A — points at the real stub with stub's fixed signing key
   registry.create({
@@ -182,7 +191,10 @@ beforeAll(async () => {
     sleep: async () => {},  // instant backoff
   });
 
-  // 4. Build the test express app with admin routes
+  // 4. Create admin user for JWT login
+  adminUsers.create(TEST_ADMIN_USER, await bcrypt.hash(TEST_ADMIN_PASS, 10), ['admin']);
+
+  // 5. Build the test express app with admin routes (JWT-based)
   testApp = express();
   testApp.use(express.json({
     verify: (req, _res, buf) => {
@@ -191,8 +203,7 @@ beforeAll(async () => {
   }));
   testApp.use(
     '/admin/v1',
-    requireAdminToken(),
-    createAdminRouter({ walletClientCache, betLog, adminAudit }),
+    createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, revoked }),
   );
 });
 
@@ -207,26 +218,39 @@ afterAll(async () => {
 // Per-test setup
 // ---------------------------------------------------------------------------
 
-let savedToken: string | undefined;
+let savedJwtSecret: string | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
   resetStubState();
   vi.clearAllMocks();
   _internal__setCurrentRoundForTesting(null);
   setOperatorWiringDeps({ walletClientCache, betLog });
-  // Save env token and set a default valid token
-  savedToken = process.env['ADMIN_API_TOKEN'];
-  process.env['ADMIN_API_TOKEN'] = VALID_TOKEN;
+
+  // Save and set JWT_SECRET
+  savedJwtSecret = process.env['JWT_SECRET'];
+  process.env['JWT_SECRET'] = TEST_JWT_SECRET;
+
+  // Clear revocation set
+  revoked.clear();
+
   // Clear admin_audit rows so each test sees an isolated audit trail
   db.exec('DELETE FROM admin_audit');
+
+  // Obtain a fresh JWT token by logging in
+  const loginRes = await request(testApp)
+    .post('/admin/v1/auth/login')
+    .set('Content-Type', 'application/json')
+    .send({ username: TEST_ADMIN_USER, password: TEST_ADMIN_PASS });
+
+  authToken = (loginRes.body as { token: string }).token;
 });
 
 afterEach(() => {
-  // Restore env token
-  if (savedToken === undefined) {
-    delete process.env['ADMIN_API_TOKEN'];
+  // Restore JWT_SECRET
+  if (savedJwtSecret === undefined) {
+    delete process.env['JWT_SECRET'];
   } else {
-    process.env['ADMIN_API_TOKEN'] = savedToken;
+    process.env['JWT_SECRET'] = savedJwtSecret;
   }
   // Clear STUB_FAIL_NEXT_WIN in case a test left it set
   delete process.env['STUB_FAIL_NEXT_WIN'];
@@ -246,11 +270,11 @@ function forceCreditPath(betId: string) {
   return `/admin/v1/bet-log/${betId}/force-credit`;
 }
 
-/** Authenticated admin request with valid token. */
+/** Authenticated admin request with valid JWT. */
 function adminRequest(betId: string, body: object = { reason: 'test-force-credit' }) {
   return request(testApp)
     .post(forceCreditPath(betId))
-    .set('X-Admin-Token', VALID_TOKEN)
+    .set('Authorization', `Bearer ${authToken}`)
     .set('Content-Type', 'application/json')
     .send(body);
 }
@@ -258,10 +282,6 @@ function adminRequest(betId: string, body: object = { reason: 'test-force-credit
 /**
  * Place a bet and immediately drive it to WIN_FAILED using a failing /win client.
  * Returns the betId of the WIN_FAILED row.
- *
- * Method: place against the real stub (ARMED), then call cashOutOperatorBet with
- * a client whose fetch always throws — exhausts retries → WIN_FAILED with
- * winTxnId/winAmountMinor/multiplier persisted at SETTLING (Phase 1.6).
  */
 async function induceWinFailed(opts: {
   betId?: string;
@@ -356,14 +376,14 @@ async function induceWinFailed(opts: {
 
 describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
 
-  // ─── Test 1: ADMIN_API_TOKEN unset → 503 ADMIN_DISABLED ─────────────────────
+  // ─── Test 1: JWT_SECRET unset → 503 ADMIN_DISABLED ──────────────────────────
 
-  it('ADMIN_API_TOKEN unset → any force-credit request → 503 ADMIN_DISABLED', async () => {
-    delete process.env['ADMIN_API_TOKEN'];
+  it('JWT_SECRET unset → any force-credit request → 503 ADMIN_DISABLED', async () => {
+    delete process.env['JWT_SECRET'];
 
     const res = await request(testApp)
       .post(forceCreditPath('any-bet-id'))
-      .set('X-Admin-Token', VALID_TOKEN)
+      .set('Authorization', `Bearer ${authToken}`)
       .set('Content-Type', 'application/json')
       .send({ reason: 'test' });
 
@@ -371,47 +391,28 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(res.body.error.code).toBe('ADMIN_DISABLED');
   });
 
-  // ─── Test 2: missing/wrong token → 401 INVALID_ADMIN_TOKEN ──────────────────
+  // ─── Test 2: missing/array Authorization → 401 INVALID_JWT ──────────────────
 
-  it('missing X-Admin-Token header → 401 INVALID_ADMIN_TOKEN', async () => {
+  it('missing Authorization header → 401 INVALID_JWT', async () => {
     const res = await request(testApp)
       .post(forceCreditPath('any-bet-id'))
       .set('Content-Type', 'application/json')
       .send({ reason: 'test' });
 
     expect(res.status).toBe(401);
-    expect(res.body.error.code).toBe('INVALID_ADMIN_TOKEN');
+    expect(res.body.error.code).toBe('INVALID_JWT');
   });
 
-  it('wrong X-Admin-Token → 401 INVALID_ADMIN_TOKEN', async () => {
-    const res = await request(testApp)
-      .post(forceCreditPath('any-bet-id'))
-      .set('X-Admin-Token', 'wrong-token-value')
-      .set('Content-Type', 'application/json')
-      .send({ reason: 'test' });
-
-    expect(res.status).toBe(401);
-    expect(res.body.error.code).toBe('INVALID_ADMIN_TOKEN');
-  });
-
-  it('array X-Admin-Token header → 401 INVALID_ADMIN_TOKEN', async () => {
-    // supertest collapses duplicate headers into a comma-joined string rather than
-    // delivering a true string[] — so we invoke requireAdminToken directly with a
-    // fake request object that has string[] in the header, matching the Express type.
-    // This is the same pattern used in verify-operator-signature.test.ts.
-    //
-    // We use a single-element array [VALID_TOKEN] deliberately: its .toString() is
-    // VALID_TOKEN, so if a future refactor ever added implicit string coercion before
-    // the comparison (e.g. `headerToken.toString()`), the token would match and auth
-    // would be bypassed.  The typeof !== 'string' guard in require-admin-token.ts is
-    // the load-bearing line that prevents this; this test proves it is intentional.
-    const mw = requireAdminToken();
+  it('array Authorization header → 401 INVALID_JWT', async () => {
+    // Test the typeof !== 'string' guard in requireAdminJwt directly
+    const { requireAdminJwt: rawMw } = await import('./middleware/admin-auth.js');
+    const mw = rawMw({ revoked });
     let statusCode = 0;
     let jsonBody: unknown = undefined;
     let nextCalled = false;
 
     const fakeReq = {
-      headers: { 'x-admin-token': [VALID_TOKEN] },  // string[] — the typeof guard branch
+      headers: { 'authorization': [authToken] },  // string[] — the typeof guard branch
     } as unknown as import('express').Request;
 
     const fakeRes = {
@@ -421,13 +422,13 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     } as unknown as import('express').Response;
 
     await new Promise<void>((resolve) => {
-      mw(fakeReq, fakeRes, () => { nextCalled = true; resolve(); });
-      if (!nextCalled) resolve();
+      void mw(fakeReq, fakeRes, () => { nextCalled = true; resolve(); });
+      if (!nextCalled) setTimeout(resolve, 100);
     });
 
     expect(nextCalled).toBe(false);
     expect(statusCode).toBe(401);
-    expect((jsonBody as { error: { code: string } }).error.code).toBe('INVALID_ADMIN_TOKEN');
+    expect((jsonBody as { error: { code: string } }).error.code).toBe('INVALID_JWT');
   });
 
   // ─── Test 3: valid token, missing/blank reason → 400 INVALID_REQUEST ─────────
@@ -440,7 +441,9 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
 
     // No audit row for a pre-validation 400 (design choice documented in handler)
     const auditRows = adminAudit.list({ limit: 100 });
-    expect(auditRows).toHaveLength(0);
+    // May have login audit rows — filter for force_credit only
+    const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
+    expect(forceCreditRows).toHaveLength(0);
   });
 
   it('valid token, blank reason string → 400 INVALID_REQUEST', async () => {
@@ -454,14 +457,17 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
 
   it('unknown betId → 404 BET_NOT_FOUND + admin_audit row (result not_found)', async () => {
     const betId = 'does-not-exist-' + uid('x');
+    // Clear audit rows before this specific test to isolate force_credit rows
+    db.exec('DELETE FROM admin_audit');
     const res = await adminRequest(betId, { reason: 'checking if it exists' });
 
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('BET_NOT_FOUND');
 
     const auditRows = adminAudit.list({ limit: 100 });
-    expect(auditRows).toHaveLength(1);
-    const auditRow = auditRows[0]!;
+    const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
+    expect(forceCreditRows).toHaveLength(1);
+    const auditRow = forceCreditRows[0]!;
     expect(auditRow.action).toBe('force_credit');
     expect(auditRow.target).toBe(betId);
     expect((auditRow.payload as Record<string, unknown>)['result']).toBe('not_found');
@@ -490,14 +496,16 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     );
     expect(betLog.getById(betId)?.state).toBe('ARMED');
 
+    db.exec('DELETE FROM admin_audit');
     const res = await adminRequest(betId, { reason: 'trying to force-credit an ARMED bet' });
 
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('BET_NOT_WIN_FAILED');
 
     const auditRows = adminAudit.list({ limit: 100 });
-    expect(auditRows).toHaveLength(1);
-    const auditRow = auditRows[0]!;
+    const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
+    expect(forceCreditRows).toHaveLength(1);
+    const auditRow = forceCreditRows[0]!;
     expect(auditRow.action).toBe('force_credit');
     expect(auditRow.target).toBe(betId);
     const payload = auditRow.payload as Record<string, unknown>;
@@ -512,6 +520,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     const betId = await induceWinFailed({ playerId: PLAYER_ID });
     expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
 
+    db.exec('DELETE FROM admin_audit');
     // The stub is now healthy (default state) — force-credit should succeed
     const res = await adminRequest(betId, { reason: 'ops manual recovery - operator back online' });
 
@@ -525,12 +534,15 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     // BetLog must show SETTLED
     expect(betLog.getById(betId)?.state).toBe('SETTLED');
 
-    // Exactly one audit row
+    // Exactly one force_credit audit row
     const auditRows = adminAudit.list({ limit: 100 });
-    expect(auditRows).toHaveLength(1);
-    const auditRow = auditRows[0]!;
+    const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
+    expect(forceCreditRows).toHaveLength(1);
+    const auditRow = forceCreditRows[0]!;
     expect(auditRow.action).toBe('force_credit');
     expect(auditRow.target).toBe(betId);
+    // actor must be the JWT subject (not 'admin-token')
+    expect(auditRow.actor).toBe(TEST_ADMIN_USER);
     const payload = auditRow.payload as Record<string, unknown>;
     expect(payload['result']).toBe('settled');
     expect(typeof payload['operatorTxnId']).toBe('string');
@@ -539,18 +551,6 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
   });
 
   // ─── Test 7: operator STILL failing → 502 ok:false state WIN_FAILED ─────────
-  //
-  // Strategy: use Phase 2.2 outbound idempotency to make client.win() short-circuit
-  // to a stored WalletError without any HTTP calls.
-  //
-  // Mechanics:
-  //   1. Place a bet → ARMED (real stub).
-  //   2. Manually record a confirmed 4xx WalletError in the txn_idempotency table
-  //      for the winTxnId (simulates a prior /win call that got INSUFFICIENT_FUNDS).
-  //   3. Manually transition the betLog row to SETTLING → WIN_FAILED with the same winTxnId.
-  //   4. Force-credit: WalletClient.withIdempotency() finds the existing idempotency
-  //      entry, replays the stored WalletError immediately (no HTTP call, no timeout).
-  //   5. Handler gets WalletError → 502; row stays WIN_FAILED; audit result 'failed'.
 
   it('operator still failing (idempotency-recorded WalletError): force-credit → 502 ok:false state WIN_FAILED; row stays WIN_FAILED; audit row result failed', async () => {
     const betId = uid('bet');
@@ -574,29 +574,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     );
     expect(placeResult.row.state).toBe('ARMED');
 
-    // Step 2: Record a confirmed 4xx WalletError in txn_idempotency for the winTxnId.
-    //
-    // The fingerprint must match the request that force-credit will build.
-    // WalletClient.withIdempotency uses idempotencyFingerprint which strips settledAt
-    // (volatile). The stable fields are: playerId, sessionId, roundId, betId, betTxnId,
-    // txnId, amountMinor, multiplier, currency.
-    //
-    // We record the error directly in the table, bypassing the WalletClient.
-    // The WalletClient.withIdempotency() will find this entry and short-circuit.
-    //
-    // Note: the fingerprint function is internal to @crash/wallet. We need the
-    // request payload hash. Since we can't call it directly, we store a "wrong"
-    // hash... BUT the idempotency lookup checks requestHash for equality.
-    // If the hash mismatches, it throws IdempotencyMismatchError, not WalletError.
-    //
-    // To avoid computing the fingerprint, we use a different approach:
-    // Place the bet with the failing client (induceWinFailed style) to naturally
-    // record the WalletNetworkError in the idempotency table... but WalletNetworkError
-    // is NOT persisted (only 4xx confirmed rejections are).
-    //
-    // Real solution: compute the fingerprint manually for the WinRequest that
-    // force-credit will build, and insert the error row with that hash.
-    // The fingerprint is SHA256(JSON.stringify(payload_without_volatile_keys)).
+    // Step 2: Compute fingerprint and insert a confirmed-rejection idempotency row
     const row = betLog.getById(betId)!;
     const winReqStableFields = {
       playerId: row.playerId,
@@ -615,7 +593,6 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
       .update(Buffer.from(JSON.stringify(winReqStableFields)))
       .digest('hex');
 
-    // Insert a confirmed-rejection idempotency row for this winTxnId
     const errorPayload = JSON.stringify({
       ok: false,
       error: {
@@ -644,6 +621,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     betLog.transition(betId, 'win_failed', { errorCode: 'BET_LIMIT_EXCEEDED' });
     expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
 
+    db.exec('DELETE FROM admin_audit');
     // Step 4 & 5: Force-credit — WalletClient finds the idempotency entry and
     // replays the WalletError immediately (no HTTP call → no timeout).
     const res = await adminRequest(betId, { reason: 'operator BET_LIMIT_EXCEEDED — still refusing' });
@@ -659,8 +637,9 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
 
     // Audit row with result 'failed'
     const auditRows = adminAudit.list({ limit: 100 });
-    expect(auditRows).toHaveLength(1);
-    const failedAuditRow = auditRows[0]!;
+    const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
+    expect(forceCreditRows).toHaveLength(1);
+    const failedAuditRow = forceCreditRows[0]!;
     expect(failedAuditRow.action).toBe('force_credit');
     expect(failedAuditRow.target).toBe(betId);
     const payload = failedAuditRow.payload as Record<string, unknown>;

@@ -11,6 +11,41 @@ type SqliteStatement<P extends unknown[] = unknown[]> = ReturnType<Database['pre
 };
 
 // ---------------------------------------------------------------------------
+// AdminUsers public types
+// ---------------------------------------------------------------------------
+
+export type AdminRole = 'admin' | 'finance' | 'support' | 'viewer';
+
+export interface AdminUser {
+  username: string;
+  roles: AdminRole[];
+  createdAt: number;
+  lastLoginAt: number | null;
+}
+
+interface AdminUserRow {
+  username: string;
+  password_hash: string;
+  roles_json: string;
+  created_at: number;
+  last_login_at: number | null;
+}
+
+export class DuplicateAdminError extends Error {
+  constructor(username: string) {
+    super(`Admin '${username}' already exists`);
+    this.name = 'DuplicateAdminError';
+  }
+}
+
+export class AdminNotFoundError extends Error {
+  constructor(username: string) {
+    super(`Admin '${username}' not found`);
+    this.name = 'AdminNotFoundError';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -145,5 +180,158 @@ export class AdminAudit {
         at: row.at,
       };
     });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// AdminUsers — owns the `admins` table
+// ---------------------------------------------------------------------------
+
+/**
+ * Manages admin user accounts.
+ * Passwords are stored as bcryptjs hashes (cost 10) — never plaintext.
+ * getByUsername returns the hash separately ONLY for login comparison.
+ */
+export class AdminUsers {
+  private readonly db: Database;
+  private _stmts = {} as Record<string, SqliteStatement>;
+
+  constructor(db: Database) {
+    this.db = db;
+    this._ensureSchema();
+  }
+
+  private _ensureSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS admins (
+        username      TEXT PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        roles_json    TEXT NOT NULL,
+        created_at    INTEGER NOT NULL,
+        last_login_at INTEGER
+      );
+    `);
+  }
+
+  private stmt<P extends unknown[] = unknown[]>(key: string, sql: string): SqliteStatement<P> {
+    if (!this._stmts[key]) {
+      this._stmts[key] = this.db.prepare(sql) as SqliteStatement;
+    }
+    return this._stmts[key] as SqliteStatement<P>;
+  }
+
+  private _rowToUser(row: AdminUserRow): AdminUser {
+    return {
+      username: row.username,
+      roles: JSON.parse(row.roles_json) as AdminRole[],
+      createdAt: row.created_at,
+      lastLoginAt: row.last_login_at ?? null,
+    };
+  }
+
+  /** Create a new admin. Throws DuplicateAdminError if username already exists. */
+  create(username: string, passwordHash: string, roles: AdminRole[]): AdminUser {
+    const now = Math.floor(Date.now() / 1000);
+    try {
+      this.stmt(
+        'insert_admin',
+        `INSERT INTO admins (username, password_hash, roles_json, created_at, last_login_at)
+         VALUES (@username, @password_hash, @roles_json, @created_at, NULL)`,
+      ).run({
+        username,
+        password_hash: passwordHash,
+        roles_json: JSON.stringify(roles),
+        created_at: now,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('UNIQUE constraint failed')) {
+        throw new DuplicateAdminError(username);
+      }
+      throw err;
+    }
+    return this._rowToUser({
+      username,
+      password_hash: passwordHash,
+      roles_json: JSON.stringify(roles),
+      created_at: now,
+      last_login_at: null,
+    });
+  }
+
+  /** Look up by username. Returns { user, passwordHash } or null if not found.
+   *  The hash is returned separately so the caller can bcrypt-compare without
+   *  the hash ever appearing in the public AdminUser shape. */
+  getByUsername(username: string): { user: AdminUser; passwordHash: string } | null {
+    const row = this.stmt(
+      'get_admin',
+      `SELECT * FROM admins WHERE username = ?`,
+    ).get(username) as AdminUserRow | undefined;
+    if (!row) return null;
+    return { user: this._rowToUser(row), passwordHash: row.password_hash };
+  }
+
+  /** List admin users, newest-first by created_at. Default limit 100. */
+  list(opts?: { limit?: number }): AdminUser[] {
+    const limit = opts?.limit ?? 100;
+    const rows = this.stmt(
+      'list_admins',
+      `SELECT * FROM admins ORDER BY created_at DESC LIMIT ?`,
+    ).all(limit) as AdminUserRow[];
+    return rows.map((r) => this._rowToUser(r));
+  }
+
+  /** Update password hash and/or roles. Throws AdminNotFoundError if not found. */
+  update(username: string, patch: { passwordHash?: string; roles?: AdminRole[] }): AdminUser {
+    const setClauses: string[] = [];
+    const params: Record<string, unknown> = { username };
+
+    if (patch.passwordHash !== undefined) {
+      setClauses.push('password_hash = @password_hash');
+      params['password_hash'] = patch.passwordHash;
+    }
+    if (patch.roles !== undefined) {
+      setClauses.push('roles_json = @roles_json');
+      params['roles_json'] = JSON.stringify(patch.roles);
+    }
+    if (setClauses.length === 0) {
+      // Nothing to update — fetch and return current
+      const existing = this.getByUsername(username);
+      if (!existing) throw new AdminNotFoundError(username);
+      return existing.user;
+    }
+
+    const sql = `UPDATE admins SET ${setClauses.join(', ')} WHERE username = @username`;
+    const info = this.db.prepare(sql).run(params);
+    if (info.changes === 0) throw new AdminNotFoundError(username);
+
+    return this.getByUsername(username)!.user;
+  }
+
+  /** Delete an admin. Throws AdminNotFoundError if not found. */
+  delete(username: string): void {
+    const info = this.stmt(
+      'delete_admin',
+      `DELETE FROM admins WHERE username = ?`,
+    ).run(username);
+    if ((info as { changes: number }).changes === 0) throw new AdminNotFoundError(username);
+  }
+
+  /** Record a successful login (update last_login_at). */
+  recordLogin(username: string): void {
+    const now = Math.floor(Date.now() / 1000);
+    this.stmt(
+      'record_login',
+      `UPDATE admins SET last_login_at = ? WHERE username = ?`,
+    ).run(now, username);
+  }
+
+  /** Return total count of admin users (for bootstrap idempotency check). */
+  count(): number {
+    const row = this.stmt<[]>(
+      'count_admins',
+      `SELECT COUNT(*) as cnt FROM admins`,
+    ).get() as { cnt: number };
+    return row.cnt;
   }
 }
