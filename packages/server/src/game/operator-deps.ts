@@ -1,16 +1,16 @@
 import type { WalletClientCache } from '../wallet/client-cache';
-import type { BetLog } from '@crash/wallet';
+import type { BetLog, Alerter } from '@crash/wallet';
 
 export interface OperatorWiringDeps {
   walletClientCache: WalletClientCache;
   betLog: BetLog;
-  /** Optional alert hook for WIN_FAILED; default = console.error (Task 4.1 will replace). */
-  onWinFailed?: (betRow: unknown) => void;
+  /** Alerter for WIN_FAILED and rollback-failure events. Defaults to consoleAlerter. */
+  alerter?: Alerter;
 }
 
 let deps: OperatorWiringDeps | null = null;
 
-export function setOperatorWiringDeps(d: OperatorWiringDeps): void {
+export function setOperatorWiringDeps(d: OperatorWiringDeps | null): void {
   deps = d;
 }
 

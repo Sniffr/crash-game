@@ -17,6 +17,8 @@ import {
   ResponseSignatureError,
   InvalidTransitionError,
   TERMINAL_STATES,
+  type Alerter,
+  consoleAlerter,
 } from '@crash/wallet';
 import { getOperatorWiringDeps } from './operator-deps';
 
@@ -128,10 +130,15 @@ export async function tryCashoutBet(
       bet.cashoutMultiplier = atMultiplier;
       bet.winTxnId = winTxnId;
 
-      // Fire onWinFailed — this IS a WIN_FAILED situation
+      // Emit win_failed alert — this IS a WIN_FAILED situation (operator paused)
       const failedRow = deps.betLog.getById(bet.betId);
       if (failedRow) {
-        deps.onWinFailed?.(failedRow);
+        (deps.alerter ?? consoleAlerter).emit({
+          kind: 'win_failed',
+          betRow: failedRow,
+          source: 'cashout',
+          error: 'OPERATOR_PAUSED_AT_CASHOUT',
+        });
       }
 
       // Intentionally NO balanceMinor here: the /win call never happened so the
@@ -167,7 +174,7 @@ export async function tryCashoutBet(
 
     try {
       const cashoutResult = await cashOutOperatorBet(
-        { walletClient: client, betLog: deps.betLog, onWinFailed: deps.onWinFailed },
+        { walletClient: client, betLog: deps.betLog, alerter: deps.alerter },
         {
           betId: bet.betId,
           winTxnId,
@@ -216,9 +223,9 @@ export async function tryCashoutBet(
       bet.winTxnId = winTxnId;
 
       const walletErr = err instanceof WalletError ? err : null;
+      // Debug log only — cashOutOperatorBet already emitted the alert via the Alerter.
+      // Do NOT emit again here — that would fire two alerts per WIN_FAILED (single-alert invariant).
       console.error('[tryCashoutBet] WIN_FAILED for bet', bet.betId, err);
-      // Note: cashOutOperatorBet already called deps.onWinFailed before rethrowing.
-      // Do NOT call it again here — that would fire two alerts per WIN_FAILED (Phase 4.1).
 
       // Intentionally NO balanceMinor here: the /win call failed so the operator
       // has NOT credited the player. Keep showing the post-debit balance from /bet.
@@ -268,10 +275,10 @@ export interface OperatorBetDeps {
   /** BetLog from @crash/wallet, shared instance */
   betLog: BetLog;
   /**
-   * Called when a /win call fails after the client exhausted its retries.
-   * TODO(Task 4.1): replace with Alerter.
+   * Alerter emitted when a /win call fails after the client exhausted its retries,
+   * or when the OPERATOR_PAUSED path drives a WIN_FAILED. Defaults to consoleAlerter.
    */
-  onWinFailed?: (betRow: BetRow) => void;
+  alerter?: Alerter;
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +409,7 @@ export interface CashOutOperatorBetResult {
  *   walletClient.win({...})  (client retries internally per §8)
  *   success → transition(betId,'win_settled',{...}) → SETTLED; return SETTLED BetRow + post-credit balanceMinor + currency
  *   WalletError after client exhausted retries → transition(betId,'win_failed',{...}) → WIN_FAILED;
- *      call deps.onWinFailed?.(row) (else console.error); rethrow the WalletError.
+ *      emit via deps.alerter (or consoleAlerter fallback); rethrow the WalletError.
  *      DO NOT credit the player locally. DO NOT loop forever.
  *
  * If the bet is not in a cashable state, betLog.transition throws InvalidTransitionError — propagates.
@@ -450,12 +457,12 @@ export async function cashOutOperatorBet(
         errorCode: err.code,
       });
 
-      if (deps.onWinFailed) {
-        deps.onWinFailed(failedRow);
-      } else {
-        // TODO(Task 4.1): replace with Alerter
-        console.error('[bets] WIN_FAILED', failedRow);
-      }
+      (deps.alerter ?? consoleAlerter).emit({
+        kind: 'win_failed',
+        betRow: failedRow,
+        source: 'cashout',
+        error: err.code,
+      });
 
       throw err;
     }
@@ -469,12 +476,12 @@ export async function cashOutOperatorBet(
       errorCode: wrapped.code,
     });
 
-    if (deps.onWinFailed) {
-      deps.onWinFailed(failedRow);
-    } else {
-      // TODO(Task 4.1): replace with Alerter
-      console.error('[bets] WIN_FAILED', failedRow);
-    }
+    (deps.alerter ?? consoleAlerter).emit({
+      kind: 'win_failed',
+      betRow: failedRow,
+      source: 'cashout',
+      error: wrapped.code,
+    });
 
     throw wrapped;
   }
@@ -566,8 +573,14 @@ export async function voidOperatorBet(
     return 'voided';
   } catch (err) {
     // Leave in ROLLBACK_PENDING for the Phase 1.7 recovery worker to re-drive.
-    // TODO(Task 4.1): replace with Alerter
-    console.error('[voidOperatorBet] rollback failed, left ROLLBACK_PENDING for recovery:', err);
+    const rollbackErr = err instanceof WalletError ? err : null;
+    const errorStr = rollbackErr ? rollbackErr.code : (err instanceof Error ? err.message : String(err));
+    (deps.alerter ?? consoleAlerter).emit({
+      kind: 'rollback_failed',
+      betRow: row,
+      reason,
+      error: errorStr,
+    });
     return 'skipped';
   }
 }

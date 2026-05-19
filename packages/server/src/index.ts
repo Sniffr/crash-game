@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, runRecovery } from '@crash/wallet';
+import { BetLog, OperatorRegistry, runRecovery, consoleAlerter } from '@crash/wallet';
 import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
@@ -29,7 +29,7 @@ const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
 const walletClientCache = new WalletClientCache(registry, betLog);
-setOperatorWiringDeps({ walletClientCache, betLog });
+setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter });
 
 const app = express();
 // Capture raw body bytes for HMAC signing (verifyOperatorSignature §4.2).
@@ -116,7 +116,7 @@ const HOST = process.env.HOST ?? '0.0.0.0';
 // Failure is non-fatal — log and continue.
 let recoveryReport: unknown = null;
 try {
-  recoveryReport = await runRecovery({ betLog, registry });
+  recoveryReport = await runRecovery({ betLog, registry, alerter: consoleAlerter });
 } catch (err) {
   console.error('[recovery] error during startup sweep (continuing):', err);
 }

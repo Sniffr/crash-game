@@ -18,6 +18,7 @@ import { OperatorRegistry } from './operator-registry.js';
 import { WalletClient } from './client.js';
 import { WalletError } from './errors.js';
 import type { Operator } from './types.js';
+import { type Alerter, consoleAlerter } from './alerter.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -28,8 +29,8 @@ export interface RecoveryDeps {
   registry: OperatorRegistry;
   /** Build (or look up cached) WalletClient for an Operator. Defaults to `new WalletClient(op)`. */
   clientFactory?: (op: Operator) => WalletClient;
-  /** Hook fired when a SETTLING row exhausts /win retries (mirrors deps.onWinFailed in bets.ts). */
-  onWinFailed?: (row: BetRow) => void;
+  /** Alerter fired when a SETTLING row exhausts /win retries. Defaults to consoleAlerter. */
+  alerter?: Alerter;
   /** Structured logger; defaults to console.warn. Receives the message and an extra payload. */
   log?: (msg: string, extra?: unknown) => void;
   /** Cap rows processed per state per run (protective). Default 500. */
@@ -51,7 +52,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
     betLog,
     registry,
     clientFactory = (op: Operator) => new WalletClient(op),
-    onWinFailed,
+    alerter = consoleAlerter,
     log = (msg: string, extra?: unknown) => console.warn('[recovery]', msg, extra ?? ''),
     maxPerState = 500,
   } = deps;
@@ -237,11 +238,12 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
           continue;
         }
 
-        if (onWinFailed) {
-          onWinFailed(failedRow);
-        } else {
-          console.warn('[recovery] WIN_FAILED', failedRow);
-        }
+        alerter.emit({
+          kind: 'win_failed',
+          betRow: failedRow,
+          source: 'recovery',
+          error: err.code,
+        });
         report.settling.failed++;
       } else {
         log('[recovery] SETTLING unexpected error', { betId: row.betId, err });

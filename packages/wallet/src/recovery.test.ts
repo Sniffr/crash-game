@@ -21,6 +21,8 @@ import {
   OperatorRegistry,
   WalletClient,
   type BetRow,
+  type Alerter,
+  type AlertEvent,
 } from './index.js';
 import type { Operator } from './types.js';
 import { runRecovery, type RecoveryDeps } from './recovery.js';
@@ -160,10 +162,11 @@ it('PENDING → VOIDED via /rollback noop (stub never saw the bet)', async () =>
 
   expect(betLog.getById(betId)?.state).toBe('PENDING');
 
-  const winFailedRows: BetRow[] = [];
+  const alertEmits: AlertEvent[] = [];
+  const fakeAlerter: Alerter = { emit: (e) => alertEmits.push(e) };
   const report = await runRecovery({
     ...deps,
-    onWinFailed: (r) => winFailedRows.push(r),
+    alerter: fakeAlerter,
   });
 
   // Row must now be VOIDED
@@ -185,7 +188,8 @@ it('PENDING → VOIDED via /rollback noop (stub never saw the bet)', async () =>
   const balResp = await client.balance({ playerId: 'pid-1', sessionId: 'sess-pid-1' });
   expect(balResp.balance).toBe(100_000);
 
-  expect(winFailedRows).toHaveLength(0);
+  // No alert emitted for a clean VOIDED resolution
+  expect(alertEmits).toHaveLength(0);
 });
 
 // ---------------------------------------------------------------------------
@@ -367,19 +371,25 @@ it('SETTLING → WIN_FAILED when /win exhausts retries', async () => {
       sleep: makeNoop(),
     });
 
-  const winFailedRows: BetRow[] = [];
+  const alertEmits: AlertEvent[] = [];
+  const fakeAlerter: Alerter = { emit: (e) => alertEmits.push(e) };
   const report = await runRecovery({
     ...deps,
     clientFactory: failClientFactory,
-    onWinFailed: (r) => winFailedRows.push(r),
+    alerter: fakeAlerter,
   });
 
   const row = betLog.getById(betId);
   expect(row?.state).toBe('WIN_FAILED');
   expect(row?.errorCode).toBeTruthy();
 
-  expect(winFailedRows).toHaveLength(1);
-  expect(winFailedRows[0].betId).toBe(betId);
+  // Alerter must have been called exactly once for the exhausted SETTLING row
+  expect(alertEmits).toHaveLength(1);
+  expect(alertEmits[0]).toMatchObject({
+    kind: 'win_failed',
+    source: 'recovery',
+    betRow: expect.objectContaining({ betId }),
+  });
 
   expect(report.settling.found).toBe(1);
   expect(report.settling.failed).toBe(1);

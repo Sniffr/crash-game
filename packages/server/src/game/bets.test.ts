@@ -28,7 +28,7 @@ vi.mock('../ws/hub.js', () => ({
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { WalletClient, BetLog, WalletError, WalletNetworkError } from '@crash/wallet';
+import { WalletClient, BetLog, WalletError, WalletNetworkError, type Alerter, type AlertEvent } from '@crash/wallet';
 import type { Operator } from '@crash/wallet';
 import type { BetRow } from '@crash/wallet';
 import type { Server } from 'node:http';
@@ -122,17 +122,18 @@ afterAll(async () => {
 let betLog: BetLog;
 let deps: OperatorBetDeps;
 
-// Track win failures for test 3.
-const winFailedRows: BetRow[] = [];
+// Track alert events per test.
+const alertEmits: AlertEvent[] = [];
+const fakeAlerter: Alerter = { emit: (e) => alertEmits.push(e) };
 
 beforeEach(() => {
   resetStubState();
-  winFailedRows.length = 0;
+  alertEmits.length = 0;
   betLog = new BetLog(new Database(':memory:'));
   deps = {
     walletClient,
     betLog,
-    onWinFailed: (row) => winFailedRows.push(row),
+    alerter: fakeAlerter,
   };
 });
 
@@ -304,8 +305,8 @@ it('win retry: single /win 500 is retried by WalletClient and ultimately SETTLES
   expect(cashoutResult.row.state).toBe('SETTLED');
   expect(cashoutResult.row.winOpTxnId).toBeTruthy();
 
-  // No win-failure callback should have been called
-  expect(winFailedRows).toHaveLength(0);
+  // No alert should have been emitted (win succeeded after retry)
+  expect(alertEmits).toHaveLength(0);
 
   // Balance: 100000 - 5000 (bet) + 15000 (win) = 110000
   const balResp = await walletClient.balance({ playerId: 'pid-2', sessionId });
