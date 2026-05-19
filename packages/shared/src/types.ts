@@ -101,6 +101,8 @@ export interface Session {
   currency?: string;
   /** Balance in integer minor units (Task 3.1+). Canonical going forward; replaces {@link Session.balance}. */
   balanceMinor?: number;
+  /** Per-operator responsible-gambling limits, populated for operator sessions (Task 3.2+). */
+  rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
 }
 
 /** Per-session lifetime stats. All counters are non-negative. */

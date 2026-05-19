@@ -81,6 +81,16 @@ Any other token returns `401 INVALID_TOKEN`.
 
 ---
 
+## Iframe embed harness
+
+Open **`http://localhost:4000/harness/parent.html`** in your browser after starting the stub.
+
+The harness lets you pick a pre-seeded player (EUR / USD / BTC), point it at your running game server, and click **Launch** — the game loads in an embedded iframe backed by a real operator session. Watch the stub's console for `/authenticate`, `/bet`, and `/win` calls. Clicking **Lobby** in the game navigates back to the harness page via `postMessage`.
+
+No extra setup needed; the harness is served by the stub itself.
+
+---
+
 ## Curl examples
 
 All requests require these headers:

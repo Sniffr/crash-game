@@ -65,6 +65,7 @@ vi.mock('../store.js', async () => {
         playerId: opts.playerId,
         currency: opts.currency,
         balanceMinor: opts.balanceMinor,
+        rgLimits: opts.rgLimits,
       };
       sessionStore.set(sessionId, session);
       return session;
@@ -245,6 +246,8 @@ describe('GET /launch', () => {
     expect(session!.currency).toBe('EUR');
     expect(session!.balanceMinor).toBe(100000);
     expect(session!.displayName).toBe('lucky_falcon_42');
+    expect(session!.rgLimits).toBeDefined();
+    expect(session!.rgLimits!.maxBetMinor).toBe(500000);
   });
 
   // ─── Test 2: lobby/return params propagate ────────────────────────────────

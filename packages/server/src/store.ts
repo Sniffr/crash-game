@@ -164,6 +164,7 @@ export async function createOperatorSession(opts: {
     playerId: opts.playerId,
     currency: opts.currency,
     balanceMinor: opts.balanceMinor,
+    rgLimits: opts.rgLimits,
   };
   await jput(sessKey(sessionId), session);
   await jput(statsKey(sessionId), { ...ZERO_STATS });

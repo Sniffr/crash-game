@@ -110,6 +110,12 @@ declare module 'express-serve-static-core' {
 
 export const app = express();
 
+// Serve the iframe embed harness at /harness/* (static HTML, no signing needed).
+// Mounted BEFORE the signed wallet routes so it never competes with them.
+// Path is relative to CWD at runtime (tools/operator-stub).
+import path from 'node:path';
+app.use('/harness', express.static(path.join(process.cwd(), 'public'), { extensions: ['html'] }));
+
 // Capture raw body bytes for HMAC signing, then parse JSON
 app.use(
   express.json({
