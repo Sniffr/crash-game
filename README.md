@@ -285,6 +285,16 @@ All **18** RNG tests pass (from the reference implementation in `doc/rng.test.ts
 | provably-fair (5) | SHA-256 commit/reveal round-trips for 100+ rounds; tampered crash points and mismatched seeds are caught by `verifyRound` |
 | input validation (2) | `rtp ≤ 0` and `rtp > 1` throw; `DEFAULT_CONFIG` is used when none supplied |
 
+## Reference docs
+
+| Document | Audience | Path |
+|---|---|---|
+| Seamless Wallet Protocol v1 | Operator integrators | [`doc/specs/seamless-wallet-v1.md`](doc/specs/seamless-wallet-v1.md) |
+| Studio Backoffice API v1 | Internal staff (admin, finance, support, ops) | [`doc/specs/studio-backoffice-v1.md`](doc/specs/studio-backoffice-v1.md) |
+| Operator Backoffice API v1 | Operator backoffice integrators | [`doc/specs/operator-backoffice-v1.md`](doc/specs/operator-backoffice-v1.md) |
+| Implementation plan | Engineering | [`doc/plans/2026-05-18-b2b-seamless-wallet-platform.md`](doc/plans/2026-05-18-b2b-seamless-wallet-platform.md) |
+| Runbook: Stuck Bet | On-call | [`doc/ops/runbooks/stuck-bet.md`](doc/ops/runbooks/stuck-bet.md) |
+
 ## Asset Credits
 
 All assets are original or CC0-licensed. See [`client/src/assets/CREDITS.md`](packages/client/src/assets/CREDITS.md) for full details.

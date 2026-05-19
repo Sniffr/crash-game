@@ -8,6 +8,15 @@ The "overall" backoffice. Cross-tenant control plane over operators, rounds, bet
 
 ## 1. Auth & roles
 
+> **Phase-4 interim auth (current):** Phase 4 ships a static `X-Admin-Token` header gate
+> checked against the `ADMIN_API_TOKEN` environment variable. Integrators targeting the
+> running Phase-4 server must send `X-Admin-Token: <secret>` on every request instead of
+> `Authorization: Bearer <jwt>`. Phase 5.2 replaces this stub with the JWT flow described
+> below in §1.1 and §1.2. Integrators planning ahead for Phase 5.2 should target the
+> `/auth/login` JWT flow; the auth errors `INVALID_ADMIN_TOKEN` and `ADMIN_DISABLED`
+> (Phase-4-only) are superseded by JWT-flow errors when Task 5.2 ships — all other
+> endpoint error codes remain stable across both phases.
+
 ### 1.1 Login
 
 ```
@@ -89,21 +98,25 @@ Always integer **minor units** + `currency` string. Never decimal. See wallet sp
 {
   "error": {
     "code":    "OPERATOR_NOT_FOUND",
-    "message": "No operator with id 'acme'",
-    "details": { "operatorId": "acme" }
+    "message": "No operator with id 'acme'"
   }
 }
 ```
 
+The shipped error envelope is `{ "error": { "code": "...", "message": "..." } }`. Extra
+error-specific fields MAY be inlined into the error object by operator-originated error
+responses (e.g. `balanceMinor` on an operator `INSUFFICIENT_FUNDS` reply that is
+proxied through §6.3 as a 502). The `code` and `message` fields are always present.
+
 HTTP status codes:
 - `400` validation errors
-- `401` missing/invalid JWT
+- `401` missing/invalid auth credential (Phase 4: `INVALID_ADMIN_TOKEN`; Phase 5.2+: `INVALID_JWT`)
 - `403` role insufficient
 - `404` resource not found
 - `409` conflict (duplicate, state-machine violation)
-- `422` semantically invalid (e.g. trying to credit a bet that never debited)
 - `500` server error
-- `503` upstream wallet down (when operator action is needed)
+- `502` upstream operator returned a permanent error (proxied WalletError)
+- `503` upstream wallet down or admin API unconfigured
 
 ---
 
@@ -291,20 +304,22 @@ Reveals `serverSeed` (round is over). Support uses this to verify player dispute
 Roles: any
 Filters: `operatorId`, `playerId`, `state`, `from`, `to`, `betId`, `txnId`, `cursor`, `limit`
 
-Item:
+Item (all fields from `bet_log`; API uses camelCase):
 ```json
 {
   "betId":           "bet-018f...-1",
   "operatorId":      "acme",
   "playerId":        "op-acme-pid-9183",
+  "sessionId":       "sess-...",
   "roundId":         "rnd-2026-05-18-00193847",
-  "amountMinor":     10000,
   "currency":        "EUR",
+  "amountMinor":     10000,
   "state":           "SETTLED",
-  "autoCashout":     2.0,
   "betTxnId":        "txn-...-a1",
   "winTxnId":        "txn-...-a2",
   "rollbackTxnId":   null,
+  "betOpTxnId":      "op-tx-77182",
+  "winOpTxnId":      "op-tx-77191",
   "winAmountMinor":  24500,
   "multiplier":      2.45,
   "errorCode":       null,
@@ -333,16 +348,55 @@ Roles: any. Includes full state-machine timeline:
 }
 ```
 
-### 6.3 `POST /admin/v1/bets/:betId/force-credit`
+### 6.3 `POST /admin/v1/bet-log/:betId/force-credit`
 Roles: `admin`
-Request:
-```json
-{ "reason": "operator confirmed receipt via email", "ticketRef": "ZD-12345" }
-```
-Effects: reissues `/win` once more (same txnId). On success → `SETTLED`. Otherwise stays `WIN_FAILED` with new attempt logged. Always writes an `admin_audit` row.
 
-Errors:
-- `409 BET_NOT_IN_FAILED_STATE` if bet isn't `WIN_FAILED`.
+Every actionable invocation (steps 2 onward — after `reason` validation passes) writes
+an immutable `admin_audit` row; see §12 Audit log for the schema and per-branch payload
+shapes. The 400 `INVALID_REQUEST` path does **not** write an audit row (pre-validation;
+the betId may not even exist — auditing every malformed request would pollute the log
+with noise before any bet lookup).
+
+Request body (`Content-Type: application/json`):
+```json
+{ "reason": "operator confirmed receipt via email" }
+```
+- `reason` — non-empty string, **required**. Written verbatim into the `admin_audit` row
+  as the chain-of-custody note.
+
+Effects: re-issues `/win` using the **original** `winTxnId` already persisted on the row
+(Phase 2.2 outbound idempotency + operator §9 dedupe make this safe even if the operator
+already credited). On success → row transitions `WIN_FAILED → SETTLED`. On operator
+refusal → row stays `WIN_FAILED`; audit row written with `result: "failed"`.
+
+**200 — success:**
+```json
+{
+  "ok": true,
+  "betId": "<betId>",
+  "state": "SETTLED",
+  "operatorTxnId": "<operator-assigned-transaction-id>"
+}
+```
+
+**Error inventory:**
+
+| HTTP | `error.code` | When |
+|---|---|---|
+| 400 | `INVALID_REQUEST` | `reason` missing, not a string, or blank |
+| 401 | `INVALID_ADMIN_TOKEN` | `X-Admin-Token` header missing, sent as an array, or value does not match `ADMIN_API_TOKEN` (Phase-4 stub; Task 5.2 replaces with JWT 401 `INVALID_JWT`) |
+| 503 | `ADMIN_DISABLED` | `ADMIN_API_TOKEN` env var unset/empty — admin API fully disabled (Phase-4 stub only; absent in Phase 5.2 JWT flow) |
+| 404 | `BET_NOT_FOUND` | No row exists for this `betId` |
+| 409 | `BET_NOT_WIN_FAILED` | Row exists but is in a state other than `WIN_FAILED` |
+| 409 | `BET_NOT_RECONSTRUCTIBLE` | `winTxnId`, `winAmountMinor`, or `multiplier` is NULL on the row — data-integrity event; see audit `missingFields` |
+| 503 | `OPERATOR_UNAVAILABLE` | Operator's `WalletClient` not in the registry (operator paused or deleted) |
+| 502 | _(WalletError code from operator)_ | Operator's `/win` endpoint returned a permanent error; row stays `WIN_FAILED` |
+| 409 | `TRANSITION_FAILED` | Operator credited the player but `bet_log` row could not transition to `SETTLED` — data-integrity event; the player IS credited |
+| 500 | `INTERNAL` | Unexpected server-side error |
+
+> The Phase-4-only auth errors (`INVALID_ADMIN_TOKEN`, `ADMIN_DISABLED`) are replaced by
+> the JWT-flow errors when Task 5.2 ships. All other error codes in this table are stable
+> across Phase 4 and Phase 5.
 
 ### 6.4 `POST /admin/v1/bets/:betId/manual-rollback`
 Roles: `admin`. For the case where the operator denies a `/bet` debit but the round has already played out — voids locally + alerts. Returns the bet to `VOIDED`.
@@ -493,17 +547,90 @@ Roles: any
 
 ## 12. Audit log
 
+### 12.0 Schema
+
+The `admin_audit` table stores an immutable record of every admin action.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `INTEGER PRIMARY KEY AUTOINCREMENT` | Monotonically increasing row id |
+| `actor` | `TEXT NOT NULL` | Who performed the action (Phase 4: `"admin-token"`; Phase 5.2+: JWT subject) |
+| `action` | `TEXT NOT NULL` | Action name, e.g. `"force_credit"`, `"operator.create"`, `"operator.regen-signing-key"` |
+| `target` | `TEXT NOT NULL` | Resource identifier, e.g. a `betId` or `"operator:acme"` |
+| `payload_json` | `TEXT` | Nullable; JSON-serialised action payload (decoded to object in API responses) |
+| `at` | `INTEGER NOT NULL` | Unix seconds timestamp |
+
+Audit is **append-only**; there is no delete or update endpoint.
+
 ### 12.1 `GET /admin/v1/audit`
 Roles: `admin`
-Filters: `actor`, `action`, `target`, `from`, `to`, `cursor`.
+Filters (query params): `?actor=`, `?action=`, `?target=`, `?from=` (unix s), `?to=` (unix s), `?cursor=`, `?limit=` (default 50, max 200).
+
+Response:
 ```json
-{ "items": [
-  { "id": 1234, "actor": "alice", "action": "operator.regen-signing-key",
-    "target": "operator:acme", "payload": { "rotatedAt": 1716000000 },
-    "at": 1716000000 } ] }
+{
+  "items": [
+    { "id": 1234, "actor": "alice", "action": "operator.regen-signing-key",
+      "target": "operator:acme", "payload": { "rotatedAt": 1716000000 },
+      "at": 1716000000 }
+  ],
+  "nextCursor": null
+}
 ```
 
-Audit is **append-only**; no delete endpoint.
+### 12.2 Force-credit payload shapes
+
+`admin_audit` rows written by `POST /admin/v1/bet-log/:betId/force-credit` have
+`action = "force_credit"` and `target = <betId>`. The `payload` object varies by branch:
+
+**Successful settlement (`result: "settled"`):**
+```json
+{ "reason": "<human note>", "result": "settled", "operatorTxnId": "<op-ref>", "balanceMinor": 1234500 }
+```
+
+**Operator refused credit (`result: "failed"`):**
+```json
+{ "reason": "<human note>", "result": "failed", "error": "<WalletError code>" }
+```
+
+**Data-integrity guard (`result: "not_reconstructible"`):**
+```json
+{ "reason": "<human note>", "result": "not_reconstructible", "missingFields": ["winTxnId", "winAmountMinor", "multiplier"] }
+```
+`missingFields` is an array containing only the field names that were NULL on the row
+(one, two, or all three of `winTxnId`, `winAmountMinor`, `multiplier`).
+
+**Bet not found (`result: "not_found"`):**
+```json
+{ "reason": "<human note>", "result": "not_found" }
+```
+
+**Wrong state (`result: "rejected_state"`):**
+```json
+{ "reason": "<human note>", "result": "rejected_state", "state": "<actual BetState>" }
+```
+
+**Operator client missing (`result: "operator_unavailable"`):**
+```json
+{ "reason": "<human note>", "result": "operator_unavailable", "operatorId": "<id>" }
+```
+
+**Transition error after operator credited (`result: "transition_error"`):**
+```json
+{ "reason": "<human note>", "result": "transition_error", "operatorTxnId": "<op-ref>" }
+```
+This is a data-integrity event: the player IS credited on the operator side but the
+`bet_log` row did not move to `SETTLED`. The `operatorTxnId` confirms what was issued.
+
+**Unexpected server error (`result: "internal_error"`):**
+```json
+{ "result": "internal_error" }
+```
+`reason` is absent on this branch (the error occurred before or outside the normal
+action flow); check server logs for `[admin] force_credit: unexpected error:`.
+
+> The 400 `INVALID_REQUEST` path does **not** write an audit row (pre-validation; see
+> §6.3 for the full note).
 
 ---
 
