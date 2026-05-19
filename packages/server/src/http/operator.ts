@@ -1,26 +1,62 @@
 /**
- * Operator-facing HTTP router — Task 3.3 Phase 3 stub.
+ * Operator-facing HTTP router — Task 3.3 Phase 3 stub, extended in Task 6.2.
  *
- * Mounts ONE route: POST /sessions/:sessionId/terminate
+ * Mounts routes:
+ *   - POST /sessions/:sessionId/terminate   (Task 3.3 — UNCHANGED)
+ *   - GET  /games                           (Task 6.2 — signed, reads from req.operator)
  *
  * This router is mounted at /op/v1 in index.ts, AFTER the
  * verifyOperatorSignature middleware, which guarantees req.operator is set.
  *
- * Phase 6 will add the rest of the backoffice routes.
+ * The deps parameter (Task 6.2) carries betLog + registry + walletClientCache
+ * so that Phase 6.3/6.4 routes can land without changing the function signature.
+ * The terminate handler (Task 3.3) does NOT use deps — it imports the seamed
+ * singletons (getSession, sessionSockets, etc.) directly, which is already
+ * correct and is left byte-unchanged.
  */
 
 import { Router } from 'express';
 import type { Request } from 'express';
-import { getSession } from '../store';
-import { sessionSockets, sendToSession } from '../ws/hub';
-import { currentRound } from '../game/round';
-import { voidOperatorBet } from '../game/bets';
-import type { OperatorAuthedRequest } from './middleware/verify-operator-signature';
+import { getSession } from '../store.js';
+import { sessionSockets, sendToSession } from '../ws/hub.js';
+import { currentRound } from '../game/round.js';
+import { voidOperatorBet } from '../game/bets.js';
+import type { OperatorAuthedRequest } from './middleware/verify-operator-signature.js';
+import type { BetLog, OperatorRegistry } from '@crash/wallet';
+import type { WalletClientCache } from '../wallet/client-cache.js';
 
-export function createOperatorRouter(): Router {
+// ---------------------------------------------------------------------------
+// Deps
+// ---------------------------------------------------------------------------
+
+/**
+ * Dependencies injected into the operator router.
+ *
+ * Phase 6.3 read routes (bets, rounds, transactions, players, financial/summary)
+ * will use deps.betLog and deps.registry.
+ * Phase 6.4 mutating routes (durable terminate, player lock/unlock) will use
+ * deps.walletClientCache.
+ *
+ * The Phase-3.3 terminate handler does not use deps — it imports singletons
+ * directly. This is intentional: adding deps would require threaded refactors
+ * across tests and provides no functional benefit for that one route. Phase 6.4
+ * will extend terminate in-place without touching the Phase-3.3 core logic.
+ */
+export interface OperatorRouterDeps {
+  betLog: BetLog;
+  registry: OperatorRegistry;
+  walletClientCache: WalletClientCache;
+}
+
+// ---------------------------------------------------------------------------
+// Router factory
+// ---------------------------------------------------------------------------
+
+export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   const router = Router();
 
-  // POST /op/v1/sessions/:sessionId/terminate
+  // ─── POST /op/v1/sessions/:sessionId/terminate (Task 3.3 — UNCHANGED) ─────
+
   router.post('/sessions/:sessionId/terminate', async (req: Request, res) => {
     try {
       // req.operator is guaranteed by the verifyOperatorSignature middleware mounted
@@ -95,6 +131,47 @@ export function createOperatorRouter(): Router {
         res.status(500).json({ error: { code: 'INTERNAL', message: 'terminate failed' } });
       }
     }
+  });
+
+  // ─── GET /op/v1/games (Task 6.2 — spec §3.2) ────────────────────────────────
+  //
+  // Signed route (verifyOperatorSignature runs before this router).
+  // Returns the games available to the calling operator, sourced entirely from
+  // req.operator (already verified and attached by the auth middleware).
+  //
+  // Data notes:
+  //   - rtpVariant: per-operator setting stored in the operators table.
+  //   - enabled: always true — per-operator-game disable is a Phase-future
+  //     feature (requires a per-operator-game config table). Noted in spec §4.9.
+  //   - minBetMinor / maxBetMinor: operator-wide values fanned out per currency.
+  //     The operator model stores a single min/max (not per-currency). This is an
+  //     honest representation of the current data model; per-currency limits are
+  //     a Phase-future addition.
+
+  router.get('/games', (req: Request, res) => {
+    const op = (req as OperatorAuthedRequest).operator;
+
+    // Fan out min/maxBetMinor per currency. The operator model has a single
+    // operator-wide min/max — fan it out across all enabled currencies.
+    const minBetMinor: Record<string, number> = {};
+    const maxBetMinor: Record<string, number> = {};
+    for (const currency of op.currencies) {
+      minBetMinor[currency] = op.minBetMinor;
+      maxBetMinor[currency] = op.maxBetMinor;
+    }
+
+    res.json({
+      games: [
+        {
+          gameId: 'galaxy-crash',
+          name: 'Galaxy Crash',
+          rtpVariant: op.rtpVariant,
+          enabled: true, // per-operator-game disable is Phase-future (no per-game table in v1)
+          minBetMinor,
+          maxBetMinor,
+        },
+      ],
+    });
   });
 
   return router;

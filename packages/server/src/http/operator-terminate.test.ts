@@ -231,7 +231,7 @@ beforeAll(async () => {
   testApp.use(
     '/op/v1',
     verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-    createOperatorRouter(),
+    createOperatorRouter({ betLog, registry, walletClientCache }),
   );
 });
 

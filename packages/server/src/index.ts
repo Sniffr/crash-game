@@ -49,13 +49,24 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 initThemeLoader();
 
 // ─── Operator API (must be BEFORE registerPublicRoutes, which adds the SPA * fallback) ──
+
+// /op/v1/health is PUBLIC per spec §3.1 — mounted BEFORE verifyOperatorSignature
+// so it bypasses the auth middleware entirely. It must live here in index.ts
+// (not inside createOperatorRouter) because the auth is wired at the mount level
+// with app.use('/op/v1', verifyOperatorSignature(...), router) — any route inside
+// the router is behind that middleware. A separate app.get() registered first
+// takes priority.
+app.get('/op/v1/health', (_req, res) => {
+  res.json({ ok: true, version: '1.0.0', gamesAvailable: ['galaxy-crash'] });
+});
+
 // getSignedPath uses req.originalUrl (full external path) because this router is
 // sub-mounted at /op/v1 — req.path would be router-relative and would NOT match
 // the path the operator signed (per the Task 2.1 TODO/spec §4.2 note).
 app.use(
   '/op/v1',
   verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-  createOperatorRouter(),
+  createOperatorRouter({ betLog, registry, walletClientCache }),
 );
 
 // ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──
