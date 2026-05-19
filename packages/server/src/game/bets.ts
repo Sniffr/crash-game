@@ -133,6 +133,10 @@ export async function tryCashoutBet(
         deps.onWinFailed?.(failedRow);
       }
 
+      // Intentionally NO balanceMinor here: the /win call never happened so the
+      // operator hasn't credited the player yet. The client should keep showing
+      // the last-known balance (post-debit from /bet). Adding a stale balance
+      // would be incorrect — the win credit will arrive via Task 4.2 force-credit.
       sendToSession(bet.playerId, {
         type: 'cashout_pending',
         data: {
@@ -161,7 +165,7 @@ export async function tryCashoutBet(
     const winAmountMinor = Math.round(bet.amountMinor * multiplier);
 
     try {
-      await cashOutOperatorBet(
+      const cashoutResult = await cashOutOperatorBet(
         { walletClient: client, betLog: deps.betLog, onWinFailed: deps.onWinFailed },
         {
           betId: bet.betId,
@@ -192,9 +196,16 @@ export async function tryCashoutBet(
         },
       });
 
+      // Include post-credit balanceMinor so the iframe header updates live
       sendToSession(bet.playerId, {
         type: 'cashout_success',
-        data: { multiplier, winAmountMinor, currency: bet.currency, source },
+        data: {
+          multiplier,
+          winAmountMinor,
+          currency: cashoutResult.currency,
+          source,
+          balanceMinor: cashoutResult.balanceMinor,
+        },
       });
     } catch (err) {
       // WalletError (after retries exhausted) or other error
@@ -208,6 +219,9 @@ export async function tryCashoutBet(
       // Note: cashOutOperatorBet already called deps.onWinFailed before rethrowing.
       // Do NOT call it again here — that would fire two alerts per WIN_FAILED (Phase 4.1).
 
+      // Intentionally NO balanceMinor here: the /win call failed so the operator
+      // has NOT credited the player. Keep showing the post-debit balance from /bet.
+      // Task 4.2 force-credit will eventually resolve this and can send a fresh balance.
       sendToSession(bet.playerId, {
         type: 'cashout_pending',
         data: {
@@ -276,12 +290,19 @@ export interface PlaceOperatorBetInput {
   autoCashout?: number;
 }
 
+/** Return type for placeOperatorBet — surfaces the post-debit balance for the WS frame. */
+export interface PlaceOperatorBetResult {
+  row: BetRow;
+  balanceMinor: number;
+  currency: string;
+}
+
 /**
  * Place an operator-backed bet.
  *
  * 1. betLog.create({...}) → row state PENDING
  * 2. walletClient.bet({...}) — the client handles its own retry/backoff per spec §8
- * 3a. success → betLog.transition(betId,'bet_accepted',{betOpTxnId: resp.operatorTxnId}) → ARMED; return the ARMED BetRow
+ * 3a. success → betLog.transition(betId,'bet_accepted',{betOpTxnId: resp.operatorTxnId}) → ARMED; return the ARMED BetRow + post-debit balanceMinor + currency
  * 3b. WalletError/WalletNetworkError → betLog.transition(betId,'bet_rejected',{errorCode: err.code}) → VOIDED; rethrow the WalletError
  *
  * No operator balance is ever mutated locally.
@@ -290,7 +311,7 @@ export interface PlaceOperatorBetInput {
 export async function placeOperatorBet(
   deps: OperatorBetDeps,
   input: PlaceOperatorBetInput,
-): Promise<BetRow> {
+): Promise<PlaceOperatorBetResult> {
   const { walletClient, betLog } = deps;
 
   // Step 1: create PENDING log entry
@@ -319,10 +340,11 @@ export async function placeOperatorBet(
       placedAt: Math.floor(Date.now() / 1000),
     });
 
-    // Step 3a: success → ARMED
-    return betLog.transition(input.betId, 'bet_accepted', {
+    // Step 3a: success → ARMED; surface post-debit balance for the WS frame
+    const row = betLog.transition(input.betId, 'bet_accepted', {
       betOpTxnId: resp.operatorTxnId,
     });
+    return { row, balanceMinor: resp.balanceMinor, currency: resp.currency };
   } catch (err) {
     // Step 3b: discriminate confirmed-rejection vs ambiguous failure.
     //
@@ -364,13 +386,20 @@ export interface CashOutOperatorBetInput {
   settledAt: number;      // unix seconds
 }
 
+/** Return type for cashOutOperatorBet — surfaces the post-credit balance for the WS frame. */
+export interface CashOutOperatorBetResult {
+  row: BetRow;
+  balanceMinor: number;
+  currency: string;
+}
+
 /**
  * Cash out an operator-backed bet.
  *
  * Pre: bet is ARMED or FLYING (the round started). Transition path:
  *   betLog.transition(betId,'cashout_requested') → SETTLING
  *   walletClient.win({...})  (client retries internally per §8)
- *   success → transition(betId,'win_settled',{...}) → SETTLED; return SETTLED BetRow
+ *   success → transition(betId,'win_settled',{...}) → SETTLED; return SETTLED BetRow + post-credit balanceMinor + currency
  *   WalletError after client exhausted retries → transition(betId,'win_failed',{...}) → WIN_FAILED;
  *      call deps.onWinFailed?.(row) (else console.error); rethrow the WalletError.
  *      DO NOT credit the player locally. DO NOT loop forever.
@@ -380,7 +409,7 @@ export interface CashOutOperatorBetInput {
 export async function cashOutOperatorBet(
   deps: OperatorBetDeps,
   input: CashOutOperatorBetInput,
-): Promise<BetRow> {
+): Promise<CashOutOperatorBetResult> {
   const { walletClient, betLog } = deps;
 
   // Transition to SETTLING, persisting winTxnId as the idempotency key BEFORE
@@ -404,13 +433,14 @@ export async function cashOutOperatorBet(
       settledAt: input.settledAt,
     });
 
-    // Success → SETTLED
-    return betLog.transition(input.betId, 'win_settled', {
+    // Success → SETTLED; surface post-credit balance for the WS frame
+    const row = betLog.transition(input.betId, 'win_settled', {
       winTxnId: input.winTxnId,
       winOpTxnId: resp.operatorTxnId,
       winAmountMinor: input.winAmountMinor,
       multiplier: input.multiplier,
     });
+    return { row, balanceMinor: resp.balanceMinor, currency: resp.currency };
   } catch (err) {
     // Client exhausted its retries — transition to WIN_FAILED
     if (err instanceof WalletError) {

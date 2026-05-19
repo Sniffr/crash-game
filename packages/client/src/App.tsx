@@ -458,6 +458,14 @@ export default function App() {
         });
         break;
 
+      case 'cashout_pending':
+        // No balanceMinor in this frame by design: the /win call failed or the
+        // operator was unavailable, so no credit has happened yet. Keep showing
+        // the last-known post-debit balance. Task 4.2 force-credit will eventually
+        // resolve and can push a fresh balance.
+        flashToast('info', message.data?.message ?? 'Win pending — will be credited automatically');
+        break;
+
       case 'error':
         flashToast('loss', message.data?.message ?? 'Error');
         break;

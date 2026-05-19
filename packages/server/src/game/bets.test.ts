@@ -168,7 +168,7 @@ it('happy path: placeOperatorBet → ARMED, cashOutOperatorBet → SETTLED, bala
   const multiplier = 2.0;
 
   // Step 1: place bet
-  const armedRow = await placeOperatorBet(deps, {
+  const placeResult = await placeOperatorBet(deps, {
     operatorId,
     playerId,
     sessionId,
@@ -179,24 +179,32 @@ it('happy path: placeOperatorBet → ARMED, cashOutOperatorBet → SETTLED, bala
     betTxnId,
     gameId: 'galaxy-crash',
   });
+  const armedRow = placeResult.row;
 
   expect(armedRow.state).toBe('ARMED');
   expect(armedRow.betId).toBe(betId);
   expect(armedRow.betOpTxnId).toBeTruthy();
+  // Post-debit balance surfaced by placeOperatorBet: 100000 - 10000 = 90000
+  expect(placeResult.balanceMinor).toBe(90_000);
+  expect(placeResult.currency).toBe('EUR');
 
   // Step 2: cash out
-  const settledRow = await cashOutOperatorBet(deps, {
+  const cashoutResult = await cashOutOperatorBet(deps, {
     betId,
     winTxnId,
     multiplier,
     winAmountMinor,
     settledAt: Math.floor(Date.now() / 1000),
   });
+  const settledRow = cashoutResult.row;
 
   expect(settledRow.state).toBe('SETTLED');
   expect(settledRow.winOpTxnId).toBeTruthy();
   expect(settledRow.winAmountMinor).toBe(winAmountMinor);
   expect(settledRow.multiplier).toBe(multiplier);
+  // Post-credit balance surfaced by cashOutOperatorBet: 90000 + 20000 = 110000
+  expect(cashoutResult.balanceMinor).toBe(110_000);
+  expect(cashoutResult.currency).toBe('EUR');
 
   // Step 3: assert bet log is SETTLED
   const storedRow = betLog.getById(betId);
@@ -266,7 +274,7 @@ it('win retry: single /win 500 is retried by WalletClient and ultimately SETTLES
   const sessionId = 'sess-pid-2';
 
   // Place a bet for pid-2 (USD 100000)
-  const armedRow = await placeOperatorBet(deps, {
+  const placeResult = await placeOperatorBet(deps, {
     operatorId: 'op-test',
     playerId: 'pid-2',
     sessionId,
@@ -277,7 +285,7 @@ it('win retry: single /win 500 is retried by WalletClient and ultimately SETTLES
     betTxnId,
     gameId: 'galaxy-crash',
   });
-  expect(armedRow.state).toBe('ARMED');
+  expect(placeResult.row.state).toBe('ARMED');
 
   // Arm the one-shot win failure BEFORE calling cashOut.
   // The stub checks this env var lazily inside shouldFailNextWin().
@@ -285,7 +293,7 @@ it('win retry: single /win 500 is retried by WalletClient and ultimately SETTLES
 
   // The WalletClient (win policy: 6 attempts, backoff overridden to 0 via
   // the sleep no-op injected in beforeAll) will retry past the one 500.
-  const settledRow = await cashOutOperatorBet(deps, {
+  const cashoutResult = await cashOutOperatorBet(deps, {
     betId,
     winTxnId,
     multiplier: 3.0,
@@ -293,8 +301,8 @@ it('win retry: single /win 500 is retried by WalletClient and ultimately SETTLES
     settledAt: Math.floor(Date.now() / 1000),
   });
 
-  expect(settledRow.state).toBe('SETTLED');
-  expect(settledRow.winOpTxnId).toBeTruthy();
+  expect(cashoutResult.row.state).toBe('SETTLED');
+  expect(cashoutResult.row.winOpTxnId).toBeTruthy();
 
   // No win-failure callback should have been called
   expect(winFailedRows).toHaveLength(0);
@@ -490,7 +498,7 @@ it('SETTLING: winTxnId is persisted to betLog BEFORE the /win HTTP call complete
   };
 
   // Cash out using the intercepting client
-  const settledRow = await cashOutOperatorBet(winDeps, {
+  const cashoutResult = await cashOutOperatorBet(winDeps, {
     betId,
     winTxnId,
     multiplier: 2.0,
@@ -504,7 +512,7 @@ it('SETTLING: winTxnId is persisted to betLog BEFORE the /win HTTP call complete
   expect(preWinSnapshot!.winTxnId).toBe(winTxnId);
 
   // Post-condition: final row is SETTLED with the same winTxnId
-  expect(settledRow.state).toBe('SETTLED');
-  expect(settledRow.winTxnId).toBe(winTxnId);
-  expect(settledRow.winOpTxnId).toBeTruthy();
+  expect(cashoutResult.row.state).toBe('SETTLED');
+  expect(cashoutResult.row.winTxnId).toBe(winTxnId);
+  expect(cashoutResult.row.winOpTxnId).toBeTruthy();
 });

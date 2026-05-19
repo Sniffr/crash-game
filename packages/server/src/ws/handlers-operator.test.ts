@@ -257,10 +257,18 @@ describe('WS handler operator discrimination', () => {
     const balResp = await walletClient.balance({ playerId: PLAYER_ID, sessionId });
     expect(balResp.balance).toBe(90_000);
 
-    // bet_placed frame sent to the WS
+    // bet_placed frame sent to the WS — must include post-debit balanceMinor and currency
     expect(mockSafeSend).toHaveBeenCalledWith(
       fakeWs,
-      expect.objectContaining({ type: 'bet_placed', data: expect.objectContaining({ isOperator: true }) }),
+      expect.objectContaining({
+        type: 'bet_placed',
+        data: expect.objectContaining({
+          isOperator: true,
+          // Started at 100000, bet 10000 → post-debit balance 90000
+          balanceMinor: 90_000,
+          currency: CURRENCY,
+        }),
+      }),
     );
   });
 
@@ -323,6 +331,7 @@ describe('WS handler operator discrimination', () => {
     expect(balResp.balance).toBe(105_000);
 
     // cashout_success frame sent via sendToSession (not safeSend)
+    // Must include post-credit balanceMinor and currency so the iframe header updates live
     expect(mockSendToSession).toHaveBeenCalledWith(
       sessionId,
       expect.objectContaining({
@@ -330,6 +339,9 @@ describe('WS handler operator discrimination', () => {
         data: expect.objectContaining({
           multiplier: expect.any(Number),
           winAmountMinor: expect.any(Number),
+          // Started 100000, bet 5000 → 95000, win 10000 (5000*2.0) → 105000
+          balanceMinor: 105_000,
+          currency: 'USD',
         }),
       }),
     );
@@ -429,5 +441,72 @@ describe('WS handler operator discrimination', () => {
     const walletClient = walletClientCache.get(OPERATOR_ID)!;
     const balResp = await walletClient.balance({ playerId: PLAYER_ID, sessionId });
     expect(balResp.balance).toBe(90_000);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 6: cashout_pending intentionally omits balanceMinor
+  // ---------------------------------------------------------------------------
+
+  it('cashout_pending frame (operator paused at cashout) must NOT include balanceMinor', async () => {
+    const sessionId = 'op-session-5';
+    const round = makeBettingRound(6);
+    _internal__setCurrentRoundForTesting(round);
+
+    // Place the bet with the real (active) wallet client — use pid-1 (EUR), a pre-seeded stub player
+    mockGetSession.mockResolvedValueOnce({
+      sessionId,
+      displayName: 'lucky_falcon_42',
+      balance: INITIAL_BALANCE,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+      operatorId: OPERATOR_ID,
+      playerId: PLAYER_ID,
+      currency: CURRENCY,
+      balanceMinor: INITIAL_BALANCE,
+    });
+
+    await handleMessage(
+      fakeWs,
+      { type: 'place_bet', data: { sessionId, amountMinor: 5_000 } },
+      noop,
+    );
+    expect(round.bets).toHaveLength(1);
+    const bet = round.bets[0];
+    expect(betLog.getById(bet.betId!)?.state).toBe('ARMED');
+
+    // Simulate operator paused: rewire deps so walletClientCache returns null for the operator
+    const pausedCache = { get: (_id: string) => null } as unknown as WalletClientCache;
+    setOperatorWiringDeps({ walletClientCache: pausedCache, betLog });
+
+    // Switch to FLYING and cashout
+    const flyingRound = { ...round, phase: 'FLYING' as const, currentMultiplier: 1.5 };
+    flyingRound.bets = round.bets;
+    _internal__setCurrentRoundForTesting(flyingRound);
+
+    await handleMessage(
+      fakeWs,
+      { type: 'cashout', data: { sessionId } },
+      noop,
+    );
+
+    // Restore the real deps for subsequent tests
+    setOperatorWiringDeps({ walletClientCache, betLog });
+
+    // cashout_pending frame must be sent
+    expect(mockSendToSession).toHaveBeenCalledWith(
+      sessionId,
+      expect.objectContaining({
+        type: 'cashout_pending',
+        data: expect.objectContaining({ code: 'WIN_PENDING' }),
+      }),
+    );
+
+    // Critically: balanceMinor must NOT be present — the win never credited
+    const pendingCall = mockSendToSession.mock.calls.find(
+      ([sid, msg]) => sid === sessionId && (msg as { type: string }).type === 'cashout_pending',
+    );
+    expect(pendingCall).toBeDefined();
+    const pendingFrame = pendingCall![1] as { type: string; data: Record<string, unknown> };
+    expect(pendingFrame.data.balanceMinor).toBeUndefined();
   });
 });

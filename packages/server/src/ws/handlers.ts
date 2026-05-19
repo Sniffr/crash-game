@@ -234,7 +234,7 @@ export async function handlePlaceOperatorBet(
   const roundId = `rnd-${currentRound.roundNumber}`;
 
   try {
-    await placeOperatorBet(
+    const placeResult = await placeOperatorBet(
       { walletClient: client, betLog: deps.betLog },
       {
         operatorId: session.operatorId!,
@@ -270,7 +270,11 @@ export async function handlePlaceOperatorBet(
     attachSession(sessionId);
     sessionMeta.set(sessionId, { displayName: session.displayName });
 
-    safeSend(ws, { type: 'bet_placed', data: { bet, isOperator: true } });
+    // Include post-debit balanceMinor so the iframe header updates live
+    safeSend(ws, {
+      type: 'bet_placed',
+      data: { bet, isOperator: true, balanceMinor: placeResult.balanceMinor, currency: placeResult.currency },
+    });
     broadcast({
       type: 'new_bet',
       data: {
