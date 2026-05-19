@@ -39,7 +39,12 @@ export function fromMinor(minor: number, currency: string | undefined): string {
 /** Convert a decimal major-unit amount to integer minor units. */
 export function toMinor(amount: number, currency: string | undefined): number {
   const decimals = decimalsFor(currency);
-  return Math.round(amount * Math.pow(10, decimals));
+  const minor = Math.round(amount * Math.pow(10, decimals));
+  // Fail loud rather than silently corrupt: high-decimal currencies (e.g. ETH 18dp) need BigInt — not supported yet.
+  if (!Number.isSafeInteger(minor)) {
+    throw new RangeError(`toMinor: ${amount} ${currency ?? 'DEMO'} (${decimals}dp) exceeds safe integer range`);
+  }
+  return minor;
 }
 
 /**

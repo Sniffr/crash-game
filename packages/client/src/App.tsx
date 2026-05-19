@@ -10,7 +10,7 @@ import {
 } from './sounds';
 import { applyThemeCssVars, clearTheme, fetchServerTheme, hasUserOverride, loadTheme, readThemeFromFile, saveTheme } from './theme/loader';
 import { DEFAULT_THEME, tierColor as resolveTierColor, type Theme } from './theme/types';
-import { formatBalance, toMinor } from './lib/money';
+import { formatBalance, fromMinor, toMinor } from './lib/money';
 
 /**
  * In a production build the theme is whatever the server is serving from
@@ -367,7 +367,12 @@ export default function App() {
         }
         setHasBet(true);
         if (message.data.stats) setStats(message.data.stats);
-        flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
+        if (message.data.isOperator === true) {
+          // Operator frame: bet.amount is integer minor units; currency is top-level.
+          flashToast('info', `Bet placed · ${fromMinor(message.data.bet.amount, message.data.currency)}`);
+        } else {
+          flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
+        }
         break;
 
       case 'cashout_success':
@@ -381,7 +386,12 @@ export default function App() {
         }
         setHasBet(false);
         if (message.data.stats) setStats(message.data.stats);
-        flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
+        if (message.data.winAmountMinor != null) {
+          // Operator frame: no `profit` field; use winAmountMinor + currency.
+          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${fromMinor(message.data.winAmountMinor, message.data.currency)}`);
+        } else {
+          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
+        }
         break;
 
       case 'cashout':
