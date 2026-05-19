@@ -279,8 +279,10 @@ export async function handlePlaceOperatorBet(
       type: 'new_bet',
       data: {
         playerId: sessionId,
+        amount: amountMinor,
         amountMinor,
         currency: session.currency,
+        operatorId: session.operatorId,
         autoCashout,
         isBot: false,
         displayName: session.displayName,

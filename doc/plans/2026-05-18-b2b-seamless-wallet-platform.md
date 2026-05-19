@@ -676,9 +676,11 @@ What we expose to each casino. Scoped to that operator only.
   - `POST /limits` — patches operator's min/maxBet, bounded by studio-set ceilings (in operator config).
   - `POST /sessions/:sessionId/terminate` — moves the in-flight bet (if any) to ROLLBACK_PENDING, closes WS, posts a `session_terminated` event.
 
-**Verification:** Self-exclusion smoke; limit change reflected on next bet attempt.
+**Durable terminate requirement (owns the Phase 3.3 stub gap):** The Phase 3.3 stub closes the WS and voids in-flight bets but does NOT invalidate the session in the store, so a self-excluded player can refresh and reconnect with the same `?session=` token. Task 6.4 MUST fix this durably: `terminate` must delete or mark the session as `terminated` in the session store so that any subsequent WS `hello` or HTTP session lookup returns `session_invalid`. This makes RG self-exclusion durable across refresh/reconnect — closing the socket alone is insufficient (refresh-defeatable).
 
-**Definition of done:** Operator can enforce RG actions in real time.
+**Verification:** Self-exclusion smoke; limit change reflected on next bet attempt; after terminate, player refreshes with same `?session=` → WS `hello` returns `session_invalid` frame and no reconnect is possible.
+
+**Definition of done:** Operator can enforce RG actions in real time. Terminate invalidates the session in the store (delete or mark `terminated`) so a reconnect/refresh with the same `?session=` is rejected (server `hello` returns `session_invalid`); closing the socket alone is insufficient (Phase 3.3 stub was refresh-defeatable — this task makes RG self-exclusion durable).
 
 ---
 

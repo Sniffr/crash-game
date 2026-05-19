@@ -32,6 +32,9 @@ interface Bet {
   displayName?: string;
   profit?: number;
   cashoutMultiplier?: number;
+  operatorId?: string;
+  currency?: string;
+  amountMinor?: number;
 }
 
 interface SessionInfo {
@@ -408,18 +411,26 @@ export default function App() {
       case 'new_bet':
         setGameState((prev) => {
           if (prev.bets.some((b) => b.playerId === message.data.playerId)) return prev;
+          const isOperatorBet = !!message.data.isOperator;
           return {
             ...prev,
             bets: [
               ...prev.bets,
               {
                 playerId: message.data.playerId,
-                amount: message.data.amount,
+                // For operator bets, amount is absent — fall back to amountMinor so
+                // no consumer ever sees undefined/NaN; PlayerList formats via amountMinor.
+                amount: message.data.amount ?? message.data.amountMinor,
                 autoCashout: message.data.autoCashout,
                 cashedOut: false,
                 isBot: !!message.data.isBot,
                 botName: message.data.botName,
                 displayName: message.data.displayName,
+                ...(isOperatorBet ? {
+                  operatorId: message.data.operatorId,
+                  currency: message.data.currency,
+                  amountMinor: message.data.amountMinor,
+                } : {}),
               },
             ],
           };
