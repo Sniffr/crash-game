@@ -159,6 +159,32 @@ export interface FinancialRow {
   ngrMinor: number;
 }
 
+/**
+ * A single player session, derived by GROUP BY session_id over bet_log rows
+ * (operator-backoffice spec §6.1). There is NO sessions table in bet_log —
+ * sessions exist here only as groups of bet rows.
+ *
+ * Phase-future gaps:
+ *   - endedAt is the LAST-bet timestamp (MAX(created_at)) used as a proxy; there
+ *     is no persisted session-end timestamp in bet_log.
+ *   - currency is a deterministic pick (MIN(currency)); a session is normally
+ *     single-currency, but bet_log does not enforce that, so we pick one stably.
+ */
+export interface PlayerSessionSummary {
+  sessionId: string;
+  /** MIN(created_at) — first bet in the session (unix seconds). */
+  startedAt: number;
+  /** MAX(created_at) — last-bet timestamp; Phase-future proxy for session end (unix seconds). */
+  endedAt: number;
+  /** Deterministic pick: MIN(currency) across the session's bets. */
+  currency: string;
+  betCount: number;
+  /** SUM(amount_minor) across the session's bets. */
+  stakeMinor: number;
+  /** SUM(win_amount_minor) for SETTLED bets only. */
+  winMinor: number;
+}
+
 export interface FinancialFilter {
   operatorId?: string;
   currency?: string;
@@ -886,6 +912,86 @@ export class BetLog {
     if (rows.length === page.limit) {
       const last = rows[rows.length - 1]!;
       nextCursor = encodeCursor({ ts: last.createdAt, id: last.txnId });
+    }
+
+    return { rows, nextCursor };
+  }
+
+  /**
+   * List a player's sessions, derived by GROUP BY session_id over bet_log rows
+   * scoped to (operator_id, player_id). Operator-backoffice spec §6.1.
+   *
+   * Keyset: ORDER BY MAX(created_at) DESC, session_id DESC. The keyset column is
+   * an aggregate (MAX(created_at)), so — mirroring listRoundsFiltered — the cursor
+   * predicate goes in HAVING, not WHERE.
+   *
+   * nextCursor is null when fewer than `limit` rows are returned (last page).
+   *
+   * Phase-future gaps (see PlayerSessionSummary docs):
+   *   - endedAt = MAX(created_at) is the last-bet timestamp, a proxy for session
+   *     end (no persisted session-end column in bet_log).
+   *   - currency = MIN(currency) is a deterministic single-currency pick.
+   *   - winMinor counts SETTLED bets only (matches the financial WIN definition).
+   */
+  listSessionsByPlayer(
+    operatorId: string,
+    playerId: string,
+    page: { limit: number; cursor?: Cursor },
+  ): { rows: PlayerSessionSummary[]; nextCursor: string | null } {
+    const havingConds: string[] = [];
+    const havingParams: unknown[] = [];
+
+    // Keyset cursor on (MAX(created_at) DESC, session_id DESC) — aggregate keyset
+    // means the predicate lives in HAVING (mirrors listRoundsFiltered).
+    if (page.cursor) {
+      havingConds.push('(MAX(created_at) < ? OR (MAX(created_at) = ? AND session_id < ?))');
+      havingParams.push(page.cursor.ts, page.cursor.ts, page.cursor.id);
+    }
+
+    const having = havingConds.length > 0 ? `HAVING ${havingConds.join(' AND ')}` : '';
+
+    const sql = `
+      SELECT
+        session_id,
+        MIN(created_at) AS started_at,
+        MAX(created_at) AS ended_at,
+        MIN(currency)   AS currency,
+        COUNT(*)        AS bet_count,
+        SUM(amount_minor) AS stake_minor,
+        SUM(CASE WHEN state = 'SETTLED' THEN COALESCE(win_amount_minor, 0) ELSE 0 END) AS win_minor
+      FROM bet_log
+      WHERE operator_id = ? AND player_id = ?
+      GROUP BY session_id
+      ${having}
+      ORDER BY MAX(created_at) DESC, session_id DESC
+      LIMIT ?
+    `;
+
+    const allParams = [operatorId, playerId, ...havingParams, page.limit];
+    const raw = this.db.prepare(sql).all(...allParams) as Array<{
+      session_id: string;
+      started_at: number;
+      ended_at: number;
+      currency: string;
+      bet_count: number;
+      stake_minor: number;
+      win_minor: number;
+    }>;
+
+    const rows: PlayerSessionSummary[] = raw.map((r) => ({
+      sessionId: r.session_id,
+      startedAt: r.started_at,
+      endedAt: r.ended_at,
+      currency: r.currency,
+      betCount: r.bet_count,
+      stakeMinor: r.stake_minor ?? 0,
+      winMinor: r.win_minor ?? 0,
+    }));
+
+    let nextCursor: string | null = null;
+    if (rows.length === page.limit) {
+      const last = rows[rows.length - 1]!;
+      nextCursor = encodeCursor({ ts: last.endedAt, id: last.sessionId });
     }
 
     return { rows, nextCursor };

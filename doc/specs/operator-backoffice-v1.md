@@ -359,6 +359,8 @@ Allowed `groupBy` values: `'currency'` and/or `'day'`. **`'operator'` is not a v
 
 `from` and `to` are required (unix seconds, integer). `to` must be greater than `from`. Window cap: 365 days.
 
+Optional filter: `currency=<code>` narrows the report to a single currency (still operator-scoped). Omit it to report across all your enabled currencies.
+
 ```json
 {
   "from": 1715000000, "to": 1716000000,
