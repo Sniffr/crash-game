@@ -34,7 +34,7 @@
 
 import { Router } from 'express';
 import type { Request } from 'express';
-import { getSession } from '../store.js';
+import { getSession, deleteSession } from '../store.js';
 import { sessionSockets, sendToSession } from '../ws/hub.js';
 import { currentRound } from '../game/round.js';
 import { voidOperatorBet } from '../game/bets.js';
@@ -43,6 +43,7 @@ import { enforceTenantScope } from './middleware/tenant-scope.js';
 import { decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
 import type { BetLog, OperatorRegistry, BetState, Cursor } from '@crash/wallet';
 import type { WalletClientCache } from '../wallet/client-cache.js';
+import type { OperatorAudit } from './operator-audit.js';
 
 // Valid BetState values for ?state= filter validation — derived from the single
 // source of truth in state-machine.ts (mirrors admin.ts; prevents drift).
@@ -97,6 +98,9 @@ export interface OperatorRouterDeps {
   betLog: BetLog;
   registry: OperatorRegistry;
   walletClientCache: WalletClientCache;
+  /** Owns the operator_audit table. Every mutation on this surface is recorded
+   *  best-effort (record() never throws). Reads are NOT audited. (spec §2.6) */
+  operatorAudit: OperatorAudit;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +110,72 @@ export interface OperatorRouterDeps {
 export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   const router = Router();
 
-  // ─── POST /op/v1/sessions/:sessionId/terminate (Task 3.3 — UNCHANGED) ─────
+  // ─── Shared durable-terminate core (Task 6.4) ────────────────────────────
+  //
+  // The per-session terminate effects (spec §7.1): void in-flight bets → send
+  // session_terminated frame → close sockets (code 4001) → DELETE the session
+  // from the store (durable invalidation — a reconnect with the same token now
+  // finds no row → session_invalid). Extracted so the §6.3 player-lock route
+  // reuses the IDENTICAL durable logic.
+  //
+  // Tolerates an already-gone session: if getSession returns null (e.g. a stale
+  // bet_log session_id whose live session has expired or was already terminated),
+  // there are no in-flight bets / sockets / row to act on — it no-ops gracefully.
+  // NOTE: callers MUST do their own ownership / 404-no-leak check BEFORE calling
+  // this; it does not re-verify tenancy.
+  async function terminateOneSession(
+    sessionId: string,
+    operatorId: string,
+    reason: string,
+    message: string,
+  ): Promise<void> {
+    // Void in-flight operator bets for this session. currentRound.bets holds the
+    // in-memory bets; operator bets have operatorId + betId. Mark cashedOut = true
+    // BEFORE awaiting rollback to prevent a double-handle race with the auto-cashout
+    // loop or crash handler. The b.operatorId === operatorId guard makes tenant
+    // safety LOCAL (defense-in-depth) rather than relying solely on the caller
+    // having proven session ownership.
+    const liveBets = (currentRound?.bets ?? []).filter(
+      (b) => b.playerId === sessionId && b.operatorId === operatorId && !b.cashedOut,
+    );
+
+    for (const bet of liveBets) {
+      bet.cashedOut = true;
+      if (bet.betId) {
+        try {
+          await voidOperatorBet(bet.betId, 'manual_void');
+        } catch (err) {
+          // RG enforcement: a bet-void failure must NOT block terminating the
+          // session. The betLog row stays non-terminal and the Phase 1.7 recovery
+          // worker re-drives it. Log and continue closing the socket.
+          console.error('[operator] terminate: voidOperatorBet threw; continuing socket close', { betId: bet.betId, err });
+        }
+      }
+    }
+
+    // Send the session_terminated frame to all the session's WS connections, then
+    // close the sockets with code 4001 and clean up the map.
+    sendToSession(sessionId, {
+      type: 'session_terminated',
+      data: { reason, message },
+    });
+
+    const sockets = sessionSockets.get(sessionId);
+    if (sockets) {
+      for (const ws of sockets) {
+        ws.close(4001, 'session_terminated');
+      }
+      sessionSockets.delete(sessionId);
+    }
+
+    // Durable invalidation: delete the session row so a reconnect with the same
+    // token finds no session → session_invalid (Phase 3.3 carryover fix — closing
+    // the socket alone was refresh-defeatable). deleteSession is a no-op for an
+    // already-absent session.
+    await deleteSession(sessionId);
+  }
+
+  // ─── POST /op/v1/sessions/:sessionId/terminate (spec §7.1 — durable, audited) ─
 
   router.post('/sessions/:sessionId/terminate', async (req: Request, res) => {
     try {
@@ -121,10 +190,11 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
       const terminateReason = typeof body.reason === 'string' ? body.reason : 'operator_terminated';
       const terminateMessage = typeof body.message === 'string' ? body.message : 'Session closed by operator.';
 
-      // 1. Look up the session
+      // Look up the session.
       const session = await getSession(sessionId);
 
-      // 2. 404 for missing, demo, and cross-tenant sessions — never leak existence
+      // 404 for missing, demo, and cross-tenant sessions — never leak existence.
+      // No audit on the denied path (no body change, no noise).
       if (
         !session ||
         !session.operatorId ||
@@ -136,45 +206,17 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
         return;
       }
 
-      // 3. Void in-flight operator bets for this session.
-      //    currentRound.bets contains in-memory bets; operator bets have operatorId + betId.
-      //    We mark each bet.cashedOut = true BEFORE awaiting rollback to prevent a
-      //    double-handle race with the auto-cashout loop or crash handler.
-      const liveBets = (currentRound?.bets ?? []).filter(
-        (b) => b.playerId === sessionId && b.operatorId && !b.cashedOut,
-      );
+      // Ownership confirmed — run the durable terminate core.
+      await terminateOneSession(sessionId, operator.operatorId, terminateReason, terminateMessage);
 
-      for (const bet of liveBets) {
-        // Mark cashedOut immediately so the round loop won't touch it again
-        bet.cashedOut = true;
-        if (bet.betId) {
-          try {
-            await voidOperatorBet(bet.betId, 'manual_void');
-          } catch (err) {
-            // RG enforcement: a bet-void failure must NOT block terminating the
-            // session. The betLog row stays non-terminal and the Phase 1.7 recovery
-            // worker re-drives it. Log and continue closing the socket.
-            console.error('[operator] terminate: voidOperatorBet threw; continuing socket close', { betId: bet.betId, err });
-          }
-        }
-      }
-
-      // 4. Send the session_terminated frame to all the session's WS connections,
-      //    then close the sockets with code 4001 and clean up the map.
-      sendToSession(sessionId, {
-        type: 'session_terminated',
-        data: { reason: terminateReason, message: terminateMessage },
+      // Audit on the SUCCESS path only (best-effort; never blocks the 204).
+      deps.operatorAudit.record({
+        operatorId: operator.operatorId,
+        action: 'session.terminate',
+        target: sessionId,
+        payload: { reason: terminateReason },
       });
 
-      const sockets = sessionSockets.get(sessionId);
-      if (sockets) {
-        for (const ws of sockets) {
-          ws.close(4001, 'session_terminated');
-        }
-        sessionSockets.delete(sessionId);
-      }
-
-      // 5. Respond 204 No Content
       res.status(204).end();
     } catch (err) {
       console.error('[operator] terminate unexpected error:', err);
@@ -720,6 +762,149 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
       gameId: 'galaxy-crash',
       rtpVariant: op.rtpVariant,
       enabled: true, // per-operator-game disable is Phase-future (no per-game table in v1)
+    });
+  });
+
+  // =========================================================================
+  // Task 6.4 — operator-scoped MUTATING endpoints (signed; operatorId forced;
+  // each audited on success to operator_audit — spec §2.6).
+  //
+  // Tenant isolation by construction: operatorId comes from req.operator; a
+  // body/query operatorId is never honoured. Cross-tenant == not-found
+  // (byte-identical), and denied attempts are NOT audited.
+  // =========================================================================
+
+  // ─── POST /op/v1/players/:playerId/lock (spec §6.3) ─────────────────────────
+  // RG / AML mass-terminate: operationally equivalent to calling terminate for
+  // every session this player has under this operator. Sessions are discovered
+  // from bet_log (scoped by operator_id + player_id), so a cross-tenant player
+  // yields an empty set → byte-identical 404 PLAYER_NOT_FOUND (no existence leak).
+  //
+  // v1 limitation: there is no persistent player_locks table — lock terminates
+  // current sessions but does not reject a future /launch (Phase-future).
+
+  router.post('/players/:playerId/lock', async (req: Request, res): Promise<void> => {
+    try {
+      const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
+      const { playerId } = req.params as { playerId: string };
+
+      const body = (req.body ?? {}) as { reason?: unknown; message?: unknown };
+      const reason = typeof body.reason === 'string' ? body.reason : 'operator_terminated';
+      const message = typeof body.message === 'string' ? body.message : 'Session closed by operator.';
+
+      // Discover the player's session universe, scoped to this operator.
+      const sessionIds = deps.betLog.listDistinctSessionIdsByPlayer(operatorId, playerId);
+
+      if (sessionIds.length === 0) {
+        // Unknown player OR cross-tenant player — byte-identical 404, no audit.
+        res.status(404).json({ error: { code: 'PLAYER_NOT_FOUND', message: `No player with id '${playerId}'` } });
+        return;
+      }
+
+      // Terminate each discovered session with the IDENTICAL durable logic.
+      // terminateOneSession tolerates already-gone sessions (getSession null → no-op).
+      for (const sessionId of sessionIds) {
+        await terminateOneSession(sessionId, operatorId, reason, message);
+      }
+
+      // Audit on success (best-effort; never blocks the 204).
+      deps.operatorAudit.record({
+        operatorId,
+        action: 'player.lock',
+        target: playerId,
+        payload: { reason },
+      });
+
+      res.status(204).end();
+    } catch (err) {
+      console.error('[operator] player lock unexpected error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: { code: 'INTERNAL', message: 'lock failed' } });
+      }
+    }
+  });
+
+  // ─── POST /op/v1/players/:playerId/unlock (spec §6.4) ───────────────────────
+  // No persistent lock state in v1, so this is a server-side NO-OP: it records a
+  // player.unlock audit row and returns 204. No 404 — the route is a forward-compat
+  // affordance for when a persistent player_locks table lands (Phase-future). The
+  // operator's own system is responsible for re-enabling launches for this player.
+
+  router.post('/players/:playerId/unlock', (req: Request, res): void => {
+    const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
+    const { playerId } = req.params as { playerId: string };
+
+    // No store mutation in v1 (no persistent lock state) — audit only.
+    deps.operatorAudit.record({
+      operatorId,
+      action: 'player.unlock',
+      target: playerId,
+    });
+
+    res.status(204).end();
+  });
+
+  // ─── POST /op/v1/limits (spec §9.2) ─────────────────────────────────────────
+  // Update bet bounds. Honest-subset enforcement: we validate currency-enabled +
+  // basic invariants only. There is NO per-operator "studio ceiling" field in the
+  // operator model, so LIMIT_OUT_OF_RANGE fires only on the basic invariants below
+  // (a real studio ceiling is Phase-future).
+  //
+  // Honest-gap (persistence): the operator model stores a SINGLE operator-wide
+  // min/max (not per-currency). Updating e.g. EUR limits therefore updates the
+  // operator-wide bound affecting ALL currencies. Per-currency persistence is
+  // Phase-future — the same fan-out gap as GET /limits and GET /games.
+
+  router.post('/limits', (req: Request, res): void => {
+    const op = (req as OperatorAuthedRequest).operator;
+    const operatorId = op.operatorId;
+
+    const body = (req.body ?? {}) as { currency?: unknown; minBetMinor?: unknown; maxBetMinor?: unknown };
+
+    // currency must be a string in the operator's enabled list.
+    if (typeof body.currency !== 'string' || !op.currencies.includes(body.currency)) {
+      res.status(422).json({ error: { code: 'CURRENCY_NOT_ENABLED', message: 'Currency is not enabled for this operator' } });
+      return;
+    }
+    const currency = body.currency;
+
+    // Basic invariants — honest subset (no studio ceiling exists in the model):
+    //   minBetMinor / maxBetMinor are non-negative integers, minBetMinor >= 1,
+    //   and maxBetMinor >= minBetMinor.
+    const minBetMinor = body.minBetMinor;
+    const maxBetMinor = body.maxBetMinor;
+    if (
+      !Number.isInteger(minBetMinor) ||
+      !Number.isInteger(maxBetMinor) ||
+      (minBetMinor as number) < 1 ||
+      (maxBetMinor as number) < 0 ||
+      (maxBetMinor as number) < (minBetMinor as number)
+    ) {
+      res.status(422).json({ error: { code: 'LIMIT_OUT_OF_RANGE', message: 'minBetMinor must be >= 1 and maxBetMinor >= minBetMinor (both non-negative integers)' } });
+      return;
+    }
+
+    // Persist operator-wide (per-currency persistence is Phase-future — see above).
+    deps.registry.update(operatorId, {
+      minBetMinor: minBetMinor as number,
+      maxBetMinor: maxBetMinor as number,
+    });
+
+    // Audit on success (best-effort; never blocks the 200).
+    deps.operatorAudit.record({
+      operatorId,
+      action: 'limits.update',
+      target: currency,
+      payload: { minBetMinor, maxBetMinor },
+    });
+
+    // Echo the GET /limits shape reflecting the new (operator-wide) values.
+    res.status(200).json({
+      limits: op.currencies.map((c) => ({
+        currency: c,
+        minBetMinor: minBetMinor as number,
+        maxBetMinor: maxBetMinor as number,
+      })),
     });
   });
 

@@ -34,6 +34,9 @@ vi.mock('../store.js', () => ({
   getSession: vi.fn(async (sessionId: string) => {
     return sessionStore.get(sessionId) ?? null;
   }),
+  deleteSession: vi.fn(async (sessionId: string) => {
+    sessionStore.delete(sessionId);
+  }),
   createSession: vi.fn(),
   createOperatorSession: vi.fn(),
   getStats: vi.fn(async () => ({})),
@@ -81,6 +84,7 @@ import { BetLog, OperatorRegistry } from '@crash/wallet';
 import { WalletClientCache } from '../wallet/client-cache.js';
 import { verifyOperatorSignature } from './middleware/verify-operator-signature.js';
 import { createOperatorRouter } from './operator.js';
+import { OperatorAudit } from './operator-audit.js';
 
 // ---------------------------------------------------------------------------
 // Signing helpers
@@ -274,7 +278,7 @@ beforeAll(async () => {
   testApp.use(
     '/op/v1',
     verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-    createOperatorRouter({ betLog, registry, walletClientCache }),
+    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit: new OperatorAudit(db) }),
   );
 
   // -------------------------------------------------------------------------

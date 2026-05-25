@@ -10,6 +10,7 @@ import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
+import { OperatorAudit } from './http/operator-audit';
 import { createAdminRouter } from './http/admin';
 import { AdminAudit, AdminUsers, isAdminRole } from './admin/admin-store';
 import * as bcrypt from 'bcryptjs';
@@ -33,6 +34,7 @@ const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
 const adminAudit = new AdminAudit(db);
+const operatorAudit = new OperatorAudit(db);
 const adminUsers = new AdminUsers(db);
 const revoked = new Set<string>();
 const walletClientCache = new WalletClientCache(registry, betLog);
@@ -66,7 +68,7 @@ app.get('/op/v1/health', (_req, res) => {
 app.use(
   '/op/v1',
   verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-  createOperatorRouter({ betLog, registry, walletClientCache }),
+  createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit }),
 );
 
 // ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──

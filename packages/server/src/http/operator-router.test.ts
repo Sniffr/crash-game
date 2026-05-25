@@ -36,6 +36,9 @@ vi.mock('../store.js', () => ({
   getSession: vi.fn(async (sessionId: string) => {
     return sessionStore.get(sessionId) ?? null;
   }),
+  deleteSession: vi.fn(async (sessionId: string) => {
+    sessionStore.delete(sessionId);
+  }),
   createSession: vi.fn(),
   createOperatorSession: vi.fn(),
   getStats: vi.fn(async () => ({})),
@@ -99,6 +102,7 @@ import { setOperatorWiringDeps } from '../game/operator-deps.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
 import { verifyOperatorSignature } from './middleware/verify-operator-signature.js';
 import { createOperatorRouter } from './operator.js';
+import { OperatorAudit } from './operator-audit.js';
 import { enforceTenantScope } from './middleware/tenant-scope.js';
 import type { OperatorAuthedRequest } from './middleware/verify-operator-signature.js';
 
@@ -244,7 +248,7 @@ beforeAll(async () => {
   testApp.use(
     '/op/v1',
     verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-    createOperatorRouter({ betLog, registry, walletClientCache }),
+    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit: new OperatorAudit(db) }),
   );
 });
 

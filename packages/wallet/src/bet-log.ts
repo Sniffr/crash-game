@@ -476,6 +476,23 @@ export class BetLog {
     return rows.map(rowToBetRow);
   }
 
+  /**
+   * Return the distinct session ids this player has bets under, scoped to
+   * (operator_id, player_id). Used by the operator-backoffice §6.3 player-lock
+   * route to discover the player's session universe for mass-terminate.
+   *
+   * Bounded result (sessions per player are few) — no pagination needed.
+   * Scoped by operator_id so cross-tenant callers get an empty array, which the
+   * route maps to a byte-identical 404 PLAYER_NOT_FOUND (no existence leak).
+   */
+  listDistinctSessionIdsByPlayer(operatorId: string, playerId: string): string[] {
+    const rows = this.stmt(
+      'list_distinct_sessions_by_player',
+      `SELECT DISTINCT session_id FROM bet_log WHERE operator_id = ? AND player_id = ?`,
+    ).all(operatorId, playerId) as Array<{ session_id: string }>;
+    return rows.map((r) => r.session_id);
+  }
+
   listByPlayer(
     operatorId: string,
     playerId: string,

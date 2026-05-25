@@ -29,6 +29,9 @@ vi.mock('../store.js', () => ({
   getSession: vi.fn(async (sessionId: string) => {
     return sessionStore.get(sessionId) ?? null;
   }),
+  deleteSession: vi.fn(async (sessionId: string) => {
+    sessionStore.delete(sessionId);
+  }),
   createSession: vi.fn(),
   createOperatorSession: vi.fn(),
   getStats: vi.fn(async () => ({})),
@@ -94,8 +97,10 @@ import { setOperatorWiringDeps } from '../game/operator-deps.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
 import { verifyOperatorSignature } from './middleware/verify-operator-signature.js';
 import { createOperatorRouter } from './operator.js';
+import { OperatorAudit } from './operator-audit.js';
 
 import { sessionSockets, sendToSession } from '../ws/hub.js';
+import { deleteSession } from '../store.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -159,6 +164,7 @@ let db: InstanceType<typeof Database>;
 let registry: OperatorRegistry;
 let betLog: BetLog;
 let walletClientCache: WalletClientCache;
+let operatorAudit: OperatorAudit;
 
 // Operator A credentials (resolved in beforeAll after registry.create())
 let OP_A_KEY: Buffer;
@@ -221,6 +227,7 @@ beforeAll(async () => {
 
   // 3. Build WalletClientCache + wire DI seam
   walletClientCache = new WalletClientCache(registry, betLog);
+  operatorAudit = new OperatorAudit(db);
   setOperatorWiringDeps({ walletClientCache, betLog });
 
   // 4. Build the test express app, replicating the /op/v1 mount from index.ts
@@ -231,7 +238,7 @@ beforeAll(async () => {
   testApp.use(
     '/op/v1',
     verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-    createOperatorRouter({ betLog, registry, walletClientCache }),
+    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit }),
   );
 });
 
@@ -330,6 +337,17 @@ describe('POST /op/v1/sessions/:sessionId/terminate', () => {
 
     // sessionSockets must no longer have this session
     expect(sessionSockets.has(sessionId)).toBe(false);
+
+    // DURABLE (Task 6.4): deleteSession must have been called with the sessionId,
+    // and the session row must be gone from the store (refresh-defeat fix).
+    expect(vi.mocked(deleteSession)).toHaveBeenCalledWith(sessionId);
+    expect(sessionStore.has(sessionId)).toBe(false);
+
+    // AUDIT (Task 6.4): a session.terminate row must be recorded for operator A.
+    const audit = operatorAudit.listByOperator(OPERATOR_A_ID);
+    const row = audit.find((a) => a.action === 'session.terminate' && a.target === sessionId);
+    expect(row).toBeDefined();
+    expect(row?.payload).toEqual({ reason: 'self_excluded' });
   });
 
   // ─── Test 2: valid terminate WITH an in-flight ARMED operator bet ───────────
@@ -446,10 +464,14 @@ describe('POST /op/v1/sessions/:sessionId/terminate', () => {
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('SESSION_NOT_FOUND');
 
-    // No sendToSession, no ws close
+    // No sendToSession, no ws close, no durable delete
     expect(vi.mocked(sendToSession)).not.toHaveBeenCalled();
     expect(fakeWs.close).not.toHaveBeenCalled();
     expect(sessionSockets.has(sessionId)).toBe(true);
+    expect(vi.mocked(deleteSession)).not.toHaveBeenCalled();
+
+    // NO audit row for the denied cross-tenant attempt (under operator B).
+    expect(operatorAudit.listByOperator(OPERATOR_B_ID).length).toBe(0);
   });
 
   // ─── Test 4: demo session → 404 SESSION_NOT_FOUND ──────────────────────────
@@ -612,5 +634,184 @@ describe('POST /op/v1/sessions/:sessionId/terminate', () => {
       // Always restore deps so subsequent tests (if any) are unaffected
       setOperatorWiringDeps({ walletClientCache, betLog });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 6.4 — mutating routes: player lock/unlock + limits
+// ---------------------------------------------------------------------------
+
+/** Build signed headers for an arbitrary POST as operator A. */
+function signedPostA(path: string, body: object): Record<string, string> {
+  return buildSignedHeaders('POST', path, body, OP_A_KEY, OP_A_API_KEY);
+}
+
+/** Build signed headers for an arbitrary POST as operator B. */
+function signedPostB(path: string, body: object): Record<string, string> {
+  return buildSignedHeaders('POST', path, body, OP_B_KEY, OP_B_API_KEY);
+}
+
+/** Seed a bet_log row so listDistinctSessionIdsByPlayer finds the session. */
+function seedBet(operatorId: string, playerId: string, sessionId: string) {
+  betLog.create({
+    betId: `bet-${sessionId}-${crypto.randomUUID()}`,
+    operatorId,
+    playerId,
+    sessionId,
+    roundId: `rnd-${sessionId}`,
+    currency: CURRENCY,
+    amountMinor: 1_000,
+    betTxnId: crypto.randomUUID(),
+  });
+}
+
+describe('POST /op/v1/players/:playerId/lock (§6.3)', () => {
+  it('player with sessions → all sessions terminated (deleteSession per live session) + player.lock audit + 204', async () => {
+    const playerId = 'lock-player-1';
+    const s1 = 'lock-sess-1a';
+    const s2 = 'lock-sess-1b';
+    // bet_log rows discover the session universe
+    seedBet(OPERATOR_A_ID, playerId, s1);
+    seedBet(OPERATOR_A_ID, playerId, s2);
+    // live sessions in the store + sockets
+    makeOpASession(s1, { playerId });
+    makeOpASession(s2, { playerId });
+    const ws1 = makeFakeWs();
+    const ws2 = makeFakeWs();
+    sessionSockets.set(s1, new Set([ws1]));
+    sessionSockets.set(s2, new Set([ws2]));
+
+    const path = `/op/v1/players/${playerId}/lock`;
+    const body = { reason: 'self_excluded', message: 'locked' };
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+
+    expect(res.status).toBe(204);
+
+    // Each discovered live session was durably terminated.
+    expect(vi.mocked(deleteSession)).toHaveBeenCalledWith(s1);
+    expect(vi.mocked(deleteSession)).toHaveBeenCalledWith(s2);
+    expect(ws1.close).toHaveBeenCalledWith(4001, 'session_terminated');
+    expect(ws2.close).toHaveBeenCalledWith(4001, 'session_terminated');
+    expect(sessionStore.has(s1)).toBe(false);
+    expect(sessionStore.has(s2)).toBe(false);
+
+    // player.lock audit row
+    const audit = operatorAudit.listByOperator(OPERATOR_A_ID);
+    const row = audit.find((a) => a.action === 'player.lock' && a.target === playerId);
+    expect(row).toBeDefined();
+    expect(row?.payload).toEqual({ reason: 'self_excluded' });
+  });
+
+  it('player with no bet_log sessions → 404 PLAYER_NOT_FOUND, no audit', async () => {
+    const playerId = 'lock-player-unknown';
+    const path = `/op/v1/players/${playerId}/lock`;
+    const body = {};
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('PLAYER_NOT_FOUND');
+    const audit = operatorAudit.listByOperator(OPERATOR_A_ID);
+    expect(audit.find((a) => a.action === 'player.lock' && a.target === playerId)).toBeUndefined();
+  });
+
+  it('cross-tenant: operator B locks operator A player → 404 PLAYER_NOT_FOUND (byte-identical), no audit for B', async () => {
+    const playerId = 'lock-player-xtenant';
+    seedBet(OPERATOR_A_ID, playerId, 'xtenant-sess');
+    const path = `/op/v1/players/${playerId}/lock`;
+    const body = {};
+    const res = await request(testApp).post(path).set(signedPostB(path, body)).send(body);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('PLAYER_NOT_FOUND');
+    expect(res.body.error.message).toBe(`No player with id '${playerId}'`);
+    // no terminate side effects, no audit under B
+    expect(vi.mocked(deleteSession)).not.toHaveBeenCalled();
+    expect(operatorAudit.listByOperator(OPERATOR_B_ID).find((a) => a.action === 'player.lock')).toBeUndefined();
+  });
+
+  it('401 without a valid signature (signed mount smoke test)', async () => {
+    const playerId = 'lock-player-auth';
+    const path = `/op/v1/players/${playerId}/lock`;
+    const body = {};
+    const headers = signedPostA(path, body);
+    headers['X-Signature'] = 'deadbeef'.repeat(8);
+    const res = await request(testApp).post(path).set(headers).send(body);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /op/v1/players/:playerId/unlock (§6.4)', () => {
+  it('204 + player.unlock audit, no store mutation', async () => {
+    const playerId = 'unlock-player-1';
+    const path = `/op/v1/players/${playerId}/unlock`;
+    const body = {};
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+
+    expect(res.status).toBe(204);
+    expect(vi.mocked(deleteSession)).not.toHaveBeenCalled();
+    expect(vi.mocked(sendToSession)).not.toHaveBeenCalled();
+
+    const row = operatorAudit.listByOperator(OPERATOR_A_ID).find((a) => a.action === 'player.unlock' && a.target === playerId);
+    expect(row).toBeDefined();
+  });
+
+  it('401 without a valid signature', async () => {
+    const playerId = 'unlock-player-auth';
+    const path = `/op/v1/players/${playerId}/unlock`;
+    const body = {};
+    const headers = signedPostA(path, body);
+    headers['X-Signature'] = 'deadbeef'.repeat(8);
+    const res = await request(testApp).post(path).set(headers).send(body);
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('POST /op/v1/limits (§9.2)', () => {
+  const path = '/op/v1/limits';
+
+  it('happy path persists + limits.update audit + 200 echo', async () => {
+    const body = { currency: CURRENCY, minBetMinor: 50, maxBetMinor: 200_000 };
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body.limits).toContainEqual({ currency: CURRENCY, minBetMinor: 50, maxBetMinor: 200_000 });
+
+    // Persisted operator-wide on the registry.
+    const op = registry.getById(OPERATOR_A_ID)!;
+    expect(op.minBetMinor).toBe(50);
+    expect(op.maxBetMinor).toBe(200_000);
+
+    const row = operatorAudit.listByOperator(OPERATOR_A_ID).find((a) => a.action === 'limits.update' && a.target === CURRENCY);
+    expect(row).toBeDefined();
+    expect(row?.payload).toEqual({ minBetMinor: 50, maxBetMinor: 200_000 });
+  });
+
+  it('422 CURRENCY_NOT_ENABLED for a currency not enabled', async () => {
+    const body = { currency: 'JPY', minBetMinor: 50, maxBetMinor: 200_000 };
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('CURRENCY_NOT_ENABLED');
+  });
+
+  it('422 LIMIT_OUT_OF_RANGE when max < min', async () => {
+    const body = { currency: CURRENCY, minBetMinor: 500, maxBetMinor: 100 };
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('LIMIT_OUT_OF_RANGE');
+  });
+
+  it('422 LIMIT_OUT_OF_RANGE when minBetMinor < 1', async () => {
+    const body = { currency: CURRENCY, minBetMinor: 0, maxBetMinor: 100 };
+    const res = await request(testApp).post(path).set(signedPostA(path, body)).send(body);
+    expect(res.status).toBe(422);
+    expect(res.body.error.code).toBe('LIMIT_OUT_OF_RANGE');
+  });
+
+  it('401 without a valid signature', async () => {
+    const body = { currency: CURRENCY, minBetMinor: 50, maxBetMinor: 200_000 };
+    const headers = signedPostA(path, body);
+    headers['X-Signature'] = 'deadbeef'.repeat(8);
+    const res = await request(testApp).post(path).set(headers).send(body);
+    expect(res.status).toBe(401);
   });
 });

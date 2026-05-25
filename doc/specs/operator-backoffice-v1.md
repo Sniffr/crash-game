@@ -94,6 +94,10 @@ X-RateLimit-Remaining: 47
 X-RateLimit-Reset:     1716000060
 ```
 
+### 2.6 Audit
+
+Every **mutation** on this surface is recorded to the `operator_audit` table as a row `{ operatorId, action, target, payload, at }` (action ∈ `session.terminate`, `player.lock`, `player.unlock`, `limits.update`). Audit writes are best-effort (they never block or fail the mutation) and are scoped per operator. Denied attempts (cross-tenant / not-found, which return a `404` with no existence leak) are **not** audited. **Reads are not audited.**
+
 ---
 
 ## 3. Health & catalogue (unauthenticated allowed)
@@ -295,11 +299,15 @@ Response `204`.
 
 Returns `404 PLAYER_NOT_FOUND` if the player has no sessions under your operator.
 
+**Audit:** on success, writes an `operator_audit` row (action `player.lock`, target = playerId). A `404` denied attempt is not audited (§2.6).
+
 ### 6.4 `POST /op/v1/players/:playerId/unlock`
 
 Intended reversal of §6.3. Response `204`.
 
 **v1 behaviour:** Because there is no persistent lock state (see §6.3 note), this endpoint is a no-op in v1 — it returns `204` without taking any server-side action. Its presence in the API preserves the unlock affordance for forward compatibility when persistent player locks are added. Your own system should re-enable session launches for this player.
+
+**Audit:** writes an `operator_audit` row (action `player.unlock`, target = playerId) even though no server-side state changes (§2.6).
 
 ---
 
@@ -329,7 +337,9 @@ Response `204`.
 
 **After terminate:** any subsequent WebSocket `hello` with the same `sessionId` will receive `{ type: "session_invalid", data: { reason: "not found" } }` from the server (the session row has been deleted from the store). The player must obtain a new session token from your launch flow.
 
-> _**Phase 3.3 note:** The Phase 3.3 stub shipped this endpoint closing the WebSocket and voiding in-flight bets but NOT deleting the session from the store (refresh-defeatable). Phase 6.4 makes terminate durable by adding the `deleteSession` call per the requirements above. Integrators testing against the running server after Phase 6.4 should see the durable behaviour._
+**Audit:** on success (ownership confirmed), writes an `operator_audit` row (action `session.terminate`, target = sessionId, payload `{ reason }`). The cross-tenant / not-found `404` is not audited (§2.6).
+
+> _**Phase 3.3 note (resolved):** The Phase 3.3 stub shipped this endpoint closing the WebSocket and voiding in-flight bets but NOT deleting the session from the store (refresh-defeatable). **The durable fix has LANDED in Phase 6.4:** terminate now calls `deleteSession` after closing the sockets, so a reconnect with the same token finds no session row and receives `session_invalid`. Integrators testing against the running server now see the durable behaviour._
 
 ### 7.2 `GET /op/v1/sessions/:sessionId`
 
@@ -454,8 +464,16 @@ Update your bet bounds within studio-allowed ceilings.
 { "currency": "EUR", "minBetMinor": 50, "maxBetMinor": 200000 }
 ```
 Errors:
-- `422 LIMIT_OUT_OF_RANGE` if outside studio ceiling for your operator.
+- `422 LIMIT_OUT_OF_RANGE` if outside the studio ceiling for your operator.
 - `422 CURRENCY_NOT_ENABLED` if currency not in your enabled list.
+
+Response `200` echoing the `GET /limits` shape with the updated values.
+
+**v1 enforcement (honest subset):** the operator model has **no per-operator "studio ceiling" field**, so v1 enforces only what is real: `CURRENCY_NOT_ENABLED` (currency not in your enabled list) plus the basic invariants `minBetMinor >= 1`, `maxBetMinor >= minBetMinor`, both non-negative integers — these are the only triggers of `422 LIMIT_OUT_OF_RANGE` today. A true studio ceiling that caps how high an operator may raise its own bounds is **Phase-future**.
+
+**v1 persistence gap (operator-wide, not per-currency):** the operator model stores a **single operator-wide** `minBetMinor`/`maxBetMinor`, not a per-currency map. Updating e.g. EUR limits therefore updates the operator-wide bound affecting **all** currencies. Per-currency persistence is Phase-future — the same fan-out gap as `GET /limits` and `GET /games`.
+
+**Audit:** on success, writes an `operator_audit` row (action `limits.update`, target = currency, payload `{ minBetMinor, maxBetMinor }`) (§2.6).
 
 ### 9.3 `GET /op/v1/games/:gameId/config`
 Your per-game config (RTP variant, enabled). Currently only `galaxy-crash`. Read-only via this surface — RTP variant changes go through studio (us).
