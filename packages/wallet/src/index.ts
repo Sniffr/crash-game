@@ -6,6 +6,7 @@ export * from './bet-log.js';
 export * from './cursor.js';
 export * from './errors.js';
 export * from './client-types.js';
+export * from './adapter.js';
 export * from './client.js';
 export * from './recovery.js';
 export * from './alerter.js';

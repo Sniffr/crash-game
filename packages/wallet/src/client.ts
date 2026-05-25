@@ -14,6 +14,7 @@ import {
   walletErrorFromResponse,
 } from './errors.js';
 import { type BetLog, type IdempotencyEntry, type TxnKind, IdempotencyMismatchError } from './bet-log.js';
+import type { WalletAdapter, AdapterEndpoint } from './adapter.js';
 import type {
   AuthenticateRequest,
   AuthenticateResponse,
@@ -131,6 +132,11 @@ export interface WalletClientOptions {
    *  recorded outcome for the same txnId short-circuits the HTTP call and
    *  replays the recorded result. Pairs with the Task 1.7 recovery worker. */
   betLog?: BetLog;
+  /** When supplied, the client delegates the wire request/response translation
+   *  to this adapter (foreign protocol) instead of the built-in native path.
+   *  Injected by the server composition layer per operator.adapter (Task 7.1).
+   *  Undefined = native protocol (spec §4). */
+  adapter?: WalletAdapter;
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +151,7 @@ export class WalletClient {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly maxRollbackAttempts: number;
   private readonly betLog: BetLog | undefined;
+  private readonly adapter: WalletAdapter | undefined;
 
   constructor(operator: Operator, opts?: WalletClientOptions) {
     this.operator = operator;
@@ -154,6 +161,7 @@ export class WalletClient {
     this.sleep = opts?.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxRollbackAttempts = opts?.maxRollbackAttempts ?? 8;
     this.betLog = opts?.betLog;
+    this.adapter = opts?.adapter;
   }
 
   // -------------------------------------------------------------------------
@@ -162,38 +170,39 @@ export class WalletClient {
 
   authenticate(req: AuthenticateRequest): Promise<AuthenticateResponse> {
     return this.executeWithRetry('authenticate', (policy) =>
-      this.doRequest<AuthenticateResponse>(policy.path, policy.timeoutMs, req),
+      this.doRequest<AuthenticateResponse>('authenticate', policy.path, policy.timeoutMs, req),
     );
   }
 
   balance(req: BalanceRequest): Promise<BalanceResponse> {
     return this.executeWithRetry('balance', (policy) =>
-      this.doRequest<BalanceResponse>(policy.path, policy.timeoutMs, req),
+      this.doRequest<BalanceResponse>('balance', policy.path, policy.timeoutMs, req),
     );
   }
 
   bet(req: BetRequest): Promise<BetResponse> {
     return this.withIdempotency('bet', req.txnId, req, () =>
       this.executeWithRetry('bet', (policy) =>
-        this.doRequest<BetResponse>(policy.path, policy.timeoutMs, req)));
+        this.doRequest<BetResponse>('bet', policy.path, policy.timeoutMs, req)));
   }
 
   win(req: WinRequest): Promise<WinResponse> {
     return this.withIdempotency('win', req.txnId, req, () =>
       this.executeWithRetry('win', (policy) =>
-        this.doRequest<WinResponse>(policy.path, policy.timeoutMs, req)));
+        this.doRequest<WinResponse>('win', policy.path, policy.timeoutMs, req)));
   }
 
   rollback(req: RollbackRequest): Promise<RollbackResponse> {
     return this.withIdempotency('rollback', req.txnId, req, () =>
       this.executeWithRetry('rollback', (policy) =>
-        this.doRequest<RollbackResponse>(policy.path, policy.timeoutMs, req)));
+        this.doRequest<RollbackResponse>('rollback', policy.path, policy.timeoutMs, req)));
   }
 
   /** Fire-and-forget per spec §5.6/§8. Never throws to the caller. */
   async roundEnd(req: RoundEndRequest): Promise<void> {
     try {
       await this.doRequest<void>(
+        'roundEnd',
         ENDPOINT_POLICIES.roundEnd.path,
         ENDPOINT_POLICIES.roundEnd.timeoutMs,
         req,
@@ -353,18 +362,56 @@ export class WalletClient {
   // -------------------------------------------------------------------------
 
   private async doRequest<T>(
+    endpoint: AdapterEndpoint,
     path: string,
     timeoutMs: number,
     payload: unknown,
     isRoundEnd = false,
   ): Promise<T> {
+    // Timestamp and nonce — shared by both paths (same clock WalletClient uses).
+    const timestamp = this.nowSeconds();
+    const nonce = this.generateNonce();
+
+    // Adapter path: delegate wire encode + response decode to the foreign
+    // protocol. The fetch+timeout+network-error step is shared with native.
+    if (this.adapter) {
+      const wire = this.adapter.encodeRequest({
+        endpoint,
+        payload,
+        operator: this.operator,
+        timestamp,
+        nonce,
+      });
+
+      const res = await this.fetchWithTimeout(wire.url, {
+        method: wire.method,
+        headers: wire.headers,
+        // GET requests must not carry a body; otherwise send the foreign body.
+        body: wire.method === 'GET' ? undefined : wire.body,
+        timeoutMs,
+      });
+
+      const bodyText = await this.readBody(res, isRoundEnd);
+
+      // The adapter owns signature verification + canonical mapping + error
+      // throwing (WalletError subtypes), matching native semantics so the
+      // retry/idempotency layers behave identically.
+      return this.adapter.decodeResponse({
+        endpoint,
+        status: res.status,
+        headers: res.headers,
+        bodyText,
+        requestTimestamp: timestamp,
+        requestNonce: nonce,
+        operator: this.operator,
+      }) as T;
+    }
+
+    // ---- Native path (spec §4) — observably identical to pre-7.1 behavior ----
+
     // Step 1: Build body bytes
     const bodyStr = JSON.stringify(payload);
     const bodyBytes = Buffer.from(bodyStr);
-
-    // Step 2: Timestamp and nonce
-    const timestamp = this.nowSeconds();
-    const nonce = this.generateNonce();
 
     // Step 3: Sign the request per spec §4.2
     const signature = sign(
@@ -382,33 +429,15 @@ export class WalletClient {
     };
 
     // Step 5: Fetch with timeout via AbortController
-    const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), timeoutMs);
-
-    let res: Response;
-    try {
-      res = await this.fetchImpl(this.operator.walletBaseUrl + path, {
-        method: 'POST',
-        headers,
-        body: bodyStr,
-        signal: controller.signal,
-      });
-    } catch (err) {
-      // Network error or abort (timeout)
-      throw new WalletNetworkError(
-        err instanceof Error ? err.message : 'Network request failed',
-      );
-    } finally {
-      clearTimeout(timeoutHandle);
-    }
+    const res = await this.fetchWithTimeout(this.operator.walletBaseUrl + path, {
+      method: 'POST',
+      headers,
+      body: bodyStr,
+      timeoutMs,
+    });
 
     // Step 6: Read response body
-    let bodyText: string;
-    try {
-      bodyText = isRoundEnd && res.status === 204 ? '' : await res.text();
-    } catch (err) {
-      throw new WalletNetworkError('Failed to read response body');
-    }
+    const bodyText = await this.readBody(res, isRoundEnd);
 
     // Step 6 cont.: Verify response signature per spec §4.3
     // The response signing string uses the REQUEST's X-Timestamp.
@@ -453,5 +482,45 @@ export class WalletClient {
     }
 
     throw walletErrorFromResponse(res.status, parsedBody);
+  }
+
+  // -------------------------------------------------------------------------
+  // Shared transport primitives (native + adapter paths use the same ones, so
+  // timeout / network-error / empty-body behavior is identical across both).
+  // -------------------------------------------------------------------------
+
+  /** Fetch with an AbortController timeout. Network errors / aborts (timeout)
+   *  are wrapped as a retryable WalletNetworkError. */
+  private async fetchWithTimeout(
+    url: string,
+    init: { method: string; headers: Record<string, string>; body: string | undefined; timeoutMs: number },
+  ): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutHandle = setTimeout(() => controller.abort(), init.timeoutMs);
+    try {
+      return await this.fetchImpl(url, {
+        method: init.method,
+        headers: init.headers,
+        body: init.body,
+        signal: controller.signal,
+      });
+    } catch (err) {
+      // Network error or abort (timeout)
+      throw new WalletNetworkError(
+        err instanceof Error ? err.message : 'Network request failed',
+      );
+    } finally {
+      clearTimeout(timeoutHandle);
+    }
+  }
+
+  /** Read the response body as text, honoring the roundEnd 204 empty-body rule.
+   *  A read failure is a retryable WalletNetworkError. */
+  private async readBody(res: Response, isRoundEnd: boolean): Promise<string> {
+    try {
+      return isRoundEnd && res.status === 204 ? '' : await res.text();
+    } catch {
+      throw new WalletNetworkError('Failed to read response body');
+    }
   }
 }

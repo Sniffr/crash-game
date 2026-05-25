@@ -1,5 +1,6 @@
 import { WalletClient } from '@crash/wallet';
 import type { Operator, BetLog, OperatorRegistry } from '@crash/wallet';
+import { getAdapter } from '@crash/adapters';
 
 /** Lazy per-operatorId cache of WalletClient instances. Each client is constructed
  *  with the shared BetLog so outbound idempotency persists (Phase 2.2).
@@ -29,7 +30,7 @@ export class WalletClientCache {
     const op = this.registry.getById(operatorId);
     if (!op) return null;
     if (op.status === 'paused') return null;
-    const client = new WalletClient(op, { betLog: this.betLog });
+    const client = new WalletClient(op, { betLog: this.betLog, adapter: getAdapter(op.adapter) });
     this.clients.set(operatorId, client);
     return client;
   }
