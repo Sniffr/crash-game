@@ -13,10 +13,10 @@ import type { Server } from 'node:http';
 // Relative depth from tools/wallet-conformance/src/ → tools/operator-stub/src/
 import { startServer, resetStubState } from '../../operator-stub/src/index.js';
 
-import { loadSuite, runSuite } from './runner.js';
+import { loadSuiteFile, runSuite } from './runner.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SUITE_DIR = resolve(HERE, '..', 'suite');
+const NATIVE_SUITE = resolve(HERE, '..', 'suite', 'native.yaml');
 
 // The operator-stub's default 32-byte signing key (base64).
 const STUB_KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLXYwLXBhZGRpbmc=';
@@ -42,7 +42,7 @@ beforeEach(() => {
 
 describe('wallet conformance harness vs native stub', () => {
   it('full suite passes against the native stub', async () => {
-    const cases = loadSuite(SUITE_DIR);
+    const cases = loadSuiteFile(NATIVE_SUITE);
     const results = await runSuite({
       baseUrl: `http://localhost:${port}`,
       signingKeyB64: STUB_KEY_B64,
@@ -66,7 +66,7 @@ describe('wallet conformance harness vs native stub', () => {
   });
 
   it('win-retry case records >=2 attempts (proves a retry after the injected 500)', async () => {
-    const cases = loadSuite(SUITE_DIR);
+    const cases = loadSuiteFile(NATIVE_SUITE);
     const results = await runSuite({
       baseUrl: `http://localhost:${port}`,
       signingKeyB64: STUB_KEY_B64,
@@ -82,7 +82,7 @@ describe('wallet conformance harness vs native stub', () => {
   });
 
   it('skips fault-injection cases when not armed', async () => {
-    const cases = loadSuite(SUITE_DIR);
+    const cases = loadSuiteFile(NATIVE_SUITE);
     const results = await runSuite({
       baseUrl: `http://localhost:${port}`,
       signingKeyB64: STUB_KEY_B64,

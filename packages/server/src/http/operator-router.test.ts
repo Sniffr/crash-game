@@ -430,7 +430,7 @@ describe('enforceTenantScope (unit)', () => {
         minBetMinor: 10,
         maxBetMinor: 500_000,
         rtpVariant: 97,
-        adapter: 'standard',
+        adapter: 'native',
         jurisdictions: [],
         shareBps: 0,
         createdAt: 0,

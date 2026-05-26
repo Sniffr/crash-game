@@ -86,16 +86,25 @@ export function loadSuite(dir: string): ConformanceCase[] {
 
   const cases: ConformanceCase[] = [];
   for (const file of files) {
-    const full = join(dir, file);
-    const parsed = parseYaml(readFileSync(full, 'utf8'));
-    if (parsed === null || parsed === undefined) continue; // empty file
-    if (!Array.isArray(parsed)) {
-      throw new Error(`Suite file ${file} must be a YAML sequence of cases`);
-    }
-    parsed.forEach((raw, i) => {
-      cases.push(validateCase(raw, `${file}[${i}]`));
-    });
+    cases.push(...loadSuiteFile(join(dir, file)));
   }
+  return cases;
+}
+
+/** Parse a SINGLE `*.yaml` suite file (a YAML sequence of cases), validate, and
+ *  return its cases. Lets callers run one suite in isolation (e.g. the native
+ *  suite vs the softswiss suite against their respective stubs) without the
+ *  whole-directory load pulling in sibling suites. */
+export function loadSuiteFile(file: string): ConformanceCase[] {
+  const parsed = parseYaml(readFileSync(file, 'utf8'));
+  if (parsed === null || parsed === undefined) return []; // empty file
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Suite file ${file} must be a YAML sequence of cases`);
+  }
+  const cases: ConformanceCase[] = [];
+  parsed.forEach((raw, i) => {
+    cases.push(validateCase(raw, `${file}[${i}]`));
+  });
   return cases;
 }
 
