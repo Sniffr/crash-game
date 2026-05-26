@@ -1,0 +1,187 @@
+# Wallet conformance suite — targets the native operator-stub (spec §5).
+# Each case drives the REAL WalletClient. Responses are SUBSET-matched (only
+# the listed keys are asserted), so exact balances are never hard-coded and the
+# suite stays operator-agnostic. errorCode / httpStatus / attempts are exact.
+#
+# txnIds are distinct per case so the stub's per-txnId idempotency cache does
+# not cross-contaminate results.
+
+# --- authenticate --------------------------------------------------------------
+
+- name: authenticate happy (tok-pid-1)
+  endpoint: authenticate
+  request:
+    token: tok-pid-1
+    ip: 127.0.0.1
+    userAgent: conformance/1.0
+    gameId: galaxy-crash
+  expect:
+    ok: true
+    response:
+      playerId: pid-1
+      currency: EUR
+    attempts: 1
+
+- name: authenticate bad token
+  endpoint: authenticate
+  request:
+    token: nope
+    ip: 127.0.0.1
+    userAgent: conformance/1.0
+    gameId: galaxy-crash
+  expect:
+    ok: false
+    errorCode: INVALID_TOKEN
+    httpStatus: 401
+
+# --- balance -------------------------------------------------------------------
+
+- name: balance pid-1
+  endpoint: balance
+  request:
+    playerId: pid-1
+    sessionId: sess-conf-1
+  expect:
+    ok: true
+    response:
+      currency: EUR
+    attempts: 1
+
+# --- bet -----------------------------------------------------------------------
+
+- name: bet happy (pid-1 EUR 5000)
+  endpoint: bet
+  request:
+    playerId: pid-1
+    sessionId: sess-conf-1
+    roundId: round-conf-1
+    betId: bet-conf-1
+    txnId: txn-bet-conf-1
+    amountMinor: 5000
+    currency: EUR
+    gameId: galaxy-crash
+    placedAt: 1700000000
+  expect:
+    ok: true
+    response:
+      currency: EUR
+    attempts: 1
+
+- name: bet insufficient funds
+  endpoint: bet
+  request:
+    playerId: pid-1
+    sessionId: sess-conf-1
+    roundId: round-conf-2
+    betId: bet-conf-2
+    txnId: txn-bet-conf-2
+    # > balance (100000) but <= max bet (500000) so the funds check fires
+    # before the over-limit check.
+    amountMinor: 200000
+    currency: EUR
+    gameId: galaxy-crash
+    placedAt: 1700000000
+  expect:
+    ok: false
+    errorCode: INSUFFICIENT_FUNDS
+    httpStatus: 409
+
+- name: bet over-limit
+  endpoint: bet
+  request:
+    playerId: pid-1
+    sessionId: sess-conf-1
+    roundId: round-conf-3
+    betId: bet-conf-3
+    txnId: txn-bet-conf-3
+    amountMinor: 600000
+    currency: EUR
+    gameId: galaxy-crash
+    placedAt: 1700000000
+  expect:
+    ok: false
+    errorCode: BET_LIMIT_EXCEEDED
+    httpStatus: 409
+
+# --- win -----------------------------------------------------------------------
+
+- name: win happy (pid-1 EUR)
+  endpoint: win
+  request:
+    playerId: pid-1
+    sessionId: sess-conf-1
+    roundId: round-conf-1
+    betId: bet-conf-1
+    betTxnId: txn-bet-conf-1
+    txnId: txn-win-conf-1
+    amountMinor: 10000
+    multiplier: 2.0
+    currency: EUR
+    settledAt: 1700000005
+  expect:
+    ok: true
+    response:
+      currency: EUR
+    attempts: 1
+
+# Win-retry: armed fault injection makes the FIRST /win return HTTP 500 once.
+# The WalletClient retries (win is retryable) and the second attempt succeeds.
+# attempts:2 therefore proves a retry occurred. Requires --arm-fault-injection
+# against a co-located/in-process stub; otherwise this case is SKIPPED.
+- name: win-retry (one injected 500 then success)
+  endpoint: win
+  faultInjection: failNextWin
+  request:
+    playerId: pid-1
+    sessionId: sess-conf-1
+    roundId: round-conf-1
+    betId: bet-conf-1
+    betTxnId: txn-bet-conf-1
+    txnId: txn-win-conf-retry
+    amountMinor: 7000
+    multiplier: 1.4
+    currency: EUR
+    settledAt: 1700000006
+  expect:
+    ok: true
+    attempts: 2
+
+# --- rollback ------------------------------------------------------------------
+# References the bet placed above (betTxnId: txn-bet-conf-1) so the stub
+# reverses a real bet rather than returning a noop.
+
+- name: rollback happy (reverse bet-conf-1)
+  endpoint: rollback
+  request:
+    playerId: pid-1
+    betTxnId: txn-bet-conf-1
+    txnId: txn-rollback-conf-1
+    reason: round_voided
+  expect:
+    ok: true
+    response:
+      status: rolled_back
+      currency: EUR
+    attempts: 1
+
+# --- round-end -----------------------------------------------------------------
+# Fire-and-forget: ok:true means "did not throw".
+
+- name: round-end (fire-and-forget)
+  endpoint: roundEnd
+  request:
+    roundId: round-conf-1
+    playerId: pid-1
+    crashPoint: 2.37
+    serverSeedHash: abc123
+    serverSeed: def456
+    bets:
+      - betId: bet-conf-1
+        txnId: txn-bet-conf-1
+        amountMinor: 5000
+        result: win
+        winTxnId: txn-win-conf-1
+        winAmountMinor: 10000
+        multiplier: 2.0
+  expect:
+    ok: true

@@ -1,0 +1,25 @@
+{
+  "name": "@crash-tools/wallet-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "conformance": "src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "conformance": "tsx src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@crash/adapters": "1.0.0",
+    "@crash/wallet": "1.0.0",
+    "yaml": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.4.5",
+    "vitest": "^2.0.5"
+  }
+}

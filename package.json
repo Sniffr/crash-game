@@ -15,6 +15,7 @@
     "test": "cd packages/shared && npm test"
   },
   "devDependencies": {
-    "concurrently": "^8.2.0"
+    "concurrently": "^8.2.0",
+    "yaml": "^2.9.0"
   }
 }
