@@ -86,7 +86,7 @@ Cursors are opaque (base64 JSON) and stable across page sizes within a query.
 
 ### 2.2 Timestamps
 
-All timestamps in API are **unix seconds (integer)**, UTC. Clients format for display.
+All timestamps in API are **unix seconds (integer)**, UTC. Clients format for display. Window filters are half-open: `from` is **inclusive**, `to` is **exclusive** (`created_at >= from AND created_at < to`) — consistent across all list endpoints and the financial report, so adjacent windows never double-count a boundary row.
 
 ### 2.3 Money
 

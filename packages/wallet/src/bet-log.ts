@@ -685,7 +685,7 @@ export class BetLog {
       params.push(f.from);
     }
     if (f.to !== undefined) {
-      conds.push('created_at <= ?');
+      conds.push('created_at < ?'); // exclusive upper bound (spec §2.2: `to` exclusive)
       params.push(f.to);
     }
 
@@ -745,7 +745,7 @@ export class BetLog {
       params.push(f.from);
     }
     if (f.to !== undefined) {
-      conds.push('created_at <= ?');
+      conds.push('created_at < ?'); // exclusive upper bound (spec §2.2: `to` exclusive)
       params.push(f.to);
     }
     // Keyset cursor on (last_at DESC, round_id DESC)
@@ -869,7 +869,7 @@ export class BetLog {
       params.push(f.from);
     }
     if (f.to !== undefined) {
-      conds.push('ti.created_at <= ?');
+      conds.push('ti.created_at < ?'); // exclusive upper bound (spec §2.2: `to` exclusive)
       params.push(f.to);
     }
     // playerId filter requires joining through bet_log
