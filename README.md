@@ -116,12 +116,16 @@ The same image runs anywhere Docker does:
 
 ### Environment variables
 
-| Var | Default | Purpose |
-|---|---|---|
-| `PORT` | `3001` | Server listen port |
-| `HOST` | `0.0.0.0` | Bind address |
-| `ROCKSDB_PATH` | `/app/data/rocksdb` | Where to store the session DB |
-| `NODE_ENV` | `production` | Set by the Dockerfile, used by libs |
+| Var | Required? | Default | Purpose |
+|---|---|---|---|
+| `PORT` | optional | `3001` | Server listen port |
+| `HOST` | optional | `0.0.0.0` | Bind address |
+| `ROCKSDB_PATH` | optional | `/app/data/rocksdb` | RocksDB session store path (legacy holdover; sessions only) |
+| `DB_PATH` | optional | `<cwd>/data/galaxy-crash.db` | SQLite path — BetLog / OperatorRegistry / AdminAudit / OperatorAudit / Reconciler. **Mount on a persistent volume in prod.** |
+| `NODE_ENV` | optional | `production` | Set by the Dockerfile, used by libs |
+| `JWT_SECRET` | **required in prod** | _(unset)_ | HS256 secret for admin API JWTs. If unset, `/admin/v1/*` (except `/auth/login`) fails-closed with `503 ADMIN_DISABLED`. Must be a strong random string; inject via your platform's secret store. |
+| `LOG_LEVEL` | optional | `info` | pino log level (`trace`/`debug`/`info`/`warn`/`error`/`fatal`/`silent`) |
+| `ADMIN_BOOTSTRAP_USER` | optional | _(unset)_ | One-shot seed for the first admin, format `username:password:role1,role2` (roles: `admin`/`finance`/`support`/`viewer`). Idempotent — skipped if any admin already exists. Unset after the first successful boot. |
 
 ### Production lockdown — what changes vs dev
 
@@ -133,6 +137,99 @@ The same image runs anywhere Docker does:
 | Creator app available | Yes (port 5174) | **Not in image** |
 | Hot reload | Yes | No |
 | RocksDB path | `./data/rocksdb` | `/app/data/rocksdb` (named volume) |
+
+### Production deployment (B2B operators)
+
+Runbook-style notes for operating the image in front of real money flow.
+
+#### Reverse proxy / WebSocket sticky sessions
+
+The game uses a persistent WebSocket (`/ws`) for round state. If you run more than one app instance behind a load balancer, **the WS connection must land on the same instance for its lifetime** — enable upstream session affinity (cookie or IP hash) and pass the WebSocket upgrade headers through.
+
+Minimal nginx example:
+
+```nginx
+upstream galaxy_crash {
+    ip_hash;                                  # sticky by client IP
+    server 10.0.0.11:3001;
+    server 10.0.0.12:3001;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name play.example.com;
+
+    location / {
+        proxy_pass http://galaxy_crash;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 3600s;             # don't kill long-lived WS
+    }
+}
+```
+
+Caddy / HAProxy equivalents: enable `lb_policy ip_hash` (Caddy) or `balance source` (HAProxy) and let the WebSocket upgrade auto-pass.
+
+#### Health checks
+
+| Endpoint | Auth | Use for |
+|---|---|---|
+| `GET /api/health` | public | Liveness / readiness probe for orchestrators (k8s, Fly, Render, Railway). Returns `{ok:true}` only — no version or build metadata leaked. The Dockerfile `HEALTHCHECK` targets this. |
+| `GET /admin/v1/health/summary` | admin JWT | Per-operator stats for dashboards. Counters are cumulative since process start; the `?window=` parameter is **advisory in v1** (does not filter historical data — see "Honest gaps" in Task 8.2 notes). |
+
+#### Metrics
+
+`GET /admin/v1/metrics` exposes Prometheus text format (v0.0.4), JWT-gated. Your scraper needs a service-account JWT — issue one via `/admin/v1/auth/login` with a long-lived admin user dedicated to scraping, and configure it in your Prometheus job's `authorization` block.
+
+```yaml
+scrape_configs:
+  - job_name: galaxy-crash
+    metrics_path: /admin/v1/metrics
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/galaxy-crash-jwt
+    static_configs:
+      - targets: ['play.example.com:443']
+```
+
+**Honest gap:** counters are cumulative since process start; histograms reset on restart. If you need cross-restart continuity, use Prometheus's `rate()` over a window that absorbs restarts.
+
+#### Backups
+
+SQLite holds **all financial truth** (BetLog idempotency, OperatorRegistry, AdminAudit, OperatorAudit, Reconciler reports). Back it up online and atomically:
+
+```bash
+# Hot backup — safe while the server is running (uses SQLite's online backup API).
+sqlite3 /app/data/galaxy-crash.db ".backup '/backup/galaxy-crash-$(date +%F).db'"
+
+# Example crontab entry — daily 03:00 backup + 14-day rotation.
+0 3 * * *  sqlite3 /app/data/galaxy-crash.db ".backup '/backup/galaxy-crash-$(date +\%F).db'" && find /backup -name 'galaxy-crash-*.db' -mtime +14 -delete
+```
+
+RocksDB at `$ROCKSDB_PATH` holds **session state only** (player balances, chat, etc. — not financial truth). It is ephemeral by nature; daily backup is optional. If you skip it, sessions reset on volume loss but bet history stays intact in SQLite.
+
+#### Secrets
+
+- **Never** bake `JWT_SECRET`, operator `signingKey`s, or `apiKey`s into the image. The Dockerfile deliberately sets no `ENV` for them.
+- Inject at runtime via your platform's secret store (k8s Secrets, Fly secrets, Railway variables, Render env groups, AWS Secrets Manager, etc.).
+- **Rotating an operator signing key:** call `POST /admin/v1/operators/:id/regen-signing-key` from the studio. The operator's integration will start signing 401s **until they pick up the new key** — coordinate a brief pause / handoff window before rotating.
+- **Rotating `JWT_SECRET`:** invalidates **all** outstanding admin JWTs; admins re-login. Plan for a brief admin-API outage.
+
+#### Reconciliation
+
+The daily 00:15-UTC sweep (`scheduleDailyReconciliation`, see `packages/server/src/index.ts`) compares OUR `txn_idempotency` records against each operator's ledger via an injected `OperatorLedgerSource`.
+
+**Default state (shipped):** no operator-ledger source is wired — the default source returns `[]`, so every one of OUR txns surfaces as `missing_on_operator`. This is deliberate and visible in the boot log:
+
+```
+[reconciliation] no operator ledger source configured — runs will report our txns as missing_on_operator (Phase-future: wire to each operator's reconciliation feed).
+```
+
+To enable real drift detection, wire each operator's ledger HTTP contract at the `OperatorLedgerSource` injection point in `packages/server/src/index.ts` (`defaultLedgerSource`). On-demand re-runs are available via `POST /admin/v1/reconciliation/run`.
 
 ### Inspecting the database
 
