@@ -69,6 +69,13 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // Theme autoload + fs.watch
 initThemeLoader();
 
+// /api/health — PUBLIC liveness probe (Task 8.3 Dockerfile HEALTHCHECK target).
+// Mounted BEFORE any auth middleware. Deliberately minimal — no version/branch/
+// build metadata that would leak deployment info to unauthenticated scanners.
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
+});
+
 // ─── Operator API (must be BEFORE registerPublicRoutes, which adds the SPA * fallback) ──
 
 // /op/v1/health is PUBLIC per spec §3.1 — mounted BEFORE verifyOperatorSignature

@@ -540,7 +540,7 @@ Triggers an on-demand run. Returns `202 Accepted` with the run id.
 ## 10. Health & metrics
 
 ### 10.1 `GET /admin/v1/health/summary?window=1h|24h`
-Roles: any
+Roles: any (JWT-only — enforced at the `/admin/v1` mount).
 ```json
 {
   "window": "1h",
@@ -552,8 +552,38 @@ Roles: any
 }
 ```
 
+Errors: `?window=` other than `1h` or `24h` → `400 INVALID_REQUEST`.
+
+**v1 honest gaps (Phase 8 implementation):**
+- Counters/histograms are **cumulative since process start**. The `?window=`
+  parameter is validated but currently advisory — rolling-window analytics are
+  Phase-future (would require either time-bucketed counters or a TSDB).
+- Operators with **zero recorded calls are omitted** from the response (keeps
+  the payload bounded by traffic, not by the size of the operator registry).
+- Latency percentiles are **bucket-resolution** — they return the upper edge
+  of the bucket where the cumulative count first crosses the target quantile.
+  Buckets: 5, 10, 25, 50, 100, 200, 500, 1000, 2500, 5000 ms.
+
 ### 10.2 `GET /admin/v1/metrics`
-Roles: any. Prometheus exposition format. Not JSON.
+Roles: any (JWT-only — enforced at the `/admin/v1` mount; production
+Prometheus scrapers must include a service-account JWT). Prometheus
+text-exposition format **v0.0.4** (`Content-Type: text/plain; version=0.0.4`).
+Not JSON.
+
+Metrics exported (Phase 8):
+- `wallet_calls_total{operator,endpoint,outcome}` — counter. `endpoint ∈
+  {authenticate, balance, bet, win, rollback, roundEnd}`; `outcome ∈
+  {ok, error}`.
+- `wallet_errors_total{operator,endpoint,code}` — counter. `code` is the
+  `WalletError.code` (e.g. `NETWORK_ERROR`, `INSUFFICIENT_FUNDS`,
+  `UPSTREAM_ERROR`, `RATE_LIMITED`, …). Incremented IN ADDITION to
+  `wallet_calls_total{outcome:"error"}` on errors.
+- `wallet_latency_ms{operator,endpoint}` — histogram. Buckets:
+  `[5, 10, 25, 50, 100, 200, 500, 1000, 2500, 5000]` ms. Emits the standard
+  `_bucket`, `_sum`, `_count` series.
+
+Default Node runtime metrics (`process_cpu_seconds_total`, etc.) are
+deliberately NOT collected — the registry is focused on wallet observability.
 
 ---
 

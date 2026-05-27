@@ -21,6 +21,7 @@ import {
   consoleAlerter,
 } from '@crash/wallet';
 import { getOperatorWiringDeps } from './operator-deps';
+import { observeWalletCall } from '../observability/metrics.js';
 
 /** Reference to the current round — set by game/round.ts at runtime. */
 let currentRoundRef: { roundNumber: number; crashPoint: number } | null = null;
@@ -334,19 +335,22 @@ export async function placeOperatorBet(
     betTxnId: input.betTxnId,
   });
 
-  // Step 2: call the operator wallet
+  // Step 2: call the operator wallet (wrapped for metrics — transparent: rethrows unchanged)
   try {
-    const resp = await walletClient.bet({
-      playerId: input.playerId,
-      sessionId: input.sessionId,
-      roundId: input.roundId,
-      betId: input.betId,
-      txnId: input.betTxnId,
-      amountMinor: input.amountMinor,
-      currency: input.currency,
-      gameId: input.gameId,
-      placedAt: Math.floor(Date.now() / 1000),
-    });
+    const resp = await observeWalletCall(
+      { operator: input.operatorId, endpoint: 'bet' },
+      () => walletClient.bet({
+        playerId: input.playerId,
+        sessionId: input.sessionId,
+        roundId: input.roundId,
+        betId: input.betId,
+        txnId: input.betTxnId,
+        amountMinor: input.amountMinor,
+        currency: input.currency,
+        gameId: input.gameId,
+        placedAt: Math.floor(Date.now() / 1000),
+      }),
+    );
 
     // Step 3a: success → ARMED; surface post-debit balance for the WS frame
     const row = betLog.transition(input.betId, 'bet_accepted', {
@@ -437,20 +441,23 @@ export async function cashOutOperatorBet(
   // row and safely retry /win without double-credit risk (spec §9).
   const settlingRow = betLog.transition(input.betId, 'cashout_requested', { winTxnId: input.winTxnId, multiplier: input.multiplier, winAmountMinor: input.winAmountMinor });
 
-  // Call the operator /win endpoint
+  // Call the operator /win endpoint (wrapped for metrics — transparent: rethrows unchanged)
   try {
-    const resp = await walletClient.win({
-      playerId: settlingRow.playerId,
-      sessionId: settlingRow.sessionId,
-      roundId: settlingRow.roundId,
-      betId: input.betId,
-      betTxnId: settlingRow.betTxnId,
-      txnId: input.winTxnId,
-      amountMinor: input.winAmountMinor,
-      multiplier: input.multiplier,
-      currency: settlingRow.currency,
-      settledAt: input.settledAt,
-    });
+    const resp = await observeWalletCall(
+      { operator: settlingRow.operatorId, endpoint: 'win' },
+      () => walletClient.win({
+        playerId: settlingRow.playerId,
+        sessionId: settlingRow.sessionId,
+        roundId: settlingRow.roundId,
+        betId: input.betId,
+        betTxnId: settlingRow.betTxnId,
+        txnId: input.winTxnId,
+        amountMinor: input.winAmountMinor,
+        multiplier: input.multiplier,
+        currency: settlingRow.currency,
+        settledAt: input.settledAt,
+      }),
+    );
 
     // Success → SETTLED; surface post-credit balance for the WS frame
     const row = betLog.transition(input.betId, 'win_settled', {
@@ -563,12 +570,15 @@ export async function voidOperatorBet(
   const rollbackTxnId = freshRow?.rollbackTxnId ?? `rb-${row.betTxnId}`;
 
   try {
-    await client.rollback({
-      playerId: row.playerId,
-      betTxnId: row.betTxnId,
-      txnId: rollbackTxnId,
-      reason,
-    });
+    await observeWalletCall(
+      { operator: row.operatorId, endpoint: 'rollback' },
+      () => client.rollback({
+        playerId: row.playerId,
+        betTxnId: row.betTxnId,
+        txnId: rollbackTxnId,
+        reason,
+      }),
+    );
 
     deps.betLog.transition(betId, 'rollback_completed', { rollbackTxnId });
     return 'voided';

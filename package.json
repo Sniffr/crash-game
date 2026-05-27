@@ -17,5 +17,9 @@
   "devDependencies": {
     "concurrently": "^8.2.0",
     "yaml": "^2.9.0"
+  },
+  "dependencies": {
+    "pino": "^10.3.1",
+    "prom-client": "^15.1.3"
   }
 }

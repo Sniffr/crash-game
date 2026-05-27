@@ -28,6 +28,7 @@ import { getActiveTheme } from '../theme/loader';
 import { getAllHistory } from '../game/history';
 import * as round from '../game/round';
 import type { WalletClientCache } from '../wallet/client-cache';
+import { observeWalletCall } from '../observability/metrics.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -248,14 +249,18 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
     }
 
     // 3. Authenticate the launch token against the operator's wallet (spec §5.1)
+    //    Wrapped for metrics — transparent: rethrows the original error unchanged.
     let authResp: Awaited<ReturnType<typeof client.authenticate>>;
     try {
-      authResp = await client.authenticate({
-        token,
-        ip: req.ip ?? '',
-        userAgent: req.get('user-agent') ?? '',
-        gameId: 'galaxy-crash',
-      });
+      authResp = await observeWalletCall(
+        { operator, endpoint: 'authenticate' },
+        () => client.authenticate({
+          token,
+          ip: req.ip ?? '',
+          userAgent: req.get('user-agent') ?? '',
+          gameId: 'galaxy-crash',
+        }),
+      );
     } catch (err) {
       // Translate operator errors to player-friendly messages
       let message = 'Could not start the game. Please try again.';

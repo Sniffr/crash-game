@@ -21,6 +21,7 @@ import {
   requireRole,
   signAdminJwt,
 } from './middleware/admin-auth.js';
+import { observeWalletCall, getMetricsText, walletCallsTotal, walletErrorsTotal, walletLatencyMs } from '../observability/metrics.js';
 
 // Valid BetState values for ?state= filter validation — derived from the
 // single source of truth in state-machine.ts (prevents drift when new states are added).
@@ -781,10 +782,13 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
         settledAt: Math.floor(Date.now() / 1000),
       };
 
-      // Step 7: Call the operator /win endpoint.
+      // Step 7: Call the operator /win endpoint (wrapped for metrics — transparent: rethrows unchanged).
       let winResp: Awaited<ReturnType<WalletClient['win']>>;
       try {
-        winResp = await client.win(winReq);
+        winResp = await observeWalletCall(
+          { operator: row.operatorId, endpoint: 'win' },
+          () => client.win(winReq),
+        );
       } catch (err) {
         if (err instanceof WalletError) {
           deps.adminAudit.record({
@@ -1667,6 +1671,154 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     });
 
     res.status(202).json({ id: run.id, status: run.status, mismatchCount: run.mismatchCount });
+  });
+
+  // =========================================================================
+  // AE. GET /metrics — Prometheus exposition (spec §10.2)
+  //
+  //     Roles: any (JWT-only — enforced at the mount via requireAdminJwt).
+  //     Production Prometheus scrapers must include a service-account JWT.
+  //     Returns text/plain (Prometheus v0.0.4 format) — NOT JSON.
+  //
+  //     Three metrics are exported:
+  //       - wallet_calls_total{operator,endpoint,outcome}
+  //       - wallet_errors_total{operator,endpoint,code}
+  //       - wallet_latency_ms{operator,endpoint} (histogram + _bucket/_sum/_count)
+  // =========================================================================
+
+  router.get('/metrics', async (_req, res): Promise<void> => {
+    const body = await getMetricsText();
+    res.set('Content-Type', 'text/plain; version=0.0.4');
+    res.status(200).send(body);
+  });
+
+  // =========================================================================
+  // AF. GET /health/summary?window=1h|24h — per-operator wallet-call stats
+  //     (spec §10.1; roles: any — JWT-only)
+  //
+  //     v1 HONEST GAPS (documented in spec §10.1):
+  //       - Counters/histograms are CUMULATIVE since process start; the
+  //         ?window= parameter is validated but is currently advisory.
+  //         Rolling-window analytics are Phase-future.
+  //       - Operators with zero recorded calls are OMITTED from the response.
+  //         (Alternative would be returning zeros for every known operator;
+  //         we chose omission to keep the payload bounded by traffic, not by
+  //         the size of the operator registry.)
+  //
+  //     Percentile computation is bucket-bound (the upper edge of the bucket
+  //     where the cumulative count first crosses the target quantile). It is
+  //     therefore exact within bucket resolution: 5,10,25,50,100,200,500,
+  //     1000,2500,5000 ms (and +Inf if everything is in the overflow bucket).
+  // =========================================================================
+
+  router.get('/health/summary', async (req, res): Promise<void> => {
+    const windowRaw = (req.query['window'] as string | undefined) ?? '1h';
+    if (windowRaw !== '1h' && windowRaw !== '24h') {
+      res.status(400).json({
+        error: {
+          code: 'INVALID_REQUEST',
+          message: "window must be '1h' or '24h'",
+        },
+      });
+      return;
+    }
+    const windowStr: '1h' | '24h' = windowRaw;
+
+    // Read raw values straight off the registered metrics. No re-aggregation
+    // across all metrics-as-JSON — we hold direct references to the three.
+    const callsObj = await walletCallsTotal.get();
+    const errorsObj = await walletErrorsTotal.get();
+    void errorsObj; // intentionally unused — errorRate uses calls counter (outcome=error)
+    const latObj = await walletLatencyMs.get();
+
+    // ----- Aggregate per operator -----
+    interface Acc {
+      total: number;
+      errors: number;
+      // bucket upper-bound (ms) → cumulative count
+      buckets: Map<number, number>;
+      sum: number;
+      count: number;
+    }
+    const byOp = new Map<string, Acc>();
+
+    function getAcc(op: string): Acc {
+      let a = byOp.get(op);
+      if (!a) {
+        a = { total: 0, errors: 0, buckets: new Map(), sum: 0, count: 0 };
+        byOp.set(op, a);
+      }
+      return a;
+    }
+
+    for (const v of callsObj.values) {
+      const op = (v.labels as Record<string, string>)['operator'];
+      const outcome = (v.labels as Record<string, string>)['outcome'];
+      if (!op) continue;
+      const acc = getAcc(op);
+      acc.total += v.value;
+      if (outcome === 'error') acc.errors += v.value;
+    }
+
+    for (const v of latObj.values) {
+      const labels = v.labels as Record<string, string>;
+      const op = labels['operator'];
+      if (!op) continue;
+      const acc = getAcc(op);
+      // Histogram values have metricName indicating bucket / sum / count.
+      const name = (v as { metricName?: string }).metricName;
+      if (!name) continue;
+      if (name === 'wallet_latency_ms_bucket') {
+        const le = labels['le'];
+        if (le === undefined) continue;
+        const bound = le === '+Inf' ? Number.POSITIVE_INFINITY : Number(le);
+        // Use the MAX cumulative observed for each bound (defensive — prom-client
+        // emits one value per bucket per label combo, but if a bound recurs we keep
+        // the larger count which represents the cumulative scrape).
+        const prev = acc.buckets.get(bound) ?? 0;
+        acc.buckets.set(bound, Math.max(prev, v.value));
+      } else if (name === 'wallet_latency_ms_sum') {
+        acc.sum += v.value;
+      } else if (name === 'wallet_latency_ms_count') {
+        acc.count += v.value;
+      }
+    }
+
+    function percentileMs(acc: Acc, q: number): number {
+      if (acc.count === 0) return 0;
+      // Sort bucket bounds ascending; bounds are CUMULATIVE counts.
+      const sorted = [...acc.buckets.entries()].sort((a, b) => a[0] - b[0]);
+      const target = acc.count * q;
+      for (const [bound, cum] of sorted) {
+        if (cum >= target) {
+          // Bound is exclusive upper edge in Prometheus convention; we return the
+          // bound itself as the percentile estimate (exact within bucket resolution).
+          // For +Inf, fall back to the sum/count mean is misleading — return -1 to
+          // signal "exceeded all buckets" but cap at the largest finite bound.
+          if (!Number.isFinite(bound)) {
+            // Find the largest finite bound for a sane number
+            const finite = sorted.filter(([b]) => Number.isFinite(b));
+            const last = finite[finite.length - 1];
+            return last ? last[0] : 0;
+          }
+          return bound;
+        }
+      }
+      return 0;
+    }
+
+    const operators = [...byOp.entries()]
+      .map(([operatorId, acc]) => ({
+        operatorId,
+        walletCalls: acc.total,
+        errorRate: acc.total > 0 ? acc.errors / acc.total : 0,
+        latencyP50Ms: percentileMs(acc, 0.5),
+        latencyP95Ms: percentileMs(acc, 0.95),
+        latencyP99Ms: percentileMs(acc, 0.99),
+      }))
+      .sort((a, b) => a.operatorId.localeCompare(b.operatorId));
+
+    res.status(200).json({ window: windowStr, operators });
   });
 
   return router;
