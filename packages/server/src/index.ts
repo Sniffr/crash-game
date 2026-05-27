@@ -5,7 +5,9 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, runRecovery, consoleAlerter } from '@crash/wallet';
+import { BetLog, OperatorRegistry, Reconciler, runRecovery, consoleAlerter } from '@crash/wallet';
+import type { OperatorLedgerSource } from '@crash/wallet';
+import { scheduleDailyReconciliation } from './reconciliation/scheduler';
 import { initThemeLoader } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
@@ -39,6 +41,23 @@ const adminUsers = new AdminUsers(db);
 const revoked = new Set<string>();
 const walletClientCache = new WalletClientCache(registry, betLog);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter });
+
+// Reconciliation (Task 8.1, spec §9).
+//
+// The Reconciler diffs OUR txn_idempotency records against an operator's ledger,
+// supplied by an injected OperatorLedgerSource. This is the SINGLE injection
+// point for a real per-operator reconciliation feed.
+//
+// HONEST DEFAULT: there is no real operator-side ledger HTTP contract in this
+// repo yet, so the default source returns an empty ledger. As a result, runs
+// surface every one of OUR txns as `missing_on_operator`. This is deliberate —
+// it is the correct, non-fabricated behaviour absent a real feed. Wiring each
+// operator's reconciliation feed here is a Phase-future task.
+const defaultLedgerSource: OperatorLedgerSource = async () => [];
+console.log(
+  '[reconciliation] no operator ledger source configured — runs will report our txns as missing_on_operator (Phase-future: wire to each operator\'s reconciliation feed).',
+);
+const reconciler = new Reconciler(db, { source: defaultLedgerSource, betLog });
 
 const app = express();
 // Capture raw body bytes for HMAC signing (verifyOperatorSignature §4.2).
@@ -74,7 +93,7 @@ app.use(
 // ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──
 // Auth is internal to the router: /auth/login is public; router.use(requireAdminJwt)
 // gates everything else. No top-level auth middleware here.
-app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, revoked }));
+app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, revoked, reconciler }));
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache });
@@ -146,6 +165,14 @@ try {
   console.error('[recovery] error during startup sweep (continuing):', err);
 }
 console.log('[recovery] report', JSON.stringify(recoveryReport));
+
+// Start the daily reconciliation sweep (00:15 UTC). Gated: never auto-starts
+// under test (the engine + on-demand endpoint are the tested core; this timer
+// is thin glue). It also never throws out of the timer (catch + log per operator).
+if (process.env['NODE_ENV'] !== 'test') {
+  scheduleDailyReconciliation(reconciler, registry, { hourUtc: 0, minuteUtc: 15 });
+  console.log('[reconciliation] daily sweep scheduled for 00:15 UTC');
+}
 
 // ─── Bootstrap first admin from env ──────────────────────────────────────────
 // ADMIN_BOOTSTRAP_USER=username:password:role1,role2

@@ -10,3 +10,4 @@ export * from './adapter.js';
 export * from './client.js';
 export * from './recovery.js';
 export * from './alerter.js';
+export * from './reconciler.js';

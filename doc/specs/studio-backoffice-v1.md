@@ -508,6 +508,33 @@ Request:
 ```
 Triggers an on-demand run. Returns `202 Accepted` with the run id.
 
+### 9.4 Notes (shipped Phase-8.1)
+
+**Run-status lifecycle.** Internally a run starts in `RUNNING` (transient — persisted briefly while the diff is in-flight so a crash leaves an observable row). On completion the row is updated to one of the three externally-visible terminal states:
+
+- `OK` — checked > 0 (or = 0), no mismatches found.
+- `MISMATCHES` — at least one mismatch row was written.
+- `FAILED` — the operator-ledger source threw; the run resolves with this status rather than rethrowing, so a single bad operator feed cannot abort the daily sweep.
+
+`RUNNING` is **not** part of the public enum and is filtered out of both `GET /reconciliation/runs` and `GET /reconciliation/runs/:id` (RUNNING rows return 404 as if not present).
+
+**Mismatch kinds.** Each mismatch row has a `kind` and a `details` object whose shape depends on the kind:
+
+| `kind`                 | When                                              | `details` shape                                            |
+|------------------------|---------------------------------------------------|------------------------------------------------------------|
+| `missing_on_operator`  | We recorded the txn; operator did not.            | `{ "ourAmountMinor": <int>, "operatorRecord": null }`      |
+| `missing_on_game`      | Operator recorded the txn; we did not.            | `{ "theirAmountMinor": <int>, "ourRecord": null }`         |
+| `amount_mismatch`      | Both sides have the txn; amounts differ.          | `{ "ours": <int>, "theirs": <int> }`                       |
+| `status_mismatch`      | Both sides have the txn, amounts equal, status differs (`OK` vs `FAILED`). | `{ "ours": "OK"|"FAILED", "theirs": "OK"|"FAILED" }` |
+
+`checkedCount` is the size of the distinct-txnId union (ours ∪ theirs); `mismatchCount` is the number of mismatch rows persisted.
+
+**Half-open windows.** Both the reconciliation `[windowStart, windowEnd)` window and the `from`/`to` filter on `/reconciliation/runs` are half-open per §2.2 (`from` inclusive, `to` exclusive). The daily scheduler sweeps `[T − 86400, T)`.
+
+**Synchronous v1, returns 202.** POST runs the diff synchronously in v1 (acceptable for low operator counts and the data volumes shipped) but still returns `202 Accepted` so the contract is forward-compatible with a future background-job implementation. The response body is `{ id, status, mismatchCount }`.
+
+**Operator-ledger source = injected dependency.** The Reconciler does not embed any per-operator HTTP contract — it takes an `OperatorLedgerSource: (operatorId, windowStart, windowEnd) => Promise<OperatorLedgerTxn[]>` at construction. Wiring each operator's real reconciliation feed is Phase-future. Absent a configured source the server logs a one-shot warning at startup and wires a default that returns `[]`, so runs surface every one of our txns as `missing_on_operator` (non-fabricated honest default).
+
 ---
 
 ## 10. Health & metrics

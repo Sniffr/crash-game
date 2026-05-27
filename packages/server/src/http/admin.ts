@@ -10,7 +10,7 @@
  */
 
 import { Router } from 'express';
-import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter } from '@crash/wallet';
+import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, Reconciler, ReconStatus } from '@crash/wallet';
 import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
@@ -37,8 +37,12 @@ export interface AdminRouterDeps {
   adminUsers: AdminUsers;
   registry: OperatorRegistry;
   revoked: Set<string>;
+  reconciler: Reconciler;
   nowSeconds?: () => number;
 }
+
+// Valid reconciliation run status values for ?status= filter validation (spec §9.1).
+const RECON_STATUSES = new Set<string>(['OK', 'MISMATCHES', 'FAILED']);
 
 // ---------------------------------------------------------------------------
 // Helper: map Operator to the §4.1 public shape (no apiKey/signingKey)
@@ -1523,6 +1527,146 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     });
 
     res.status(200).json(invoice);
+  });
+
+  // =========================================================================
+  // AB. GET /reconciliation/runs — list (roles: any; JWT enforced at mount)
+  //     Spec §9.1. Filters: operatorId, from, to, status; keyset pagination.
+  //     Half-open window [from, to) on started_at. NOT audited (read-only).
+  // =========================================================================
+
+  router.get('/reconciliation/runs', (req, res): void => {
+    const page = readPage(req, res);
+    if (!page) return;
+
+    const q = req.query as Record<string, string | undefined>;
+
+    // Validate ?status= against the enum
+    const statusRaw = q['status'];
+    if (statusRaw !== undefined && !RECON_STATUSES.has(statusRaw)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: `Unknown status '${statusRaw}'. Valid: ${[...RECON_STATUSES].join(', ')}` } });
+      return;
+    }
+
+    const from = q['from'] !== undefined ? Number(q['from']) : undefined;
+    const to = q['to'] !== undefined ? Number(q['to']) : undefined;
+    if (
+      (from !== undefined && !Number.isFinite(from)) ||
+      (to !== undefined && !Number.isFinite(to))
+    ) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'from and to must be numeric unix seconds' } });
+      return;
+    }
+
+    const { rows, nextCursor } = deps.reconciler.listRuns(
+      {
+        operatorId: q['operatorId'],
+        from,
+        to,
+        status: statusRaw as ReconStatus | undefined,
+      },
+      page,
+    );
+
+    const items = rows.map((r) => ({
+      id: r.id,
+      operatorId: r.operatorId,
+      windowStart: r.windowStart,
+      windowEnd: r.windowEnd,
+      checkedCount: r.checkedCount,
+      mismatchCount: r.mismatchCount,
+      status: r.status,
+      startedAt: r.startedAt,
+      finishedAt: r.finishedAt,
+    }));
+
+    res.status(200).json({ items, nextCursor, count: items.length });
+  });
+
+  // =========================================================================
+  // AC. GET /reconciliation/runs/:id — run + mismatches (roles: any)
+  //     Spec §9.2. 404 RECONCILIATION_RUN_NOT_FOUND if absent.
+  // =========================================================================
+
+  router.get('/reconciliation/runs/:id', (req, res): void => {
+    const { id } = req.params as { id: string };
+    const runId = Number(id);
+    if (!Number.isInteger(runId)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'id must be an integer' } });
+      return;
+    }
+
+    const found = deps.reconciler.getRun(runId);
+    if (!found) {
+      res.status(404).json({ error: { code: 'RECONCILIATION_RUN_NOT_FOUND', message: `No reconciliation run with id '${runId}'` } });
+      return;
+    }
+
+    const { run, mismatches } = found;
+    res.status(200).json({
+      run: {
+        id: run.id,
+        operatorId: run.operatorId,
+        windowStart: run.windowStart,
+        windowEnd: run.windowEnd,
+        checkedCount: run.checkedCount,
+        mismatchCount: run.mismatchCount,
+        status: run.status,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+      },
+      // details are already decoded to objects by the store
+      mismatches: mismatches.map((m) => ({ txnId: m.txnId, kind: m.kind, details: m.details })),
+    });
+  });
+
+  // =========================================================================
+  // AD. POST /reconciliation/runs — on-demand run (roles: admin)
+  //     Spec §9.3. Body { operatorId, windowStart, windowEnd }. Runs the diff
+  //     synchronously (acceptable for v1) but returns 202 Accepted with the run
+  //     id. IS audited (mutation). Half-open window [windowStart, windowEnd).
+  // =========================================================================
+
+  router.post('/reconciliation/runs', requireRole('admin'), async (req, res): Promise<void> => {
+    const body = (req.body ?? {}) as { operatorId?: unknown; windowStart?: unknown; windowEnd?: unknown };
+
+    if (typeof body.operatorId !== 'string' || !body.operatorId.trim()) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'operatorId (non-empty string) required' } });
+      return;
+    }
+    const operatorId = body.operatorId.trim();
+
+    const windowStart = body.windowStart;
+    const windowEnd = body.windowEnd;
+    if (typeof windowStart !== 'number' || !Number.isInteger(windowStart)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'windowStart (integer unix seconds) required' } });
+      return;
+    }
+    if (typeof windowEnd !== 'number' || !Number.isInteger(windowEnd)) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'windowEnd (integer unix seconds) required' } });
+      return;
+    }
+    if (windowEnd <= windowStart) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'windowEnd must be greater than windowStart' } });
+      return;
+    }
+
+    // Operator must resolve via the registry, else 404.
+    if (!deps.registry.getById(operatorId)) {
+      res.status(404).json({ error: { code: 'OPERATOR_NOT_FOUND', message: `No operator with id '${operatorId}'` } });
+      return;
+    }
+
+    const run = await deps.reconciler.run(operatorId, windowStart, windowEnd);
+
+    deps.adminAudit.record({
+      actor: req.admin!.username,
+      action: 'reconciliation.run',
+      target: operatorId,
+      payload: { windowStart, windowEnd, runId: run.id, mismatchCount: run.mismatchCount },
+    });
+
+    res.status(202).json({ id: run.id, status: run.status, mismatchCount: run.mismatchCount });
   });
 
   return router;
