@@ -35,7 +35,7 @@ Every player has a server-side session stored in Dragonfly with balance, stats, 
 | `POST /api/session` | Create a new anonymous session. Body `{ displayName?, balance? }` optional. Returns `{ sessionId, displayName, balance, createdAt, expiresAt }`. |
 | `GET /api/sessions/:id` | Fetch session + stats `{ session, stats }`. |
 | `GET /api/sessions/:id/history?limit=50` | Full audit log: every bet, cashout, and crash this session saw. |
-| `GET /api/health` | Reports `storeOnline` so you can health-check Dragonfly via the API. |
+| `GET /api/health` | Public liveness probe — returns `{ok:true}` only. No version/store/round metadata leaked. The Dockerfile `HEALTHCHECK` targets this. Per-operator runtime stats live behind JWT at `/admin/v1/health/summary`. |
 
 ### What's tracked per session
 - **Balance** (atomic via `HINCRBYFLOAT`, quantized to 2 decimals)
@@ -229,7 +229,7 @@ The daily 00:15-UTC sweep (`scheduleDailyReconciliation`, see `packages/server/s
 [reconciliation] no operator ledger source configured — runs will report our txns as missing_on_operator (Phase-future: wire to each operator's reconciliation feed).
 ```
 
-To enable real drift detection, wire each operator's ledger HTTP contract at the `OperatorLedgerSource` injection point in `packages/server/src/index.ts` (`defaultLedgerSource`). On-demand re-runs are available via `POST /admin/v1/reconciliation/run`.
+To enable real drift detection, wire each operator's ledger HTTP contract at the `OperatorLedgerSource` injection point in `packages/server/src/index.ts` (`defaultLedgerSource`). On-demand re-runs are available via `POST /admin/v1/reconciliation/runs` (spec §9.3).
 
 ### Inspecting the database
 

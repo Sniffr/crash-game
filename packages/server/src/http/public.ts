@@ -22,7 +22,6 @@ import {
   getStats,
   getHistory,
   StoreOfflineError,
-  isOnline as storeOnline,
 } from '../store';
 import { getActiveTheme } from '../theme/loader';
 import { getAllHistory } from '../game/history';
@@ -124,12 +123,12 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   });
 
   // ─── Health ────────────────────────────────────────────────────────────────
-  app.get('/api/health', (_req, res) => res.json({
-    ok: true,
-    roundNumber: round.roundNumber,
-    hasTheme: getActiveTheme() != null,
-    storeOnline: storeOnline(),
-  }));
+  // The PUBLIC /api/health liveness probe (Task 8.3 Dockerfile HEALTHCHECK target)
+  // is registered in index.ts BEFORE this router runs, and returns the minimal
+  // {ok:true} — no version, no roundNumber, no theme/store internals (no
+  // leakage to unauthed scanners). Per-operator stats live behind JWT at
+  // /admin/v1/health/summary (spec §10.1). Do NOT re-add a /api/health handler
+  // here — the old verbose handler was deleted in Phase-8 holistic review (S1).
 
   // ─── History ───────────────────────────────────────────────────────────────
   app.get('/api/history', (_req, res) => res.json(getAllHistory().slice(-50)));
