@@ -104,7 +104,9 @@ crashPointFor(serverSeed, `${roundNumber}:${gameId}`, { rtp: effectiveRtp })
 
 **Provably-fair verifier stays honest:** the reveal/verify path recomputes `crashPointFor(serverSeed, message, rtp)`. The verifier page and any published proof simply include `gameId` and the game's `rtp` in the recomputed message. Same commit/reveal, one extra public input.
 
-**Schema:** `bet_log` and the rounds table gain a `game_id TEXT` column (nullable for pre-migration rows; new rows always set it). Reconciliation, admin reads, and financial rollups group by `game_id` where it aids per-game reporting but are otherwise unchanged.
+**Schema:** `bet_log` gains a `game_id TEXT` column (default `'galaxy-crash'` for pre-migration rows; new rows always set it). Reconciliation, admin reads, and financial rollups group by `game_id` where it aids per-game reporting but are otherwise unchanged.
+
+**Implemented (2026-07-24):** live crash points key on each game's **base** `games.rtp`. A single shared round loop cannot fork the multiplier stream per operator, so `operator_games.rtp_override` is stored and honoured for config/reporting but does not fork the live crash stream (per-operator-per-game live divergence would need a per-(operator,game) stream — out of scope). The default game keeps the legacy bare-`roundNumber` nonce (its crash points, history, and existing verifiers are unchanged); other games use `${roundNumber}:${gameId}`. The server seed is revealed only at round end, so a game that crashes early never leaks siblings' crash points to anyone who could still act on them (betting is already closed).
 
 ---
 

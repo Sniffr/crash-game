@@ -68,12 +68,29 @@ export function crashPointFor(
   roundNumber: number,
   config: RngConfig = DEFAULT_CONFIG,
 ): number {
+  return crashPointForMessage(serverSeed, String(roundNumber), config);
+}
+
+/**
+ * Message-based crash point — the general form used for multi-game rounds.
+ *
+ * `message` is the HMAC nonce. For the default single game it is `String(roundNumber)`
+ * (see {@link crashPointFor}); for a catalogue game it is `\`${roundNumber}:${gameId}\``,
+ * which domain-separates the draw so each game gets an INDEPENDENT crash point on
+ * the same (serverSeed, roundNumber). A provably-fair verifier recomputes the same
+ * message. Everything below the message is identical to the legacy path.
+ */
+export function crashPointForMessage(
+  serverSeed: string,
+  message: string,
+  config: RngConfig = DEFAULT_CONFIG,
+): number {
   if (config.rtp <= 0 || config.rtp > 1) {
     throw new Error(`rtp must be in (0, 1], got ${config.rtp}`);
   }
 
   const hmac = createHmac('sha256', serverSeed)
-    .update(String(roundNumber))
+    .update(message)
     .digest('hex');
 
   // Take the first 13 hex chars = 52 bits of entropy, then map to [0, 1).
@@ -98,6 +115,22 @@ export function crashPointFor(
   const quantized = Math.floor(raw) / 100;
 
   return Math.min(Math.max(quantized, 1.0), config.maxMultiplier);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-game message convention (2026-07-24)
+// ---------------------------------------------------------------------------
+
+/** The default game keeps the legacy bare-roundNumber nonce for back-compat. */
+export const DEFAULT_GAME_ID = 'galaxy-crash';
+
+/**
+ * The HMAC nonce for a (round, game). The default game uses the legacy
+ * `String(roundNumber)` so its crash points — and every existing verifier /
+ * history row — are unchanged; other games are domain-separated by gameId.
+ */
+export function crashMessage(roundNumber: number, gameId: string): string {
+  return gameId === DEFAULT_GAME_ID ? String(roundNumber) : `${roundNumber}:${gameId}`;
 }
 
 // ---------------------------------------------------------------------------

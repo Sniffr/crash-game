@@ -82,6 +82,14 @@ interface GameState {
 }
 
 const SESSION_PARAM = 'session';
+const DEFAULT_GAME_ID = 'galaxy-crash';
+
+/** The game this tab is playing, from ?game= (defaults to the base game). */
+function readGameIdFromUrl(): string {
+  try {
+    return new URLSearchParams(location.search).get('game')?.trim() || DEFAULT_GAME_ID;
+  } catch { return DEFAULT_GAME_ID; }
+}
 
 function readSessionIdFromUrl(): string | null {
   try {
@@ -339,17 +347,23 @@ export default function App() {
         break;
 
       case 'multiplier_update':
-        setGameState((prev) => ({ ...prev, currentMultiplier: message.data.multiplier }));
+        // Multi-game: once THIS game has crashed the round is over for us, even
+        // though the shared multiplier keeps climbing for still-flying games.
+        setGameState((prev) => (prev.phase === 'CRASHED' ? prev : { ...prev, currentMultiplier: message.data.multiplier }));
         break;
 
-      case 'crash':
+      case 'crash': {
+        // Multi-game: crash frames are tagged with gameId and broadcast to all
+        // tabs. Only react to our own game's crash; ignore siblings.
+        const crashGameId = message.data.gameId ?? DEFAULT_GAME_ID;
+        if (crashGameId !== readGameIdFromUrl()) break;
         crashBoom();
         setGameState((prev) => ({
           ...prev,
           phase: 'CRASHED',
           crashPoint: message.data.crashPoint,
           currentMultiplier: message.data.crashPoint,
-          serverSeed: message.data.serverSeed,
+          serverSeed: message.data.serverSeed ?? prev.serverSeed,
           bets: message.data.bets ?? prev.bets,
         }));
         setHasBet((had) => {
@@ -357,6 +371,7 @@ export default function App() {
           return false;
         });
         break;
+      }
 
       case 'bet_placed':
         sndPlaceBet();

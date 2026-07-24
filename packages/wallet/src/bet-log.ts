@@ -74,6 +74,8 @@ export interface BetRow {
   winAmountMinor: number | null;
   multiplier: number | null;
   errorCode: string | null;
+  /** Catalogue game this bet belongs to (multi-game, 2026-07-24). */
+  gameId: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -208,6 +210,8 @@ export interface CreateBetInput {
   currency: string;
   amountMinor: number;
   betTxnId: string;
+  /** Catalogue game (multi-game, 2026-07-24). Defaults to 'galaxy-crash'. */
+  gameId?: string;
 }
 
 export type TxnKind = 'bet' | 'win' | 'rollback';
@@ -242,6 +246,7 @@ interface BetLogRow {
   win_amount_minor: number | null;
   multiplier: number | null;
   error_code: string | null;
+  game_id: string;
   created_at: number;
   updated_at: number;
 }
@@ -307,6 +312,7 @@ function rowToBetRow(row: BetLogRow): BetRow {
     winAmountMinor: row.win_amount_minor,
     multiplier: row.multiplier,
     errorCode: row.error_code,
+    gameId: row.game_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -358,6 +364,7 @@ export class BetLog {
         win_amount_minor  INTEGER,
         multiplier        REAL,
         error_code        TEXT,
+        game_id           TEXT NOT NULL DEFAULT 'galaxy-crash',
         created_at        INTEGER NOT NULL,
         updated_at        INTEGER NOT NULL
       );
@@ -377,6 +384,16 @@ export class BetLog {
       );
       CREATE INDEX IF NOT EXISTS idx_txn_idemp_op ON txn_idempotency(operator_id, created_at);
     `);
+
+    // Idempotent forward-compat: add game_id to bet_log DBs created before the
+    // multi-game catalogue (2026-07-24). Same defensive ALTER pattern as
+    // operator-registry.ts. "duplicate column" is the expected no-op.
+    try {
+      this.db.exec(`ALTER TABLE bet_log ADD COLUMN game_id TEXT NOT NULL DEFAULT 'galaxy-crash'`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('duplicate column')) throw err;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -406,13 +423,13 @@ export class BetLog {
           bet_id, operator_id, player_id, session_id, round_id, currency,
           amount_minor, state, bet_txn_id,
           win_txn_id, rollback_txn_id, bet_op_txn_id, win_op_txn_id,
-          win_amount_minor, multiplier, error_code,
+          win_amount_minor, multiplier, error_code, game_id,
           created_at, updated_at
         ) VALUES (
           @bet_id, @operator_id, @player_id, @session_id, @round_id, @currency,
           @amount_minor, @state, @bet_txn_id,
           NULL, NULL, NULL, NULL,
-          NULL, NULL, NULL,
+          NULL, NULL, NULL, @game_id,
           @created_at, @updated_at
         )`,
       ).run({
@@ -425,6 +442,7 @@ export class BetLog {
         amount_minor: input.amountMinor,
         state: 'PENDING' as BetState,
         bet_txn_id: input.betTxnId,
+        game_id: input.gameId ?? 'galaxy-crash',
         created_at: now,
         updated_at: now,
       });

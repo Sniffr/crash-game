@@ -2,6 +2,9 @@ import {
   generateServerSeed,
   commitSeed,
   crashPointFor,
+  crashPointForMessage,
+  crashMessage,
+  DEFAULT_GAME_ID,
 } from '@crash/shared/rng';
 import { type RoundState, type Bet, type GameConfig, type HistoryEntry } from '@crash/shared/types';
 import { GAME_CONFIG } from '@crash/shared/config';
@@ -57,14 +60,40 @@ export function startBettingPhase() {
   const crashPoint = crashPointFor(serverSeed, roundNumber, CONFIG);
   const hashCommit = commitSeed(serverSeed);
 
+  // Multi-game: compute an independent crash point per active catalogue game
+  // (domain-separated by gameId). The default game keeps the legacy crash point.
+  // The round's `crashPoint` becomes the MAX so the flight covers every game;
+  // each game crashes at its own value mid-flight. Absent when the catalogue is
+  // not wired (tests) → the round stays single-game and behaves exactly as before.
+  // ponytail: live crash points key on each game's BASE rtp (games.rtp), not on
+  // per-operator operator_games.rtp_override — one shared round can't fork the
+  // stream per operator. The override is stored + honoured at reporting; wire it
+  // into the live stream only if per-operator-per-game crash divergence is needed.
+  const games = getOperatorWiringDeps()?.games;
+  let gameCrashPoints: Record<string, number> | undefined;
+  let roundCrashPoint = crashPoint;
+  if (games) {
+    gameCrashPoints = { [DEFAULT_GAME_ID]: crashPoint };
+    for (const g of games.list()) {
+      if (g.gameId === DEFAULT_GAME_ID) continue;
+      gameCrashPoints[g.gameId] = crashPointForMessage(
+        serverSeed,
+        crashMessage(roundNumber, g.gameId),
+        { rtp: g.rtp, maxMultiplier: CONFIG.maxMultiplier },
+      );
+    }
+    roundCrashPoint = Math.max(...Object.values(gameCrashPoints));
+  }
+
   currentRound = {
     roundNumber,
     phase: 'BETTING',
-    crashPoint,
+    crashPoint: roundCrashPoint,
     currentMultiplier: 1.0,
     startTime: Date.now(),
     bets: [],
     serverSeedHash: hashCommit,
+    ...(gameCrashPoints ? { gameCrashPoints, gameCrashedAt: {} } : {}),
   };
 
   // Keep bets.ts in sync with the current round ref
@@ -151,7 +180,8 @@ function startFlightPhase() {
     if (raw >= currentRound.crashPoint) {
       currentRound.currentMultiplier = currentRound.crashPoint;
       clearInterval(interval);
-      crashRound();
+      if (currentRound.gameCrashPoints) finalizeMultiGameCrash();
+      else crashRound(); // legacy single-game path — byte-unchanged
       return;
     }
     const multiplier = Math.floor(raw * 100) / 100;
@@ -160,13 +190,105 @@ function startFlightPhase() {
     for (const bet of currentRound.bets) {
       if (bet.cashedOut || !bet.autoCashout) continue;
       if (multiplier < bet.autoCashout) continue;
-      if (bet.autoCashout > currentRound.crashPoint) continue;
+      const gcp = gameCrashPointFor(bet.gameId);
+      if (bet.autoCashout > gcp) continue;
+      // Skip if this bet's game already crashed this round.
+      if (currentRound.gameCrashedAt?.[bet.gameId ?? DEFAULT_GAME_ID] != null) continue;
       // Auto-cashouts are awaited but we don't block the tick on them
       void tryCashoutBet(bet, bet.autoCashout, 'auto');
     }
 
+    // Multi-game: crash each game as the climbing multiplier reaches its point.
+    if (currentRound.gameCrashPoints) {
+      for (const [gid, gcp] of Object.entries(currentRound.gameCrashPoints)) {
+        if (currentRound.gameCrashedAt![gid] != null) continue;
+        if (multiplier >= gcp) crashOneGame(gid, gcp);
+      }
+    }
+
     broadcast({ type: 'multiplier_update', data: { multiplier, roundNumber: currentRound.roundNumber } });
   }, 50);
+}
+
+/** This bet's game crash point, or the round crash point (single-game fallback). */
+function gameCrashPointFor(gameId: string | undefined): number {
+  if (!currentRound) return Infinity;
+  return currentRound.gameCrashPoints?.[gameId ?? DEFAULT_GAME_ID] ?? currentRound.crashPoint;
+}
+
+/**
+ * Crash a SINGLE game mid-flight (multi-game rounds only): record losses for
+ * that game's players, expire its operator bets, and broadcast a crash frame
+ * tagged with gameId. The server seed is NOT revealed here — revealing it would
+ * let players compute sibling games' crash points before those games crash. The
+ * reveal happens once at round end (RESULT phase, as always).
+ */
+function crashOneGame(gameId: string, atCrashPoint: number): void {
+  if (!currentRound || !currentRound.gameCrashedAt) return;
+  if (currentRound.gameCrashedAt[gameId] != null) return;
+  currentRound.gameCrashedAt[gameId] = Date.now();
+
+  for (const bet of currentRound.bets) {
+    if ((bet.gameId ?? DEFAULT_GAME_ID) !== gameId) continue;
+    if (bet.cashedOut) continue;
+    bet.profit = -bet.amount;
+    if (bet.isBot || bet.operatorId) continue; // operator losses → bet_log below
+    const sessionId = bet.playerId;
+    void recordLoss(sessionId).catch(() => {});
+    void appendHistory(sessionId, {
+      kind: 'crashed',
+      roundNumber: currentRound!.roundNumber,
+      amount: bet.amount,
+      crashPoint: atCrashPoint,
+      serverSeed,
+      at: Date.now(),
+    } satisfies HistoryEntry).catch(() => {});
+    void getStats(sessionId).then((stats) => {
+      sendToSession(sessionId, { type: 'stats_update', data: { stats } });
+    }).catch(() => {});
+  }
+
+  const roundId = `rnd-${currentRound.roundNumber}`;
+  const wiringDeps = getOperatorWiringDeps();
+  if (wiringDeps) {
+    void expireOperatorBetsOnCrash({ betLog: wiringDeps.betLog }, roundId, gameId).catch((err) => {
+      console.error('[crashOneGame] expireOperatorBetsOnCrash error:', err);
+    });
+  }
+
+  broadcast({
+    type: 'crash',
+    data: {
+      roundNumber: currentRound.roundNumber,
+      gameId,
+      crashPoint: atCrashPoint,
+      bets: currentRound.bets.filter((b) => (b.gameId ?? DEFAULT_GAME_ID) === gameId),
+    },
+  });
+}
+
+/**
+ * End a multi-game round: crash any games that haven't hit their point yet
+ * (the max-crash game[s]), then do the global round-end bookkeeping and reveal.
+ */
+function finalizeMultiGameCrash(): void {
+  if (!currentRound || !currentRound.gameCrashPoints) return;
+  currentRound.phase = 'CRASHED';
+  currentRound.crashTime = Date.now();
+  currentRound.currentMultiplier = currentRound.crashPoint;
+
+  for (const [gid, gcp] of Object.entries(currentRound.gameCrashPoints)) {
+    crashOneGame(gid, gcp);
+  }
+
+  prevServerSeed = serverSeed;
+  prevRoundNumber = currentRound.roundNumber;
+
+  // History strip is the default game's series (per-game history is future).
+  const defaultCrash = currentRound.gameCrashPoints[DEFAULT_GAME_ID] ?? currentRound.crashPoint;
+  pushHistory({ roundNumber: currentRound.roundNumber, crashPoint: defaultCrash });
+
+  setTimeout(() => startResultPhase(), CONFIG.resultPhaseMs);
 }
 
 function crashRound() {
@@ -234,7 +356,9 @@ function startResultPhase() {
     data: {
       phase: 'RESULT',
       roundNumber: currentRound.roundNumber,
-      crashPoint: currentRound.crashPoint,
+      // Multi-game: omit crashPoint so each client keeps its own game's value
+      // (set at that game's crash frame). Single-game: reveal it as before.
+      ...(currentRound.gameCrashPoints ? {} : { crashPoint: currentRound.crashPoint }),
       serverSeed,
       history: getRecentHistory(30),
       serverTime: Date.now(),

@@ -41,7 +41,7 @@ const operatorAudit = new OperatorAudit(db);
 const adminUsers = new AdminUsers(db);
 const revoked = new Set<string>();
 const walletClientCache = new WalletClientCache(registry, betLog);
-setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter });
+setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
 
 // Reconciliation (Task 8.1, spec §9).
 //

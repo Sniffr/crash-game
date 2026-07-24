@@ -34,6 +34,8 @@ export interface Bet {
   currency?: string;
   /** Stake in integer minor units (Task 1.6+). Canonical going forward; replaces {@link Bet.amount}. */
   amountMinor?: number;
+  /** Catalogue game this bet belongs to (multi-game, 2026-07-24). Defaults to 'galaxy-crash'. */
+  gameId?: string;
 }
 
 export interface RoundState {
@@ -46,6 +48,16 @@ export interface RoundState {
   bets: Bet[];
   serverSeedHash?: string;
   serverSeed?: string;
+  /**
+   * Per-game crash points for this round (multi-game, 2026-07-24). Absent for
+   * legacy/test rounds — those behave as a single game whose crash point is
+   * {@link RoundState.crashPoint}. When present, {@link RoundState.crashPoint}
+   * equals the MAX over these (drives flight duration); each game crashes at
+   * its own value.
+   */
+  gameCrashPoints?: Record<string, number>;
+  /** Wall-clock (ms) each game crashed this round. Absent ⇒ still flying. */
+  gameCrashedAt?: Record<string, number>;
 }
 
 /** Per-round operator context threaded through bet/cashout handlers (Task 1.6+). */

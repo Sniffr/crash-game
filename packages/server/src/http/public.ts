@@ -8,11 +8,14 @@ import fs from 'fs';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import {
-  crashPointFor,
+  crashPointForMessage,
+  crashMessage,
   commitSeed,
   verifyRound,
+  DEFAULT_GAME_ID,
   type Commit,
   type Reveal,
+  type RngConfig,
 } from '@crash/shared/rng';
 import { WalletError } from '@crash/wallet';
 import {
@@ -30,7 +33,14 @@ import type { WalletClientCache } from '../wallet/client-cache';
 import type { GamesRepo } from '@crash/wallet';
 import { observeWalletCall } from '../observability/metrics.js';
 
-const DEFAULT_GAME_ID = 'galaxy-crash';
+/** RNG config for verifying a game: default → round CONFIG, else the game's own RTP. */
+function verifyConfigForGame(deps: PublicRouteDeps, gameId: string): RngConfig {
+  if (gameId !== DEFAULT_GAME_ID) {
+    const g = deps.games.getById(gameId);
+    if (g) return { rtp: g.rtp, maxMultiplier: round.CONFIG.maxMultiplier };
+  }
+  return round.CONFIG;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -154,16 +164,20 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   app.get('/api/history', (_req, res) => res.json(getAllHistory().slice(-50)));
 
   // ─── Verify (GET) ──────────────────────────────────────────────────────────
+  // ?game=<id> verifies a non-default game (domain-separated nonce + its RTP).
+  // Omitting game verifies the default game exactly as before.
   app.get('/api/verify', (req, res) => {
     const seed = String(req.query.seed ?? '');
     const rn = String(req.query.roundNumber ?? '');
+    const gameId = String(req.query.game ?? '').trim() || DEFAULT_GAME_ID;
     if (!seed || !rn) return res.status(400).json({ error: 'Missing seed or roundNumber' });
     const roundNum = parseInt(rn, 10);
     if (!Number.isFinite(roundNum)) return res.status(400).json({ error: 'roundNumber must be an integer' });
     try {
-      const crashPoint = crashPointFor(seed, roundNum, round.CONFIG);
+      const cfg = verifyConfigForGame(deps, gameId);
+      const crashPoint = crashPointForMessage(seed, crashMessage(roundNum, gameId), cfg);
       const hashCommit = commitSeed(seed);
-      res.json({ roundNumber: roundNum, serverSeed: seed, crashPoint, hashCommit });
+      res.json({ roundNumber: roundNum, gameId, serverSeed: seed, crashPoint, hashCommit });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }
@@ -171,17 +185,19 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
 
   // ─── Verify (POST) ─────────────────────────────────────────────────────────
   app.post('/api/verify', (req, res) => {
-    const { seed, roundNumber: rn } = (req.body ?? {}) as { seed?: string; roundNumber?: number };
+    const { seed, roundNumber: rn, game } = (req.body ?? {}) as { seed?: string; roundNumber?: number; game?: string };
     if (!seed || rn == null) return res.status(400).json({ error: 'Missing seed or roundNumber' });
+    const gameId = (game ?? '').trim() || DEFAULT_GAME_ID;
     try {
+      const cfg = verifyConfigForGame(deps, gameId);
       const commit: Commit = { roundNumber: rn, hashCommit: commitSeed(seed) };
       const reveal: Reveal = {
         roundNumber: rn,
         serverSeed: seed,
-        crashPoint: crashPointFor(seed, rn, round.CONFIG),
+        crashPoint: crashPointForMessage(seed, crashMessage(rn, gameId), cfg),
       };
       const result = verifyRound(commit, reveal);
-      res.json({ ...result, computedCrash: reveal.crashPoint, revealedSeed: seed });
+      res.json({ ...result, gameId, computedCrash: reveal.crashPoint, revealedSeed: seed });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }

@@ -15,6 +15,7 @@ import {
 } from '../store';
 import type { Session } from '@crash/shared/types';
 import { safeSend, broadcast } from './hub';
+import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 import { currentRound } from '../game/round';
 import { cashOutBet, tryCashoutBet, placeOperatorBet } from '../game/bets';
 import { getOperatorWiringDeps } from '../game/operator-deps';
@@ -130,6 +131,7 @@ export async function handleMessage(
           cashedOut: false,
           isBot: false,
           displayName: session.displayName,
+          gameId: session.gameId ?? DEFAULT_GAME_ID,
         };
         currentRound.bets.push(bet);
 
@@ -161,6 +163,9 @@ export async function handleMessage(
       if (!sessionId) return;
       const bet = currentRound.bets.find((b) => b.playerId === sessionId);
       if (!bet || bet.cashedOut) return;
+      // Multi-game: refuse if this bet's game already crashed, even though the
+      // round is still FLYING for other games.
+      if (currentRound.gameCrashedAt?.[bet.gameId ?? DEFAULT_GAME_ID] != null) return;
       const at = currentRound.currentMultiplier;
       await tryCashoutBet(bet, at, 'manual');
       return;
@@ -232,6 +237,7 @@ export async function handlePlaceOperatorBet(
   const betId = `bet-${sessionId}-${currentRound.roundNumber}`;
   const betTxnId = randomUUID();
   const roundId = `rnd-${currentRound.roundNumber}`;
+  const gameId = session.gameId ?? DEFAULT_GAME_ID;
 
   try {
     const placeResult = await placeOperatorBet(
@@ -245,7 +251,7 @@ export async function handlePlaceOperatorBet(
         amountMinor,
         betId,
         betTxnId,
-        gameId: 'galaxy-crash',
+        gameId,
         autoCashout,
       },
     );
@@ -264,6 +270,7 @@ export async function handlePlaceOperatorBet(
       betTxnId,
       currency: session.currency,
       amountMinor,
+      gameId,
     };
     currentRound.bets.push(bet);
 

@@ -333,6 +333,7 @@ export async function placeOperatorBet(
     currency: input.currency,
     amountMinor: input.amountMinor,
     betTxnId: input.betTxnId,
+    gameId: input.gameId,
   });
 
   // Step 2: call the operator wallet (wrapped for metrics — transparent: rethrows unchanged)
@@ -614,12 +615,16 @@ export async function voidOperatorBet(
 export async function expireOperatorBetsOnCrash(
   deps: { betLog: BetLog },
   roundId: string,
+  gameId?: string,
 ): Promise<number> {
   const { betLog } = deps;
   const rows = betLog.listByRound(roundId);
   let count = 0;
 
   for (const row of rows) {
+    // Multi-game: when a gameId is given, only expire that game's bets — sibling
+    // games in the same round may still be flying.
+    if (gameId !== undefined && row.gameId !== gameId) continue;
     if (row.state !== 'ARMED' && row.state !== 'FLYING') {
       // Terminal or other state — skip silently
       continue;

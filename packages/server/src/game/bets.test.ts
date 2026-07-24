@@ -355,6 +355,37 @@ it('crash: expireOperatorBetsOnCrash marks ARMED bets as LOST, returns count, id
   expect(balResp.balance).toBe(90_000);
 });
 
+it('multi-game: expireOperatorBetsOnCrash(gameId) only expires that game, leaves siblings ARMED', async () => {
+  const roundId = uid('round');
+
+  const betA = uid('bet');
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test', playerId: 'pid-1', sessionId: 'sess-pid-1', roundId,
+    currency: 'EUR', amountMinor: 10_000, betId: betA, betTxnId: uid('btxn'),
+    gameId: 'galaxy-crash',
+  });
+  const betB = uid('bet');
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test', playerId: 'pid-1', sessionId: 'sess-pid-1b', roundId,
+    currency: 'EUR', amountMinor: 10_000, betId: betB, betTxnId: uid('btxn'),
+    gameId: 'cosmic-jet',
+  });
+
+  expect(betLog.getById(betA)?.gameId).toBe('galaxy-crash');
+  expect(betLog.getById(betB)?.gameId).toBe('cosmic-jet');
+
+  // galaxy-crash crashes; cosmic-jet is still flying.
+  const n = await expireOperatorBetsOnCrash({ betLog }, roundId, 'galaxy-crash');
+  expect(n).toBe(1);
+  expect(betLog.getById(betA)?.state).toBe('LOST');
+  expect(betLog.getById(betB)?.state).toBe('ARMED'); // sibling untouched
+
+  // Now cosmic-jet crashes.
+  const m = await expireOperatorBetsOnCrash({ betLog }, roundId, 'cosmic-jet');
+  expect(m).toBe(1);
+  expect(betLog.getById(betB)?.state).toBe('LOST');
+});
+
 // ---------------------------------------------------------------------------
 // Test 5: ambiguous /bet failure → ROLLBACK_PENDING
 // ---------------------------------------------------------------------------
