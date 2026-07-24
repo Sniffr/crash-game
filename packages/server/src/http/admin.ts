@@ -11,7 +11,7 @@
 
 import { Router } from 'express';
 import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, Reconciler, ReconStatus } from '@crash/wallet';
-import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
+import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, GamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
@@ -37,6 +37,7 @@ export interface AdminRouterDeps {
   adminAudit: AdminAudit;
   adminUsers: AdminUsers;
   registry: OperatorRegistry;
+  games: GamesRepo;
   revoked: Set<string>;
   reconciler: Reconciler;
   nowSeconds?: () => number;
@@ -626,51 +627,140 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   });
 
   // =========================================================================
-  // Q. PATCH /operators/:id/games/:gameId
+  // Games catalogue (multi-game — 2026-07-24 design)
+  // RTP crosses this boundary as a PERCENTAGE (97.0), matching rtpVariant
+  // convention. It is stored/computed as a fraction (0.97). See design §2.
+  // =========================================================================
+
+  const gamePublicShape = (g: import('@crash/wallet').Game) => ({
+    gameId: g.gameId,
+    name: g.name,
+    gameType: g.gameType,
+    rtp: g.rtp * 100,
+    theme: g.theme,
+    status: g.status,
+    createdAt: g.createdAt,
+    updatedAt: g.updatedAt,
+  });
+
+  // GET /games — list (admin sees archived too via ?includeArchived=1)
+  router.get('/games', requireRole('admin'), (req, res): void => {
+    const includeArchived = req.query['includeArchived'] === '1' || req.query['includeArchived'] === 'true';
+    res.json({ items: deps.games.list({ includeArchived }).map(gamePublicShape) });
+  });
+
+  // GET /games/:gameId
+  router.get('/games/:gameId', requireRole('admin'), (req, res): void => {
+    const g = deps.games.getById(req.params['gameId']!);
+    if (!g) { res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: `No game with id '${req.params['gameId']}'` } }); return; }
+    res.json(gamePublicShape(g));
+  });
+
+  // POST /games — create
+  router.post('/games', requireRole('admin'), (req, res): void => {
+    const body = (req.body ?? {}) as { gameId?: unknown; name?: unknown; gameType?: unknown; rtp?: unknown; theme?: unknown; status?: unknown };
+    if (typeof body.gameId !== 'string' || !body.gameId.trim() || typeof body.name !== 'string' || !body.name.trim()) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'gameId and name (non-empty strings) required' } });
+      return;
+    }
+    if (typeof body.rtp !== 'number' || !Number.isFinite(body.rtp) || body.rtp <= 0 || body.rtp > 100) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'rtp must be a percentage in (0, 100]' } });
+      return;
+    }
+    try {
+      const g = deps.games.create({
+        gameId: body.gameId,
+        name: body.name,
+        gameType: body.gameType as import('@crash/wallet').GameType,
+        rtp: body.rtp / 100,
+        theme: body.theme ?? {},
+        status: body.status as import('@crash/wallet').GameStatus | undefined,
+      });
+      deps.adminAudit.record({ actor: req.admin!.username, action: 'game.create', target: `game:${g.gameId}`, payload: { name: g.name, gameType: g.gameType } });
+      res.status(201).json(gamePublicShape(g));
+    } catch (err) {
+      if (err instanceof DuplicateGameIdError) { res.status(409).json({ error: { code: 'DUPLICATE_GAME_ID', message: err.message } }); return; }
+      if (err instanceof InvalidGameError) { res.status(400).json({ error: { code: 'INVALID_REQUEST', message: err.message } }); return; }
+      throw err;
+    }
+  });
+
+  // PATCH /games/:gameId — update
+  router.patch('/games/:gameId', requireRole('admin'), (req, res): void => {
+    const gameId = req.params['gameId']!;
+    const body = (req.body ?? {}) as { name?: unknown; gameType?: unknown; rtp?: unknown; theme?: unknown; status?: unknown };
+    const patch: import('@crash/wallet').GameUpdate = {};
+    if (body.name !== undefined) patch.name = body.name as string;
+    if (body.gameType !== undefined) patch.gameType = body.gameType as import('@crash/wallet').GameType;
+    if (body.theme !== undefined) patch.theme = body.theme;
+    if (body.status !== undefined) patch.status = body.status as import('@crash/wallet').GameStatus;
+    if (body.rtp !== undefined) {
+      if (typeof body.rtp !== 'number' || !Number.isFinite(body.rtp) || body.rtp <= 0 || body.rtp > 100) {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'rtp must be a percentage in (0, 100]' } });
+        return;
+      }
+      patch.rtp = body.rtp / 100;
+    }
+    try {
+      const g = deps.games.update(gameId, patch);
+      deps.adminAudit.record({ actor: req.admin!.username, action: 'game.update', target: `game:${gameId}`, payload: body });
+      res.json(gamePublicShape(g));
+    } catch (err) {
+      if (err instanceof GameNotFoundError) { res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: err.message } }); return; }
+      if (err instanceof InvalidGameError) { res.status(400).json({ error: { code: 'INVALID_REQUEST', message: err.message } }); return; }
+      throw err;
+    }
+  });
+
+  // =========================================================================
+  // Q. PATCH /operators/:id/games/:gameId — enable/disable + per-operator RTP
+  // Persists to operator_games (design §2). rtpVariant is a PERCENTAGE.
   // =========================================================================
 
   router.patch('/operators/:id/games/:gameId', requireRole('admin'), (req, res): void => {
     const { id, gameId } = req.params as { id: string; gameId: string };
     const body = (req.body ?? {}) as { enabled?: unknown; rtpVariant?: unknown };
 
-    const op = deps.registry.getById(id);
-    if (!op) {
+    if (!deps.registry.getById(id)) {
       res.status(404).json({ error: { code: 'OPERATOR_NOT_FOUND', message: `No operator with id '${id}'` } });
       return;
     }
+    if (!deps.games.getById(gameId)) {
+      res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: `No game with id '${gameId}'` } });
+      return;
+    }
 
-    // NOTE: Per-operator game enabled/disabled requires a dedicated DB table which
-    // does not exist in Phase 5.2. For `rtpVariant`, we store it on the operator row.
-    // For `enabled`, we echo the requested config only (phase-future limitation).
-    // This is documented as a Phase-(future) limitation in the report.
-
-    let updatedRtpVariant = op.rtpVariant;
-
+    const patch: { enabled?: boolean; rtpOverride?: number | null } = {};
+    if (body.enabled !== undefined) {
+      if (typeof body.enabled !== 'boolean') {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'enabled must be a boolean' } });
+        return;
+      }
+      patch.enabled = body.enabled;
+    }
     if (body.rtpVariant !== undefined) {
-      try {
-        deps.registry.update(id, { rtpVariant: body.rtpVariant as number });
-        updatedRtpVariant = body.rtpVariant as number;
-      } catch (err) {
-        if (err instanceof OperatorNotFoundError) {
-          res.status(404).json({ error: { code: 'OPERATOR_NOT_FOUND', message: err.message } });
-          return;
-        }
-        throw err;
+      if (body.rtpVariant === null) {
+        patch.rtpOverride = null; // clear override → inherit game rtp
+      } else if (typeof body.rtpVariant !== 'number' || !Number.isFinite(body.rtpVariant) || body.rtpVariant <= 0 || body.rtpVariant > 100) {
+        res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'rtpVariant must be a percentage in (0, 100] or null' } });
+        return;
+      } else {
+        patch.rtpOverride = body.rtpVariant / 100;
       }
     }
 
-    deps.adminAudit.record({
-      actor: req.admin!.username,
-      action: 'operator.game_config',
-      target: `operator:${id}`,
-      payload: { gameId, ...body },
-    });
-
-    res.status(200).json({
-      gameId,
-      enabled: body.enabled !== undefined ? body.enabled : true,
-      rtpVariant: updatedRtpVariant,
-    });
+    try {
+      const link = deps.games.setOperatorGame(id, gameId, patch);
+      deps.adminAudit.record({ actor: req.admin!.username, action: 'operator.game_config', target: `operator:${id}`, payload: { gameId, ...body } });
+      res.status(200).json({
+        gameId,
+        enabled: link.enabled,
+        rtpVariant: link.rtpOverride == null ? null : link.rtpOverride * 100,
+      });
+    } catch (err) {
+      if (err instanceof InvalidGameError) { res.status(400).json({ error: { code: 'INVALID_REQUEST', message: err.message } }); return; }
+      throw err;
+    }
   });
 
   // =========================================================================

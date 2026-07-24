@@ -103,6 +103,8 @@ export interface Session {
   balanceMinor?: number;
   /** Per-operator responsible-gambling limits, populated for operator sessions (Task 3.2+). */
   rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
+  /** Catalogue game this session is playing (multi-game, 2026-07-24). Defaults to 'galaxy-crash'. */
+  gameId?: string;
 }
 
 /** Per-session lifetime stats. All counters are non-negative. */

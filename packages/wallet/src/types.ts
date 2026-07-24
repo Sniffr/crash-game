@@ -1,6 +1,51 @@
 export type OperatorStatus = 'active' | 'paused' | 'sandbox';
 export type OperatorAdapter = 'native' | 'softswiss';
 
+// ---------------------------------------------------------------------------
+// Game catalogue (multi-game — 2026-07-24 design)
+// ---------------------------------------------------------------------------
+
+export type GameType = 'sprite' | 'gif';
+export type GameStatus = 'active' | 'archived';
+
+export interface Game {
+  gameId: string;
+  name: string;
+  gameType: GameType;
+  /** RTP as a FRACTION in (0,1], e.g. 0.97 — the units crashPointFor consumes. */
+  rtp: number;
+  /** The Creator's exported `Theme` object, stored verbatim. */
+  theme: unknown;
+  status: GameStatus;
+  createdAt: number;             // unix seconds
+  updatedAt: number;
+}
+
+export interface GameCreate {
+  gameId: string;
+  name: string;
+  gameType: GameType;
+  rtp: number;
+  theme: unknown;
+  status?: GameStatus;           // default 'active'
+}
+
+export interface GameUpdate {
+  name?: string;
+  gameType?: GameType;
+  rtp?: number;
+  theme?: unknown;
+  status?: GameStatus;
+}
+
+/** Row of the operator↔game join. `rtpOverride` null ⇒ inherit `Game.rtp`. */
+export interface OperatorGame {
+  operatorId: string;
+  gameId: string;
+  enabled: boolean;
+  rtpOverride: number | null;
+}
+
 export interface Operator {
   operatorId: string;
   name: string;

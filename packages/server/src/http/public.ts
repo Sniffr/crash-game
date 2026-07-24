@@ -27,7 +27,10 @@ import { getActiveTheme } from '../theme/loader';
 import { getAllHistory } from '../game/history';
 import * as round from '../game/round';
 import type { WalletClientCache } from '../wallet/client-cache';
+import type { GamesRepo } from '@crash/wallet';
 import { observeWalletCall } from '../observability/metrics.js';
+
+const DEFAULT_GAME_ID = 'galaxy-crash';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -97,6 +100,7 @@ function renderLaunchError(opts: { title: string; message: string; lobbyUrl?: st
 
 export interface PublicRouteDeps {
   walletClientCache: WalletClientCache;
+  games: GamesRepo;
 }
 
 // ─── Error helper ─────────────────────────────────────────────────────────────
@@ -115,8 +119,24 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // ─── Static client ─────────────────────────────────────────────────────────
   app.use(express.static(clientDist));
 
+  // ─── Games catalogue (public) ────────────────────────────────────────────────
+  // Lobbies + the Creator list active games. No theme_json here — the theme
+  // ships at launch / via /api/theme?game=.
+  app.get('/api/games', (_req, res) => {
+    res.json({
+      items: deps.games.list().map((g) => ({ gameId: g.gameId, name: g.name, gameType: g.gameType })),
+    });
+  });
+
   // ─── Theme ─────────────────────────────────────────────────────────────────
-  app.get('/api/theme', (_req, res) => {
+  // ?game=<id> returns that catalogue game's theme; falls back to the single
+  // active-theme.json when no game is given or the game is unknown (back-compat).
+  app.get('/api/theme', (req, res) => {
+    const gameId = String(req.query.game ?? '').trim();
+    if (gameId) {
+      const g = deps.games.getById(gameId);
+      if (g && g.status === 'active') { res.json(g.theme); return; }
+    }
     const activeTheme = getActiveTheme();
     if (activeTheme == null) { res.status(204).end(); return; }
     res.json(activeTheme);
@@ -212,6 +232,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
     const operator  = String(req.query.operator  ?? '').trim();
     const token     = String(req.query.token     ?? '').trim();
     const currency  = String(req.query.currency  ?? '').trim();
+    const gameId    = String(req.query.game      ?? '').trim() || DEFAULT_GAME_ID;
     const lobbyUrl  = String(req.query.lobby_url ?? '').trim();
     const returnUrl = String(req.query.return_url ?? '').trim();
     // Optional: lang, jurisdiction, mode — not used server-side yet (Task 3.2 handles client-side)
@@ -247,6 +268,28 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
       return;
     }
 
+    // 2b. Resolve the requested game and confirm it is enabled for this operator.
+    //     effectiveRtp returns null when the game is unknown/archived OR not
+    //     enabled for the operator (default-deny). Distinguish the two for a
+    //     clearer error page.
+    const game = deps.games.getById(gameId);
+    if (!game || game.status !== 'active') {
+      res.status(404).send(renderLaunchError({
+        title: 'Unknown Game',
+        message: `Unknown game '${escapeHtml(gameId)}'.`,
+        lobbyUrl: errorButtonUrl ?? undefined,
+      }));
+      return;
+    }
+    if (deps.games.effectiveRtp(operator, gameId) === null) {
+      res.status(403).send(renderLaunchError({
+        title: 'Game Unavailable',
+        message: 'This game is not enabled for your operator.',
+        lobbyUrl: errorButtonUrl ?? undefined,
+      }));
+      return;
+    }
+
     // 3. Authenticate the launch token against the operator's wallet (spec §5.1)
     //    Wrapped for metrics — transparent: rethrows the original error unchanged.
     let authResp: Awaited<ReturnType<typeof client.authenticate>>;
@@ -257,7 +300,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
           token,
           ip: req.ip ?? '',
           userAgent: req.get('user-agent') ?? '',
-          gameId: 'galaxy-crash',
+          gameId,
         }),
       );
     } catch (err) {
@@ -310,6 +353,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
         balanceMinor: authResp.balance,
         displayName: authResp.displayName,
         rgLimits: authResp.rgLimits,
+        gameId,
       });
     } catch (err) {
       console.error('[launch] createOperatorSession failed:', err);
@@ -326,7 +370,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
     // Use sanitized URLs so we never echo a javascript: scheme into the redirect
     // query string (belt-and-suspenders; the SPA has its own safety responsibilities
     // per Task 3.2, but we don't reflect unsafe URLs from our server).
-    let location = `/?session=${encodeURIComponent(session.sessionId)}`;
+    let location = `/?session=${encodeURIComponent(session.sessionId)}&game=${encodeURIComponent(gameId)}`;
     if (safeLobbyUrl)  location += `&lobby=${encodeURIComponent(safeLobbyUrl)}`;
     if (safeReturnUrl) location += `&return=${encodeURIComponent(safeReturnUrl)}`;
 

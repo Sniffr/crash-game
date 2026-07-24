@@ -5,10 +5,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, Reconciler, runRecovery, consoleAlerter } from '@crash/wallet';
+import { BetLog, OperatorRegistry, GamesRepo, Reconciler, runRecovery, consoleAlerter } from '@crash/wallet';
 import type { OperatorLedgerSource } from '@crash/wallet';
 import { scheduleDailyReconciliation } from './reconciliation/scheduler';
-import { initThemeLoader } from './theme/loader';
+import { initThemeLoader, getActiveTheme } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
@@ -35,6 +35,7 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
+const games = new GamesRepo(db);
 const adminAudit = new AdminAudit(db);
 const operatorAudit = new OperatorAudit(db);
 const adminUsers = new AdminUsers(db);
@@ -69,6 +70,21 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // Theme autoload + fs.watch
 initThemeLoader();
 
+// Seed the catalogue with the current product (galaxy-crash) from the active
+// theme, so existing single-tenant launches keep working. Idempotent: skipped
+// once the row exists. RTP comes from the round config (fraction). Runs AFTER
+// initThemeLoader so getActiveTheme() is populated.
+try {
+  if (!games.getById('galaxy-crash')) {
+    const seededTheme = getActiveTheme() ?? {};
+    const gt = (seededTheme as { gameType?: string }).gameType === 'gif' ? 'gif' : 'sprite';
+    games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: gt, rtp: CONFIG.rtp, theme: seededTheme });
+    console.log('[games] seeded galaxy-crash into the catalogue');
+  }
+} catch (err) {
+  console.error('[games] seed failed (continuing):', err);
+}
+
 // /api/health — PUBLIC liveness probe (Task 8.3 Dockerfile HEALTHCHECK target).
 // Mounted BEFORE any auth middleware. Deliberately minimal — no version/branch/
 // build metadata that would leak deployment info to unauthenticated scanners.
@@ -100,10 +116,10 @@ app.use(
 // ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──
 // Auth is internal to the router: /auth/login is public; router.use(requireAdminJwt)
 // gates everything else. No top-level auth middleware here.
-app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, revoked, reconciler }));
+app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, games, revoked, reconciler }));
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
-registerPublicRoutes(app, { walletClientCache });
+registerPublicRoutes(app, { walletClientCache, games });
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 wss.on('connection', (ws) => {

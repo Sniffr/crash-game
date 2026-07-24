@@ -148,6 +148,7 @@ export async function createOperatorSession(opts: {
   balanceMinor: number;
   displayName: string;
   rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
+  gameId?: string;
 }): Promise<Session> {
   ensureOnline();
   const sessionId = newId();
@@ -165,6 +166,7 @@ export async function createOperatorSession(opts: {
     currency: opts.currency,
     balanceMinor: opts.balanceMinor,
     rgLimits: opts.rgLimits,
+    gameId: opts.gameId ?? 'galaxy-crash',
   };
   await jput(sessKey(sessionId), session);
   await jput(statsKey(sessionId), { ...ZERO_STATS });

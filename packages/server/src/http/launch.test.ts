@@ -127,7 +127,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry } from '@crash/wallet';
+import { BetLog, OperatorRegistry, GamesRepo } from '@crash/wallet';
 import type { Server } from 'node:http';
 
 import {
@@ -176,6 +176,7 @@ beforeAll(async () => {
   db = new Database(':memory:');
   betLog = new BetLog(db);
   registry = new OperatorRegistry(db);
+  const games = new GamesRepo(db);
 
   registry.create({
     operatorId: 'op-test',
@@ -184,6 +185,10 @@ beforeAll(async () => {
     currencies: ['EUR', 'USD', 'BTC'],
     status: 'active',
   });
+
+  // Catalogue: galaxy-crash exists and is enabled for op-test (default game).
+  games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: 'sprite', rtp: 0.97, theme: { gameType: 'sprite' } });
+  games.setOperatorGame('op-test', 'galaxy-crash', { enabled: true });
 
   // Override the auto-generated signing key with the stub's fixed key
   // by using the regenSigningKey mechanism — but that generates a random key.
@@ -199,7 +204,7 @@ beforeAll(async () => {
 
   expressApp = express();
   expressApp.use(express.json());
-  registerPublicRoutes(expressApp, { walletClientCache: cache });
+  registerPublicRoutes(expressApp, { walletClientCache: cache, games });
 });
 
 afterAll(async () => {
