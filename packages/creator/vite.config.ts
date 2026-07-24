@@ -6,5 +6,10 @@ export default defineConfig({
   server: {
     port: 5174,
     strictPort: true,
+    // Proxy so "Publish to server" hits the game server same-origin (no CORS).
+    proxy: {
+      '/admin': 'http://localhost:3001',
+      '/api': 'http://localhost:3001',
+    },
   },
 });

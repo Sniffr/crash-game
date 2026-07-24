@@ -171,6 +171,18 @@ export default function App() {
     });
   }, []);
 
+  // On boot, seed the history strip with THIS game's series (multi-game).
+  useEffect(() => {
+    fetch(`/api/history?game=${encodeURIComponent(readGameIdFromUrl())}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((h: { roundNumber: number; crashPoint: number }[]) => {
+        if (Array.isArray(h) && h.length) {
+          setGameState((prev) => (prev.history.length ? prev : { ...prev, history: h }));
+        }
+      })
+      .catch(() => { /* strip just starts empty */ });
+  }, []);
+
   // Read operator launch params (?lobby, ?return) once on mount, then strip them
   // from the URL so they don't persist across reloads. The ?session= param is kept.
   useEffect(() => {
@@ -313,14 +325,19 @@ export default function App() {
     }
 
     switch (message.type) {
-      case 'join':
+      case 'join': {
+        // The join snapshot (sent before we announce our game) carries the
+        // DEFAULT game's history. Keep our own strip for non-default games.
+        const isDefault = readGameIdFromUrl() === DEFAULT_GAME_ID;
         setGameState((prev) => ({
           ...prev,
           ...message.data,
+          history: isDefault ? (message.data.history ?? prev.history) : prev.history,
           flightStartTime: message.data.phase === 'FLYING' ? message.data.startTime : null,
         }));
         setHasBet(false);
         break;
+      }
 
       case 'phase_change':
         if (message.data.phase === 'FLYING') takeoffWhoosh();
@@ -330,7 +347,9 @@ export default function App() {
           roundNumber: message.data.roundNumber ?? prev.roundNumber,
           hashCommit: message.data.hashCommit ?? prev.hashCommit,
           countdownMs: message.data.countdownMs,
-          history: message.data.history ?? prev.history,
+          // Multi-game: ignore the default game's history for non-default tabs
+          // (our strip is built from our own crash frames + boot fetch).
+          history: readGameIdFromUrl() === DEFAULT_GAME_ID ? (message.data.history ?? prev.history) : prev.history,
           bets: message.data.bets ?? (message.data.phase === 'BETTING' ? [] : prev.bets),
           currentMultiplier: message.data.phase === 'FLYING' ? 1.0 : prev.currentMultiplier,
           crashPoint: message.data.phase === 'BETTING' ? undefined : (message.data.crashPoint ?? prev.crashPoint),
@@ -358,14 +377,23 @@ export default function App() {
         const crashGameId = message.data.gameId ?? DEFAULT_GAME_ID;
         if (crashGameId !== readGameIdFromUrl()) break;
         crashBoom();
-        setGameState((prev) => ({
-          ...prev,
-          phase: 'CRASHED',
-          crashPoint: message.data.crashPoint,
-          currentMultiplier: message.data.crashPoint,
-          serverSeed: message.data.serverSeed ?? prev.serverSeed,
-          bets: message.data.bets ?? prev.bets,
-        }));
+        setGameState((prev) => {
+          // Append this round to our game's history strip (dedup by roundNumber).
+          const rn = message.data.roundNumber;
+          const already = prev.history.some((h) => h.roundNumber === rn);
+          const history = already
+            ? prev.history
+            : [...prev.history, { roundNumber: rn, crashPoint: message.data.crashPoint }].slice(-200);
+          return {
+            ...prev,
+            phase: 'CRASHED',
+            crashPoint: message.data.crashPoint,
+            currentMultiplier: message.data.crashPoint,
+            serverSeed: message.data.serverSeed ?? prev.serverSeed,
+            bets: message.data.bets ?? prev.bets,
+            history,
+          };
+        });
         setHasBet((had) => {
           if (had) flashToast('loss', `Crashed @ ${message.data.crashPoint.toFixed(2)}x`);
           return false;

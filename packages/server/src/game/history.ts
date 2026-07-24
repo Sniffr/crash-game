@@ -1,16 +1,27 @@
 import { type RoundHistoryEntry } from '@crash/shared/types';
 
-const roundHistory: RoundHistoryEntry[] = [];
+const DEFAULT_GAME_ID = 'galaxy-crash';
 
-export function pushHistory(entry: RoundHistoryEntry): void {
-  roundHistory.push(entry);
-  if (roundHistory.length > 200) roundHistory.shift();
+// Per-game round history. The default game's series is also the legacy shared
+// history (single-game callers omit gameId and get 'galaxy-crash').
+const byGame = new Map<string, RoundHistoryEntry[]>();
+
+function seriesFor(gameId: string): RoundHistoryEntry[] {
+  let s = byGame.get(gameId);
+  if (!s) { s = []; byGame.set(gameId, s); }
+  return s;
 }
 
-export function getRecentHistory(count = 30): RoundHistoryEntry[] {
-  return roundHistory.slice(-count);
+export function pushHistory(entry: RoundHistoryEntry, gameId: string = DEFAULT_GAME_ID): void {
+  const s = seriesFor(gameId);
+  s.push(entry);
+  if (s.length > 200) s.shift();
 }
 
-export function getAllHistory(): RoundHistoryEntry[] {
-  return roundHistory;
+export function getRecentHistory(count = 30, gameId: string = DEFAULT_GAME_ID): RoundHistoryEntry[] {
+  return seriesFor(gameId).slice(-count);
+}
+
+export function getAllHistory(gameId: string = DEFAULT_GAME_ID): RoundHistoryEntry[] {
+  return seriesFor(gameId);
 }

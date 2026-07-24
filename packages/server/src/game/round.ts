@@ -256,6 +256,9 @@ function crashOneGame(gameId: string, atCrashPoint: number): void {
     });
   }
 
+  // Per-game history strip: record this game's crash in its own series.
+  pushHistory({ roundNumber: currentRound.roundNumber, crashPoint: atCrashPoint }, gameId);
+
   broadcast({
     type: 'crash',
     data: {
@@ -284,10 +287,7 @@ function finalizeMultiGameCrash(): void {
   prevServerSeed = serverSeed;
   prevRoundNumber = currentRound.roundNumber;
 
-  // History strip is the default game's series (per-game history is future).
-  const defaultCrash = currentRound.gameCrashPoints[DEFAULT_GAME_ID] ?? currentRound.crashPoint;
-  pushHistory({ roundNumber: currentRound.roundNumber, crashPoint: defaultCrash });
-
+  // Per-game history is recorded inside crashOneGame (called above for every game).
   setTimeout(() => startResultPhase(), CONFIG.resultPhaseMs);
 }
 

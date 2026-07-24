@@ -161,7 +161,12 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // here — the old verbose handler was deleted in Phase-8 holistic review (S1).
 
   // ─── History ───────────────────────────────────────────────────────────────
-  app.get('/api/history', (_req, res) => res.json(getAllHistory().slice(-50)));
+  // ?game=<id> returns that game's round history (per-game strip). Omitting game
+  // returns the default game's series (back-compat).
+  app.get('/api/history', (req, res) => {
+    const gameId = String(req.query.game ?? '').trim() || DEFAULT_GAME_ID;
+    res.json(getAllHistory(gameId).slice(-50));
+  });
 
   // ─── Verify (GET) ──────────────────────────────────────────────────────────
   // ?game=<id> verifies a non-default game (domain-separated nonce + its RTP).
