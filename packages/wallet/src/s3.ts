@@ -11,6 +11,35 @@
  */
 
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import sharp from 'sharp';
+
+/** Images larger than this are re-encoded to WebP before upload. */
+const COMPRESS_THRESHOLD_BYTES = 1_000_000; // 1 MB
+
+/**
+ * Compress an over-threshold image to WebP (animation preserved for gif/webp).
+ * Returns the original untouched for non-images, small images, or on any
+ * failure — compression must never block a publish.
+ */
+async function maybeCompress(
+  bytes: Buffer,
+  contentType: string,
+): Promise<{ body: Buffer; contentType: string }> {
+  if (!contentType.startsWith('image/') || bytes.length <= COMPRESS_THRESHOLD_BYTES) {
+    return { body: bytes, contentType };
+  }
+  try {
+    const animated = contentType === 'image/gif' || contentType === 'image/webp';
+    const out = await sharp(bytes, { animated }).webp({ quality: 62, effort: 4 }).toBuffer();
+    // Only adopt the re-encode if it actually got smaller.
+    if (out.length < bytes.length) {
+      return { body: out, contentType: 'image/webp' };
+    }
+  } catch (err) {
+    console.error('[s3] image compression failed — storing original:', err instanceof Error ? err.message : err);
+  }
+  return { body: bytes, contentType };
+}
 
 // ---------------------------------------------------------------------------
 // Client
@@ -114,7 +143,10 @@ export async function uploadAsset(opts: {
 }): Promise<{ url: string; bytes: number; contentType: string }> {
   const gameId = sanitizeSegment('gameId', opts.gameId);
   const assetKey = sanitizeSegment('assetKey', opts.assetKey);
-  const { bytes, contentType } = parseDataUrl(opts.dataUrl);
+  const parsed = parseDataUrl(opts.dataUrl);
+
+  // Compress images over 1 MB (→ WebP) before storing.
+  const { body, contentType } = await maybeCompress(parsed.bytes, parsed.contentType);
 
   const bucket = requireEnv('S3_BUCKET');
   const publicBase = requireEnv('S3_PUBLIC_BASE').replace(/\/+$/, '');
@@ -124,14 +156,14 @@ export async function uploadAsset(opts: {
     new PutObjectCommand({
       Bucket: bucket,
       Key: key,
-      Body: bytes,
+      Body: body,
       ContentType: contentType,
     }),
   );
 
   return {
     url: `${publicBase}/${key}`,
-    bytes: bytes.length,
+    bytes: body.length,
     contentType,
   };
 }
