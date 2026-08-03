@@ -10,6 +10,7 @@ import {
 } from './sounds';
 import { applyThemeCssVars, clearTheme, fetchServerTheme, hasUserOverride, loadTheme, readThemeFromFile, saveTheme } from './theme/loader';
 import { DEFAULT_THEME, tierColor as resolveTierColor, type Theme } from './theme/types';
+import { formatBalance, fromMinor, toMinor } from './lib/money';
 
 /**
  * In a production build the theme is whatever the server is serving from
@@ -31,11 +32,19 @@ interface Bet {
   displayName?: string;
   profit?: number;
   cashoutMultiplier?: number;
+  operatorId?: string;
+  currency?: string;
+  amountMinor?: number;
 }
 
 interface SessionInfo {
   sessionId: string;
   displayName: string;
+  operatorId?: string;
+  playerId?: string;
+  currency?: string;
+  balanceMinor?: number;
+  rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
 }
 
 interface SessionStats {
@@ -73,6 +82,14 @@ interface GameState {
 }
 
 const SESSION_PARAM = 'session';
+const DEFAULT_GAME_ID = 'galaxy-crash';
+
+/** The game this tab is playing, from ?game= (defaults to the base game). */
+function readGameIdFromUrl(): string {
+  try {
+    return new URLSearchParams(location.search).get('game')?.trim() || DEFAULT_GAME_ID;
+  } catch { return DEFAULT_GAME_ID; }
+}
 
 function readSessionIdFromUrl(): string | null {
   try {
@@ -103,6 +120,28 @@ async function createNewSession(): Promise<SessionInfo | null> {
   } catch { return null; }
 }
 
+// real-money lobby session (server endpoint may not exist yet — fall back to demo)
+// When the lobby launches a game with ?mode=real and the player is logged in,
+// bind the game to a player session via Agent-B's endpoint. If it's missing
+// (404) or errors, we return null and the caller uses the anonymous demo flow.
+async function createRealSession(): Promise<SessionInfo | null> {
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get('mode') !== 'real') return null;
+    const token = localStorage.getItem('casino_player_token');
+    if (!token) return null;
+    const res = await fetch('/api/lobby/play/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ gameId: readGameIdFromUrl() }),
+    });
+    if (!res.ok) return null; // endpoint not built yet / rejected → fall back to demo
+    const j = await res.json() as { sessionId?: string };
+    if (!j?.sessionId) return null;
+    return { sessionId: j.sessionId, displayName: '' };
+  } catch { return null; }
+}
+
 export default function App() {
   const [gameState, setGameState] = useState<GameState>({
     roundNumber: 0,
@@ -118,6 +157,7 @@ export default function App() {
   const [autoCashout, setAutoCashout] = useState(2.0);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
+  const [lobbyUrl, setLobbyUrl] = useState<string | null>(null);
   const [stats, setStats] = useState<SessionStats>(ZERO_STATS);
   const [hasBet, setHasBet] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -153,13 +193,46 @@ export default function App() {
     });
   }, []);
 
+  // On boot, seed the history strip with THIS game's series (multi-game).
+  useEffect(() => {
+    fetch(`/api/history?game=${encodeURIComponent(readGameIdFromUrl())}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((h: { roundNumber: number; crashPoint: number }[]) => {
+        if (Array.isArray(h) && h.length) {
+          setGameState((prev) => (prev.history.length ? prev : { ...prev, history: h }));
+        }
+      })
+      .catch(() => { /* strip just starts empty */ });
+  }, []);
+
+  // Read operator launch params (?lobby, ?return) once on mount, then strip them
+  // from the URL so they don't persist across reloads. The ?session= param is kept.
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      const lobby = params.get('lobby');
+      const ret = params.get('return');
+      if (lobby) setLobbyUrl(lobby);
+      // Strip these from the URL while preserving ?session=
+      if (lobby || ret) {
+        params.delete('lobby');
+        params.delete('return');
+        const newSearch = params.toString();
+        const newUrl = location.pathname + (newSearch ? `?${newSearch}` : '');
+        history.replaceState(null, '', newUrl);
+      }
+    } catch { /* ignore */ }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Bootstrap the session — pull from URL, validate, or create a fresh one.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       let id = readSessionIdFromUrl();
       if (!id) {
-        const fresh = await createNewSession();
+        // real-money lobby session (server endpoint may not exist yet — fall back to demo)
+        const fresh = (await createRealSession()) ?? (await createNewSession());
         if (cancelled) return;
         if (!fresh) {
           setSessionError('Backend offline — start Dragonfly with `docker compose up -d dragonfly`');
@@ -186,7 +259,15 @@ export default function App() {
           } else if (res.ok) {
             const j = await res.json() as { session: SessionInfo & { balance: number }; stats: SessionStats };
             if (cancelled) return;
-            setSession({ sessionId: j.session.sessionId, displayName: j.session.displayName });
+            setSession({
+              sessionId: j.session.sessionId,
+              displayName: j.session.displayName,
+              operatorId: j.session.operatorId,
+              playerId: j.session.playerId,
+              currency: j.session.currency,
+              balanceMinor: j.session.balanceMinor,
+              rgLimits: j.session.rgLimits,
+            });
             setBalance(j.session.balance);
             setStats(j.stats);
           }
@@ -267,14 +348,19 @@ export default function App() {
     }
 
     switch (message.type) {
-      case 'join':
+      case 'join': {
+        // The join snapshot (sent before we announce our game) carries the
+        // DEFAULT game's history. Keep our own strip for non-default games.
+        const isDefault = readGameIdFromUrl() === DEFAULT_GAME_ID;
         setGameState((prev) => ({
           ...prev,
           ...message.data,
+          history: isDefault ? (message.data.history ?? prev.history) : prev.history,
           flightStartTime: message.data.phase === 'FLYING' ? message.data.startTime : null,
         }));
         setHasBet(false);
         break;
+      }
 
       case 'phase_change':
         if (message.data.phase === 'FLYING') takeoffWhoosh();
@@ -284,7 +370,9 @@ export default function App() {
           roundNumber: message.data.roundNumber ?? prev.roundNumber,
           hashCommit: message.data.hashCommit ?? prev.hashCommit,
           countdownMs: message.data.countdownMs,
-          history: message.data.history ?? prev.history,
+          // Multi-game: ignore the default game's history for non-default tabs
+          // (our strip is built from our own crash frames + boot fetch).
+          history: readGameIdFromUrl() === DEFAULT_GAME_ID ? (message.data.history ?? prev.history) : prev.history,
           bets: message.data.bets ?? (message.data.phase === 'BETTING' ? [] : prev.bets),
           currentMultiplier: message.data.phase === 'FLYING' ? 1.0 : prev.currentMultiplier,
           crashPoint: message.data.phase === 'BETTING' ? undefined : (message.data.crashPoint ?? prev.crashPoint),
@@ -301,39 +389,78 @@ export default function App() {
         break;
 
       case 'multiplier_update':
-        setGameState((prev) => ({ ...prev, currentMultiplier: message.data.multiplier }));
+        // Multi-game: once THIS game has crashed the round is over for us, even
+        // though the shared multiplier keeps climbing for still-flying games.
+        setGameState((prev) => (prev.phase === 'CRASHED' ? prev : { ...prev, currentMultiplier: message.data.multiplier }));
         break;
 
-      case 'crash':
+      case 'crash': {
+        // Multi-game: crash frames are tagged with gameId and broadcast to all
+        // tabs. Only react to our own game's crash; ignore siblings.
+        const crashGameId = message.data.gameId ?? DEFAULT_GAME_ID;
+        if (crashGameId !== readGameIdFromUrl()) break;
         crashBoom();
-        setGameState((prev) => ({
-          ...prev,
-          phase: 'CRASHED',
-          crashPoint: message.data.crashPoint,
-          currentMultiplier: message.data.crashPoint,
-          serverSeed: message.data.serverSeed,
-          bets: message.data.bets ?? prev.bets,
-        }));
+        setGameState((prev) => {
+          // Append this round to our game's history strip (dedup by roundNumber).
+          const rn = message.data.roundNumber;
+          const already = prev.history.some((h) => h.roundNumber === rn);
+          const history = already
+            ? prev.history
+            : [...prev.history, { roundNumber: rn, crashPoint: message.data.crashPoint }].slice(-200);
+          return {
+            ...prev,
+            phase: 'CRASHED',
+            crashPoint: message.data.crashPoint,
+            currentMultiplier: message.data.crashPoint,
+            serverSeed: message.data.serverSeed ?? prev.serverSeed,
+            bets: message.data.bets ?? prev.bets,
+            history,
+          };
+        });
         setHasBet((had) => {
           if (had) flashToast('loss', `Crashed @ ${message.data.crashPoint.toFixed(2)}x`);
           return false;
         });
         break;
+      }
 
       case 'bet_placed':
         sndPlaceBet();
-        setBalance(message.data.balance);
+        // For operator sessions, the server sends balanceMinor (not balance).
+        // We store it in the same `balance` state; formatBalance() renders it correctly.
+        if (message.data.balanceMinor != null) {
+          setBalance(message.data.balanceMinor);
+          setSession((prev) => prev ? { ...prev, balanceMinor: message.data.balanceMinor } : prev);
+        } else if (message.data.balance != null) {
+          setBalance(message.data.balance);
+        }
         setHasBet(true);
         if (message.data.stats) setStats(message.data.stats);
-        flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
+        if (message.data.isOperator === true) {
+          // Operator frame: bet.amount is integer minor units; currency is top-level.
+          flashToast('info', `Bet placed · ${fromMinor(message.data.bet.amount, message.data.currency)}`);
+        } else {
+          flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
+        }
         break;
 
       case 'cashout_success':
         cashoutChime();
-        setBalance(message.data.balance);
+        // For operator sessions, prefer balanceMinor; fall back to legacy balance.
+        if (message.data.balanceMinor != null) {
+          setBalance(message.data.balanceMinor);
+          setSession((prev) => prev ? { ...prev, balanceMinor: message.data.balanceMinor } : prev);
+        } else if (message.data.balance != null) {
+          setBalance(message.data.balance);
+        }
         setHasBet(false);
         if (message.data.stats) setStats(message.data.stats);
-        flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
+        if (message.data.winAmountMinor != null) {
+          // Operator frame: no `profit` field; use winAmountMinor + currency.
+          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${fromMinor(message.data.winAmountMinor, message.data.currency)}`);
+        } else {
+          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
+        }
         break;
 
       case 'cashout':
@@ -350,18 +477,26 @@ export default function App() {
       case 'new_bet':
         setGameState((prev) => {
           if (prev.bets.some((b) => b.playerId === message.data.playerId)) return prev;
+          const isOperatorBet = !!message.data.isOperator;
           return {
             ...prev,
             bets: [
               ...prev.bets,
               {
                 playerId: message.data.playerId,
-                amount: message.data.amount,
+                // For operator bets, amount is absent — fall back to amountMinor so
+                // no consumer ever sees undefined/NaN; PlayerList formats via amountMinor.
+                amount: message.data.amount ?? message.data.amountMinor,
                 autoCashout: message.data.autoCashout,
                 cashedOut: false,
                 isBot: !!message.data.isBot,
                 botName: message.data.botName,
                 displayName: message.data.displayName,
+                ...(isOperatorBet ? {
+                  operatorId: message.data.operatorId,
+                  currency: message.data.currency,
+                  amountMinor: message.data.amountMinor,
+                } : {}),
               },
             ],
           };
@@ -369,12 +504,25 @@ export default function App() {
         break;
 
       case 'balance':
-        setBalance(message.data.balance);
+        if (message.data.balanceMinor != null) {
+          setBalance(message.data.balanceMinor);
+          setSession((prev) => prev ? { ...prev, balanceMinor: message.data.balanceMinor } : prev);
+        } else {
+          setBalance(message.data.balance);
+        }
         break;
 
       case 'session_hello':
         if (message.data.session) {
-          setSession({ sessionId: message.data.session.sessionId, displayName: message.data.session.displayName });
+          setSession({
+            sessionId: message.data.session.sessionId,
+            displayName: message.data.session.displayName,
+            operatorId: message.data.session.operatorId,
+            playerId: message.data.session.playerId,
+            currency: message.data.session.currency,
+            balanceMinor: message.data.session.balanceMinor,
+            rgLimits: message.data.session.rgLimits,
+          });
           setBalance(message.data.session.balance);
         }
         if (message.data.stats) setStats(message.data.stats);
@@ -397,6 +545,14 @@ export default function App() {
         });
         break;
 
+      case 'cashout_pending':
+        // No balanceMinor in this frame by design: the /win call failed or the
+        // operator was unavailable, so no credit has happened yet. Keep showing
+        // the last-known post-debit balance. Task 4.2 force-credit will eventually
+        // resolve and can push a fresh balance.
+        flashToast('info', message.data?.message ?? 'Win pending — will be credited automatically');
+        break;
+
       case 'error':
         flashToast('loss', message.data?.message ?? 'Error');
         break;
@@ -406,10 +562,20 @@ export default function App() {
   const placeBet = () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
-    ws.send(JSON.stringify({
-      type: 'place_bet',
-      data: { sessionId: session.sessionId, amount: betAmount, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
-    }));
+    if (session.operatorId) {
+      // Operator session: send amountMinor (integer minor units)
+      const amountMinor = toMinor(betAmount, session.currency);
+      ws.send(JSON.stringify({
+        type: 'place_bet',
+        data: { sessionId: session.sessionId, amountMinor, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
+      }));
+    } else {
+      // Legacy demo session: send decimal amount (byte-unchanged)
+      ws.send(JSON.stringify({
+        type: 'place_bet',
+        data: { sessionId: session.sessionId, amount: betAmount, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
+      }));
+    }
   };
   const cashout = () => {
     const ws = wsRef.current;
@@ -449,6 +615,8 @@ export default function App() {
         themeLocked={THEME_LOCKED}
         onLoadThemeClick={() => themeFileInputRef.current?.click()}
         onResetTheme={resetTheme}
+        session={session}
+        lobbyUrl={lobbyUrl}
       />
       {!THEME_LOCKED && (
         <input
@@ -523,6 +691,9 @@ export default function App() {
             betAmounts={[1, 5, 10, 25, 50, 100, 500]}
             onPlaceBet={placeBet}
             onCashout={cashout}
+            maxBetMinor={session?.rgLimits?.maxBetMinor}
+            currency={session?.currency}
+            isOperator={!!session?.operatorId}
           />
           <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
           <StatsPanel stats={stats} displayName={session?.displayName} />
@@ -545,7 +716,7 @@ export default function App() {
 // ─── Header ──────────────────────────────────────────────────────────────────
 function Header({
   connected, soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
-  theme, themeLocked, onLoadThemeClick, onResetTheme,
+  theme, themeLocked, onLoadThemeClick, onResetTheme, session, lobbyUrl,
 }: {
   connected: boolean;
   soundOn: boolean;
@@ -557,6 +728,8 @@ function Header({
   themeLocked: boolean;
   onLoadThemeClick: () => void;
   onResetTheme: () => void;
+  session?: SessionInfo | null;
+  lobbyUrl?: string | null;
 }) {
   const brand = theme.brandName || 'Galaxy Crash';
   const tagline = theme.brandTagline || 'provably-fair multiplier';
@@ -612,18 +785,34 @@ function Header({
           <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Fair</span>
         </IconButton>
 
+        {lobbyUrl && (
+          <button
+            onClick={() => {
+              window.parent.postMessage({ type: 'lobby' }, '*');
+              setTimeout(() => {
+                if (lobbyUrl && window.top) window.top.location.href = lobbyUrl;
+              }, 50);
+            }}
+            className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1.5 rounded-control bg-space-800/80 border border-space-500/50 uppercase tracking-wider font-semibold"
+            title="Return to lobby"
+          >
+            Lobby
+          </button>
+        )}
         <div className="flex items-center gap-2 sm:gap-3 bg-space-800/80 border border-space-500/50 rounded-control px-3 py-1.5">
           <div className="leading-tight">
             <div className="text-[9px] uppercase tracking-[0.22em] text-slate-500">Balance</div>
-            <div className="text-base sm:text-lg font-mono font-semibold text-aurora-400">${balance.toFixed(2)}</div>
+            <div className="text-base sm:text-lg font-mono font-semibold text-aurora-400">{formatBalance(balance, session ?? null)}</div>
           </div>
-          <button
-            onClick={onResetBalance}
-            className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
-            title="Reset balance to $1000"
-          >
-            Reset
-          </button>
+          {!session?.operatorId && (
+            <button
+              onClick={onResetBalance}
+              className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
+              title="Reset balance to $1000"
+            >
+              Reset
+            </button>
+          )}
         </div>
       </div>
     </header>

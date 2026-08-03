@@ -23,6 +23,19 @@ import {
 
 const STORAGE_KEY = 'crash-creator-theme';
 
+/** True for a base64 `data:` URL (an inline asset not yet uploaded to S3). */
+function isDataUrl(v: unknown): v is string {
+  return typeof v === 'string' && v.startsWith('data:');
+}
+
+// Theme binary-asset fields, grouped by their sub-object. Each data: URL is
+// uploaded to S3 at publish time and replaced with the returned public URL.
+const ASSET_FIELDS: Record<'assets' | 'gifs' | 'sounds', string[]> = {
+  assets: ['sprite', 'spriteGround', 'spriteFlying', 'spriteCrashed', 'background', 'logo'],
+  gifs: ['loading', 'flying', 'flyingThreshold', 'crashed'],
+  sounds: ['takeoff', 'cashout', 'crash', 'bet', 'tick', 'music'],
+};
+
 function loadTheme(): Theme {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -65,6 +78,81 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  const [publishing, setPublishing] = useState(false);
+  const handlePublish = useCallback(async () => {
+    // Publish this theme to the game server's catalogue as a first-class game.
+    // The catalogue API is admin-only, so we log in for a short-lived JWT.
+    // (Dev tool: creds are prompted, never stored. Server reached via vite proxy.)
+    const gameId = slug(theme.brandName);
+    const user = window.prompt(`Publish "${theme.brandName}" as game "${gameId}".\n\nAdmin username:`);
+    if (!user) return;
+    const pass = window.prompt('Admin password:');
+    if (!pass) return;
+    setPublishing(true);
+    try {
+      const login = await fetch('/admin/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass }),
+      });
+      if (!login.ok) throw new Error(`Login failed (${login.status})`);
+      const { token } = (await login.json()) as { token: string };
+      const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
+
+      // Upload any inline (base64 data:) assets to S3 first, so the stored theme
+      // carries only URLs. Clone the sub-objects so we never mutate React state.
+      const uploaded: Theme = {
+        ...theme,
+        assets: theme.assets ? { ...theme.assets } : theme.assets,
+        gifs: theme.gifs ? { ...theme.gifs } : theme.gifs,
+        sounds: theme.sounds ? { ...theme.sounds } : theme.sounds,
+      };
+      for (const group of ['assets', 'gifs', 'sounds'] as const) {
+        const obj = uploaded[group] as Record<string, string | null | undefined> | undefined;
+        if (!obj) continue;
+        for (const field of ASSET_FIELDS[group]) {
+          const val = obj[field];
+          if (!isDataUrl(val)) continue;
+          const up = await fetch('/api/assets/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ gameId, assetKey: `${group}.${field}`, dataUrl: val }),
+          });
+          if (!up.ok) {
+            const e = await up.json().catch(() => ({}));
+            throw new Error(e?.error?.message ?? `Asset upload failed for ${group}.${field} (${up.status})`);
+          }
+          const { url } = (await up.json()) as { url: string };
+          obj[field] = url;
+        }
+      }
+
+      const payload: Theme = { ...uploaded, version: THEME_VERSION };
+      const body = JSON.stringify({
+        gameId,
+        name: theme.brandName,
+        gameType: theme.gameType ?? 'sprite',
+        rtp: Math.round(theme.rtp * 100 * 100) / 100, // fraction → percentage
+        theme: payload,
+      });
+
+      // Create, or update if it already exists.
+      const exists = await fetch(`/admin/v1/games/${encodeURIComponent(gameId)}`, { headers: auth });
+      const res = exists.ok
+        ? await fetch(`/admin/v1/games/${encodeURIComponent(gameId)}`, { method: 'PATCH', headers: auth, body })
+        : await fetch('/admin/v1/games', { method: 'POST', headers: auth, body });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error?.message ?? `Publish failed (${res.status})`);
+      }
+      alert(`Published "${theme.brandName}" as game "${gameId}" (${exists.ok ? 'updated' : 'created'}).\nLaunch with ?game=${gameId}`);
+    } catch (e) {
+      alert('Publish failed: ' + (e as Error).message);
+    } finally {
+      setPublishing(false);
+    }
+  }, [theme]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handleImport = (file: File) => {
     file.text().then((txt) => {
@@ -80,7 +168,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col text-slate-100">
-      <TopBar onExport={handleExport} onImportClick={() => fileInputRef.current?.click()} />
+      <TopBar onExport={handleExport} onImportClick={() => fileInputRef.current?.click()} onPublish={handlePublish} publishing={publishing} />
 
       <input
         ref={fileInputRef}
@@ -122,7 +210,7 @@ export default function App() {
 }
 
 // ─── Top bar ────────────────────────────────────────────────────────────────
-function TopBar({ onExport, onImportClick }: { onExport: () => void; onImportClick: () => void }) {
+function TopBar({ onExport, onImportClick, onPublish, publishing }: { onExport: () => void; onImportClick: () => void; onPublish: () => void; publishing: boolean }) {
   return (
     <header className="flex items-center justify-between px-5 py-3 border-b border-ink-500/40 bg-ink-950/80 backdrop-blur-xl">
       <div className="flex items-center gap-3">
@@ -150,9 +238,16 @@ function TopBar({ onExport, onImportClick }: { onExport: () => void; onImportCli
         </button>
         <button
           onClick={onExport}
-          className="text-xs px-3 py-1.5 rounded-control bg-gradient-to-r from-cyan-500 to-fuchsia-500 text-ink-950 font-bold uppercase tracking-wider hover:brightness-110 transition"
+          className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
         >
           Export theme
+        </button>
+        <button
+          onClick={onPublish}
+          disabled={publishing}
+          className="text-xs px-3 py-1.5 rounded-control bg-gradient-to-r from-cyan-500 to-fuchsia-500 text-ink-950 font-bold uppercase tracking-wider hover:brightness-110 transition disabled:opacity-50 disabled:cursor-wait"
+        >
+          {publishing ? 'Publishing…' : 'Publish'}
         </button>
       </div>
     </header>

@@ -1,453 +1,152 @@
+import { config as loadEnv } from 'dotenv';
+import { fileURLToPath as _fileURLToPath } from 'node:url';
+import path$ from 'node:path';
+// Load the repo-root .env regardless of cwd (server runs from packages/server).
+loadEnv({ path: path$.join(path$.dirname(_fileURLToPath(import.meta.url)), '../../../.env') });
 import express from 'express';
 import http from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
-import {
-  generateServerSeed,
-  commitSeed,
-  crashPointFor,
-  verifyRound,
-  type Commit,
-  type Reveal,
-} from '@crash/shared/rng';
-import {
-  type RoundState,
-  type Bet,
-  type RoundHistoryEntry,
-  type GameConfig,
-  type HistoryEntry,
-} from '@crash/shared/types';
-import { GAME_CONFIG, MAX_STAKE, STARTING_BALANCE } from '@crash/shared/config';
-import { generateBotBets, type BotBet } from './bots';
-import {
-  appendHistory,
-  adjustBalance,
-  checkRateLimit,
-  createSession,
-  getHistory,
-  getSession,
-  getStats,
-  isOnline as storeOnline,
-  recordBet,
-  recordLoss,
-  recordWin,
-  setBalance,
-  StoreOfflineError,
-} from './store';
+import { WebSocketServer } from 'ws';
+import path from 'node:path';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { PgBetLog, PgOperatorRegistry, PgGamesRepo, PgReconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
+import { PlayersRepo } from '@crash/wallet/players-repo';
+import { WalletLedger } from '@crash/wallet/wallet-ledger';
+import { createLobbyRouter } from './http/lobby';
+import { createLobbyPlayRouter } from './http/lobby-play';
+import { createAssetsRouter } from './http/assets';
+import { setLobbyWiringDeps } from './game/lobby-deps';
+import type { OperatorLedgerSource } from '@crash/wallet';
+import { scheduleDailyReconciliation } from './reconciliation/scheduler';
+import { initThemeLoader, getActiveTheme } from './theme/loader';
+import { registerPublicRoutes } from './http/public';
+import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
+import { createOperatorRouter } from './http/operator';
+import { PgOperatorAudit } from './http/operator-audit-pg';
+import { createAdminRouter } from './http/admin';
+import { PgAdminAudit, PgAdminUsers } from './admin/admin-store-pg';
+import { isAdminRole } from './admin/admin-store';
+import * as bcrypt from 'bcryptjs';
+import type { AdminRole } from './admin/admin-store';
+import { WalletClientCache } from './wallet/client-cache';
+import { setOperatorWiringDeps } from './game/operator-deps';
+import { clients, sessionSockets, safeSend } from './ws/hub';
+import { handleMessage } from './ws/handlers';
+import * as Round from './game/round';
+const { CONFIG, startBettingPhase } = Round;
+import { getRecentHistory } from './game/history';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// ---------------------------------------------------------------------------
+// Database + crash-recovery
+// ---------------------------------------------------------------------------
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Everything durable lives in the casino Postgres DB (Wave A + Wave B). The only
+// remaining on-disk store is RocksDB for hot session cache (see store.ts).
+const pool = getPool();
+const betLog = new PgBetLog(pool);
+const adminAudit = new PgAdminAudit(pool);
+const operatorAudit = new PgOperatorAudit(pool);
+const adminUsers = new PgAdminUsers(pool);
+const revoked = new Set<string>();
+const registry = new PgOperatorRegistry(pool);
+const walletClientCache = new WalletClientCache(registry, betLog);
+const games = new PgGamesRepo(pool);
+const players = new PlayersRepo(pool);
+const wallet = new WalletLedger(pool);
+setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
+setLobbyWiringDeps({ wallet });
+
+// Reconciliation (Task 8.1, spec §9).
+//
+// The Reconciler diffs OUR txn_idempotency records against an operator's ledger,
+// supplied by an injected OperatorLedgerSource. This is the SINGLE injection
+// point for a real per-operator reconciliation feed.
+//
+// HONEST DEFAULT: there is no real operator-side ledger HTTP contract in this
+// repo yet, so the default source returns an empty ledger. As a result, runs
+// surface every one of OUR txns as `missing_on_operator`. This is deliberate —
+// it is the correct, non-fabricated behaviour absent a real feed. Wiring each
+// operator's reconciliation feed here is a Phase-future task.
+const defaultLedgerSource: OperatorLedgerSource = async () => [];
+console.log(
+  '[reconciliation] no operator ledger source configured — runs will report our txns as missing_on_operator (Phase-future: wire to each operator\'s reconciliation feed).',
+);
+const reconciler = new PgReconciler(pool, { source: defaultLedgerSource, betLog });
 
 const app = express();
-app.use(express.json());
+// Capture raw body bytes for HMAC signing (verifyOperatorSignature §4.2).
+// Behaviour-neutral for all other routes: JSON still parsed identically.
+app.use(express.json({ verify: (req, _res, buf) => { (req as unknown as { rawBody: Buffer }).rawBody = buf; } }));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-// ─── Game config ──────────────────────────────────────────────────────────────
-const CONFIG: GameConfig = { ...GAME_CONFIG };
+// Theme autoload + fs.watch
+initThemeLoader();
 
-// Multiplier curve: m(t) = e^(GROWTH_RATE * t_seconds).
-const GROWTH_RATE = 0.06;
-
-function multiplierAt(elapsedMs: number): number {
-  const t = Math.max(0, elapsedMs) / 1000;
-  return Math.exp(GROWTH_RATE * t);
-}
-
-// ─── Game state ───────────────────────────────────────────────────────────────
-let roundNumber = 0;
-let currentRound: RoundState | null = null;
-let serverSeed = generateServerSeed();
-let nextServerSeed = generateServerSeed();
-let prevServerSeed: string | null = null;
-let prevRoundNumber: number | null = null;
-const roundHistory: RoundHistoryEntry[] = [];
-
-/** Per-session metadata for real-player bets (display name lookup). */
-const sessionMeta = new Map<string, { displayName: string }>();
-/** ws lookup by sessionId so auto-cashout can notify the right tabs. */
-const sessionSockets = new Map<string, Set<WebSocket>>();
-const clients = new Set<WebSocket>();
-
-// ─── HTTP routes ──────────────────────────────────────────────────────────────
-const clientDist = path.join(__dirname, '../../client/dist');
-app.use(express.static(clientDist));
-
-// ─── Theme autoload ───────────────────────────────────────────────────────────
-const THEME_PATH = path.join(__dirname, '../../../config/active-theme.json');
-let activeTheme: unknown | null = null;
-
-function loadActiveTheme() {
-  try {
-    if (fs.existsSync(THEME_PATH)) {
-      const raw = fs.readFileSync(THEME_PATH, 'utf-8');
-      activeTheme = JSON.parse(raw);
-      console.log(`[theme] loaded from ${THEME_PATH}`);
-    } else {
-      activeTheme = null;
-    }
-  } catch (e) {
-    console.error('[theme] failed to load:', (e as Error).message);
-    activeTheme = null;
-  }
-}
-loadActiveTheme();
-
+// Postgres bootstrap (Wave A): ensure schema, seed the default game, prime the
+// games snapshot the hot round loop reads. Runs AFTER initThemeLoader so the
+// seed can copy the active theme.
 try {
-  const themeDir = path.dirname(THEME_PATH);
-  if (fs.existsSync(themeDir)) {
-    let pending: NodeJS.Timeout | null = null;
-    fs.watch(themeDir, { persistent: false }, (_event, filename) => {
-      if (filename !== path.basename(THEME_PATH)) return;
-      if (pending) clearTimeout(pending);
-      pending = setTimeout(() => { pending = null; loadActiveTheme(); }, 250);
-    });
+  await bootstrapCasinoSchema(pool);
+  await registry.refresh(); // prime the operator cache (sync reads on hot paths)
+  console.log(`[operators] loaded ${registry.list().length} operators from Postgres`);
+  if (!(await games.getById('galaxy-crash'))) {
+    const seededTheme = getActiveTheme() ?? {};
+    const gt = (seededTheme as { gameType?: string }).gameType === 'gif' ? 'gif' : 'sprite';
+    await games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: gt, rtp: CONFIG.rtp, theme: seededTheme });
+    console.log('[games] seeded galaxy-crash into the catalogue');
   }
-} catch (e) {
-  console.warn('[theme] file watcher disabled:', (e as Error).message);
+  await games.refreshSnapshot();
+  console.log(`[games] catalogue ready (${games.snapshot().length} active on Postgres)`);
+} catch (err) {
+  console.error('[games] Postgres bootstrap failed:', err);
+  throw err; // games catalogue is required — fail fast rather than run half-wired
 }
 
-app.get('/api/theme', (_req, res) => {
-  if (activeTheme == null) { res.status(204).end(); return; }
-  res.json(activeTheme);
+// /api/health — PUBLIC liveness probe (Task 8.3 Dockerfile HEALTHCHECK target).
+// Mounted BEFORE any auth middleware. Deliberately minimal — no version/branch/
+// build metadata that would leak deployment info to unauthenticated scanners.
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true });
 });
 
-app.get('/api/health', (_req, res) => res.json({
-  ok: true,
-  roundNumber,
-  hasTheme: activeTheme != null,
-  storeOnline: storeOnline(),
-}));
+// ─── Operator API (must be BEFORE registerPublicRoutes, which adds the SPA * fallback) ──
 
-app.get('/api/history', (_req, res) => res.json(roundHistory.slice(-50)));
-
-app.get('/api/verify', (req, res) => {
-  const seed = String(req.query.seed ?? '');
-  const rn = String(req.query.roundNumber ?? '');
-  if (!seed || !rn) return res.status(400).json({ error: 'Missing seed or roundNumber' });
-  const roundNum = parseInt(rn, 10);
-  if (!Number.isFinite(roundNum)) return res.status(400).json({ error: 'roundNumber must be an integer' });
-  try {
-    const crashPoint = crashPointFor(seed, roundNum, CONFIG);
-    const hashCommit = commitSeed(seed);
-    res.json({ roundNumber: roundNum, serverSeed: seed, crashPoint, hashCommit });
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
+// /op/v1/health is PUBLIC per spec §3.1 — mounted BEFORE verifyOperatorSignature
+// so it bypasses the auth middleware entirely. It must live here in index.ts
+// (not inside createOperatorRouter) because the auth is wired at the mount level
+// with app.use('/op/v1', verifyOperatorSignature(...), router) — any route inside
+// the router is behind that middleware. A separate app.get() registered first
+// takes priority.
+app.get('/op/v1/health', (_req, res) => {
+  res.json({ ok: true, version: '1.0.0', gamesAvailable: ['galaxy-crash'] });
 });
 
-app.post('/api/verify', (req, res) => {
-  const { seed, roundNumber: rn } = (req.body ?? {}) as { seed?: string; roundNumber?: number };
-  if (!seed || rn == null) return res.status(400).json({ error: 'Missing seed or roundNumber' });
-  try {
-    const commit: Commit = { roundNumber: rn, hashCommit: commitSeed(seed) };
-    const reveal: Reveal = {
-      roundNumber: rn,
-      serverSeed: seed,
-      crashPoint: crashPointFor(seed, rn, CONFIG),
-    };
-    const result = verifyRound(commit, reveal);
-    res.json({ ...result, computedCrash: reveal.crashPoint, revealedSeed: seed });
-  } catch (err) {
-    res.status(400).json({ error: (err as Error).message });
-  }
-});
+// getSignedPath uses req.originalUrl (full external path) because this router is
+// sub-mounted at /op/v1 — req.path would be router-relative and would NOT match
+// the path the operator signed (per the Task 2.1 TODO/spec §4.2 note).
+app.use(
+  '/op/v1',
+  verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
+  createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit }),
+);
 
-// ─── Session API ──────────────────────────────────────────────────────────────
+// ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──
+// Auth is internal to the router: /auth/login is public; router.use(requireAdminJwt)
+// gates everything else. No top-level auth middleware here.
+app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, games, revoked, reconciler }));
 
-/** Create a fresh anonymous session. Returns the session id + URL hint. */
-app.post('/api/session', async (req, res) => {
-  try {
-    const { displayName, balance } = (req.body ?? {}) as { displayName?: string; balance?: number };
-    const safeBalance = balance != null && Number.isFinite(balance) && balance > 0
-      ? Math.min(balance, 100_000)
-      : undefined;
-    const session = await createSession({ displayName, balance: safeBalance });
-    res.json(session);
-  } catch (err) {
-    return sendStoreError(res, err);
-  }
-});
+// ─── Personal lobby: player accounts + wallet + asset uploads (Wave A) ──────────
+// Mounted BEFORE registerPublicRoutes (SPA * fallback). Player-facing auth is
+// internal to the lobby router; asset uploads are admin-JWT protected.
+app.use('/api/lobby', createLobbyRouter({ players, wallet }));
+app.use('/api/lobby', createLobbyPlayRouter({ games, players, wallet }));
+app.use('/api/assets', createAssetsRouter());
 
-app.get('/api/sessions/:id', async (req, res) => {
-  try {
-    const session = await getSession(req.params.id);
-    if (!session) return res.status(404).json({ error: 'session not found' });
-    const stats = await getStats(req.params.id);
-    res.json({ session, stats });
-  } catch (err) {
-    return sendStoreError(res, err);
-  }
-});
-
-app.get('/api/sessions/:id/history', async (req, res) => {
-  const limit = Math.max(1, Math.min(500, Number(req.query.limit ?? 50)));
-  try {
-    const session = await getSession(req.params.id);
-    if (!session) return res.status(404).json({ error: 'session not found' });
-    const history = await getHistory(req.params.id, limit);
-    res.json({ history });
-  } catch (err) {
-    return sendStoreError(res, err);
-  }
-});
-
-function sendStoreError(res: express.Response, err: unknown) {
-  if (err instanceof StoreOfflineError) {
-    return res.status(503).json({ error: 'session store offline — start Dragonfly: docker compose up -d dragonfly' });
-  }
-  console.error('[api] error:', err);
-  return res.status(500).json({ error: (err as Error).message });
-}
-
-// ─── WS broadcast helpers ────────────────────────────────────────────────────
-function broadcast(message: Record<string, unknown>) {
-  const data = JSON.stringify(message);
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) client.send(data);
-  }
-}
-
-function sendToSession(sessionId: string, message: Record<string, unknown>) {
-  const sockets = sessionSockets.get(sessionId);
-  if (!sockets) return;
-  const data = JSON.stringify(message);
-  for (const ws of sockets) if (ws.readyState === WebSocket.OPEN) ws.send(data);
-}
-
-function safeSend(ws: WebSocket, message: Record<string, unknown>) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
-}
-
-// ─── Phase transitions ────────────────────────────────────────────────────────
-function startBettingPhase() {
-  roundNumber += 1;
-  serverSeed = nextServerSeed;
-  nextServerSeed = generateServerSeed();
-
-  const crashPoint = crashPointFor(serverSeed, roundNumber, CONFIG);
-  const hashCommit = commitSeed(serverSeed);
-
-  currentRound = {
-    roundNumber,
-    phase: 'BETTING',
-    crashPoint,
-    currentMultiplier: 1.0,
-    startTime: Date.now(),
-    bets: [],
-    serverSeedHash: hashCommit,
-  };
-
-  const botBets = generateBotBets(roundNumber);
-  currentRound.bets = botBets.map((b: BotBet) => ({
-    playerId: b.playerId,
-    amount: b.amount,
-    autoCashout: b.autoCashout,
-    cashedOut: false,
-    isBot: true,
-    botName: b.botName,
-  }));
-
-  broadcast({
-    type: 'phase_change',
-    data: {
-      phase: 'BETTING',
-      roundNumber,
-      hashCommit,
-      prevServerSeed,
-      prevRoundNumber,
-      countdownMs: CONFIG.bettingPhaseMs,
-      countdownStart: currentRound.startTime,
-      serverTime: currentRound.startTime,
-      bets: currentRound.bets,
-    },
-  });
-
-  const countdownInterval = setInterval(() => {
-    if (!currentRound || currentRound.phase !== 'BETTING') {
-      clearInterval(countdownInterval); return;
-    }
-    const elapsed = Date.now() - currentRound.startTime;
-    const remaining = Math.max(0, CONFIG.bettingPhaseMs - elapsed);
-    broadcast({ type: 'countdown_update', data: { countdownMs: remaining, roundNumber: currentRound.roundNumber } });
-  }, 200);
-
-  const dripInterval = setInterval(() => {
-    if (!currentRound || currentRound.phase !== 'BETTING') { clearInterval(dripInterval); return; }
-    if (Math.random() < 0.5 && currentRound.bets.filter((b) => b.isBot).length < 40) {
-      const more = generateBotBets(roundNumber, 1, 3);
-      for (const b of more) {
-        const bet: Bet = {
-          playerId: b.playerId, amount: b.amount, autoCashout: b.autoCashout,
-          cashedOut: false, isBot: true, botName: b.botName,
-        };
-        currentRound.bets.push(bet);
-        broadcast({
-          type: 'new_bet',
-          data: {
-            playerId: bet.playerId, amount: bet.amount, isBot: true,
-            botName: bet.botName, autoCashout: bet.autoCashout,
-            roundNumber: currentRound.roundNumber,
-          },
-        });
-      }
-    }
-  }, 600);
-
-  setTimeout(() => startFlightPhase(), CONFIG.bettingPhaseMs);
-}
-
-function startFlightPhase() {
-  if (!currentRound) return;
-  currentRound.phase = 'FLYING';
-  currentRound.startTime = Date.now();
-
-  broadcast({
-    type: 'phase_change',
-    data: {
-      phase: 'FLYING',
-      roundNumber: currentRound.roundNumber,
-      startTime: currentRound.startTime,
-      serverTime: currentRound.startTime,
-    },
-  });
-
-  const interval = setInterval(() => {
-    if (!currentRound || currentRound.phase !== 'FLYING') { clearInterval(interval); return; }
-    const elapsed = Date.now() - currentRound.startTime;
-    const raw = multiplierAt(elapsed);
-    if (raw >= currentRound.crashPoint) {
-      currentRound.currentMultiplier = currentRound.crashPoint;
-      clearInterval(interval);
-      crashRound();
-      return;
-    }
-    const multiplier = Math.floor(raw * 100) / 100;
-    currentRound.currentMultiplier = multiplier;
-
-    for (const bet of currentRound.bets) {
-      if (bet.cashedOut || !bet.autoCashout) continue;
-      if (multiplier < bet.autoCashout) continue;
-      if (bet.autoCashout > currentRound.crashPoint) continue;
-      // Auto-cashouts are awaited but we don't block the tick on them
-      void cashOutBet(bet, bet.autoCashout, 'auto');
-    }
-
-    broadcast({ type: 'multiplier_update', data: { multiplier, roundNumber: currentRound.roundNumber } });
-  }, 50);
-}
-
-async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual' | 'auto') {
-  if (bet.cashedOut) return;
-  bet.cashedOut = true;
-  bet.cashoutMultiplier = atMultiplier;
-  bet.profit = Math.round(bet.amount * atMultiplier * 100) / 100;
-
-  if (!bet.isBot && currentRound) {
-    const sessionId = bet.playerId;
-    try {
-      const newBal = await adjustBalance(sessionId, bet.profit);
-      const stats = await recordWin(sessionId, bet.amount, bet.profit, atMultiplier);
-      await appendHistory(sessionId, {
-        kind: 'cashout',
-        roundNumber: currentRound.roundNumber,
-        amount: bet.amount,
-        multiplier: atMultiplier,
-        payout: bet.profit,
-        auto: source === 'auto',
-        at: Date.now(),
-      } satisfies HistoryEntry);
-      sendToSession(sessionId, {
-        type: 'cashout_success',
-        data: { multiplier: atMultiplier, profit: bet.profit, balance: newBal, source, stats },
-      });
-    } catch (err) {
-      if (err instanceof StoreOfflineError) {
-        sendToSession(sessionId, { type: 'error', data: { message: 'Session store offline — balance not updated' } });
-      } else {
-        console.error('[cashout] error:', err);
-      }
-    }
-  }
-
-  broadcast({
-    type: 'cashout',
-    data: {
-      playerId: bet.playerId,
-      multiplier: atMultiplier,
-      profit: bet.profit,
-      isBot: bet.isBot,
-      botName: bet.botName,
-      displayName: bet.displayName,
-      source,
-    },
-  });
-}
-
-function crashRound() {
-  if (!currentRound) return;
-  currentRound.phase = 'CRASHED';
-  currentRound.crashTime = Date.now();
-  currentRound.currentMultiplier = currentRound.crashPoint;
-
-  for (const bet of currentRound.bets) {
-    if (!bet.cashedOut) bet.profit = -bet.amount;
-  }
-
-  prevServerSeed = serverSeed;
-  prevRoundNumber = currentRound.roundNumber;
-
-  // Persist losses for sessions that didn't cash out (best-effort, fire and forget)
-  for (const bet of currentRound.bets) {
-    if (bet.isBot || bet.cashedOut) continue;
-    const sessionId = bet.playerId;
-    void recordLoss(sessionId).catch(() => {});
-    void appendHistory(sessionId, {
-      kind: 'crashed',
-      roundNumber: currentRound!.roundNumber,
-      amount: bet.amount,
-      crashPoint: currentRound!.crashPoint,
-      serverSeed: serverSeed,
-      at: Date.now(),
-    } satisfies HistoryEntry).catch(() => {});
-    void getStats(sessionId).then((stats) => {
-      sendToSession(sessionId, { type: 'stats_update', data: { stats } });
-    }).catch(() => {});
-  }
-
-  broadcast({
-    type: 'crash',
-    data: {
-      roundNumber: currentRound.roundNumber,
-      crashPoint: currentRound.crashPoint,
-      serverSeed,
-      bets: currentRound.bets,
-    },
-  });
-
-  roundHistory.push({ roundNumber: currentRound.roundNumber, crashPoint: currentRound.crashPoint });
-  if (roundHistory.length > 200) roundHistory.shift();
-
-  setTimeout(() => startResultPhase(), CONFIG.resultPhaseMs);
-}
-
-function startResultPhase() {
-  if (!currentRound) return;
-  broadcast({
-    type: 'phase_change',
-    data: {
-      phase: 'RESULT',
-      roundNumber: currentRound.roundNumber,
-      crashPoint: currentRound.crashPoint,
-      serverSeed,
-      history: roundHistory.slice(-30),
-      serverTime: Date.now(),
-    },
-  });
-  setTimeout(() => startBettingPhase(), 1500);
-}
+// HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
+registerPublicRoutes(app, { walletClientCache, games });
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 wss.on('connection', (ws) => {
@@ -466,23 +165,23 @@ wss.on('connection', (ws) => {
     sessionSockets.get(sessionId)!.add(ws);
   }
 
-  if (currentRound) {
+  if (Round.currentRound) {
     const joinData: Record<string, unknown> = {
-      roundNumber: currentRound.roundNumber,
-      phase: currentRound.phase,
-      currentMultiplier: currentRound.currentMultiplier,
-      startTime: currentRound.startTime,
+      roundNumber: Round.currentRound.roundNumber,
+      phase: Round.currentRound.phase,
+      currentMultiplier: Round.currentRound.currentMultiplier,
+      startTime: Round.currentRound.startTime,
       serverTime: Date.now(),
-      hashCommit: currentRound.serverSeedHash,
-      bets: currentRound.bets,
-      history: roundHistory.slice(-30),
-      prevServerSeed,
-      prevRoundNumber,
+      hashCommit: Round.currentRound.serverSeedHash,
+      bets: Round.currentRound.bets,
+      history: getRecentHistory(30),
+      prevServerSeed: Round.prevServerSeed,
+      prevRoundNumber: Round.prevRoundNumber,
     };
-    if (currentRound.phase === 'BETTING') {
-      const elapsed = Date.now() - currentRound.startTime;
+    if (Round.currentRound.phase === 'BETTING') {
+      const elapsed = Date.now() - Round.currentRound.startTime;
       joinData.countdownMs = Math.max(0, CONFIG.bettingPhaseMs - elapsed);
-      joinData.countdownStart = currentRound.startTime;
+      joinData.countdownStart = Round.currentRound.startTime;
     }
     safeSend(ws, { type: 'join', data: joinData });
   }
@@ -503,169 +202,62 @@ wss.on('connection', (ws) => {
   });
 });
 
-async function handleMessage(
-  ws: WebSocket,
-  message: Record<string, unknown>,
-  attachSession: (sessionId: string) => void,
-) {
-  const type = message.type as string;
-  const data = (message.data as Record<string, unknown>) ?? {};
-  const sessionId = String(data.sessionId ?? data.playerId ?? '');
-
-  switch (type) {
-    case 'hello': {
-      if (!sessionId) {
-        safeSend(ws, { type: 'session_invalid', data: { reason: 'sessionId required' } });
-        return;
-      }
-      try {
-        const session = await getSession(sessionId);
-        if (!session) {
-          safeSend(ws, { type: 'session_invalid', data: { sessionId, reason: 'not found' } });
-          return;
-        }
-        attachSession(sessionId);
-        sessionMeta.set(sessionId, { displayName: session.displayName });
-        const stats = await getStats(sessionId);
-        safeSend(ws, {
-          type: 'session_hello',
-          data: { session, stats },
-        });
-      } catch (err) {
-        if (err instanceof StoreOfflineError) {
-          safeSend(ws, { type: 'error', data: { message: 'Session store offline. Start Dragonfly: docker compose up -d dragonfly' } });
-        } else {
-          console.error('[hello] error:', err);
-        }
-      }
-      return;
-    }
-
-    case 'place_bet': {
-      if (!currentRound || currentRound.phase !== 'BETTING') {
-        safeSend(ws, { type: 'error', data: { message: 'Betting is closed for this round' } });
-        return;
-      }
-      if (!sessionId) { safeSend(ws, { type: 'error', data: { message: 'No session' } }); return; }
-
-      const amountRaw = Number(data.amount);
-      const amount = Math.round(amountRaw * 100) / 100;
-      const autoCashoutRaw = data.autoCashout == null ? undefined : Number(data.autoCashout);
-      const autoCashout =
-        autoCashoutRaw != null && Number.isFinite(autoCashoutRaw) && autoCashoutRaw > 1
-          ? Math.round(autoCashoutRaw * 100) / 100
-          : undefined;
-
-      if (!Number.isFinite(amount) || amount <= 0) {
-        safeSend(ws, { type: 'error', data: { message: 'Invalid bet amount' } }); return;
-      }
-      if (amount > MAX_STAKE) {
-        safeSend(ws, { type: 'error', data: { message: `Max stake is $${MAX_STAKE}` } }); return;
-      }
-      if (currentRound.bets.some((b) => b.playerId === sessionId)) {
-        safeSend(ws, { type: 'error', data: { message: 'You already have a bet this round' } }); return;
-      }
-
-      try {
-        const okRate = await checkRateLimit(sessionId);
-        if (!okRate) {
-          safeSend(ws, { type: 'error', data: { message: 'Slow down — too many bets per minute' } });
-          return;
-        }
-        const session = await getSession(sessionId);
-        if (!session) {
-          safeSend(ws, { type: 'session_invalid', data: { sessionId, reason: 'expired or missing' } });
-          return;
-        }
-        if (amount > session.balance) {
-          safeSend(ws, { type: 'error', data: { message: 'Insufficient balance' } });
-          return;
-        }
-
-        const newBalance = await adjustBalance(sessionId, -amount);
-        const stats = await recordBet(sessionId, amount);
-        await appendHistory(sessionId, {
-          kind: 'bet', roundNumber: currentRound.roundNumber, amount, autoCashout, at: Date.now(),
-        } satisfies HistoryEntry);
-
-        attachSession(sessionId);
-        sessionMeta.set(sessionId, { displayName: session.displayName });
-
-        const bet: Bet = {
-          playerId: sessionId,
-          amount,
-          autoCashout,
-          cashedOut: false,
-          isBot: false,
-          displayName: session.displayName,
-        };
-        currentRound.bets.push(bet);
-
-        safeSend(ws, { type: 'bet_placed', data: { bet, balance: newBalance, stats } });
-        broadcast({
-          type: 'new_bet',
-          data: {
-            playerId: sessionId,
-            amount,
-            autoCashout,
-            isBot: false,
-            displayName: session.displayName,
-            roundNumber: currentRound.roundNumber,
-          },
-        });
-      } catch (err) {
-        if (err instanceof StoreOfflineError) {
-          safeSend(ws, { type: 'error', data: { message: 'Session store offline — bet rejected' } });
-        } else {
-          console.error('[place_bet] error:', err);
-          safeSend(ws, { type: 'error', data: { message: 'Bet failed' } });
-        }
-      }
-      return;
-    }
-
-    case 'cashout': {
-      if (!currentRound || currentRound.phase !== 'FLYING') return;
-      if (!sessionId) return;
-      const bet = currentRound.bets.find((b) => b.playerId === sessionId);
-      if (!bet || bet.cashedOut) return;
-      const at = currentRound.currentMultiplier;
-      await cashOutBet(bet, at, 'manual');
-      return;
-    }
-
-    case 'reset_balance': {
-      if (!sessionId) return;
-      try {
-        await setBalance(sessionId, STARTING_BALANCE);
-        safeSend(ws, { type: 'balance', data: { sessionId, balance: STARTING_BALANCE } });
-      } catch (err) {
-        if (err instanceof StoreOfflineError) {
-          safeSend(ws, { type: 'error', data: { message: 'Session store offline — reset failed' } });
-        }
-      }
-      return;
-    }
-  }
-}
-
-// ─── SPA fallback ────────────────────────────────────────────────────────────
-// Anything that isn't an /api/* route nor a static asset hands back index.html
-// so the SPA can render. Direct loads of /?session=abc and similar work.
-// Must come AFTER express.static and all /api routes.
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api/') || req.path === '/ws') return next();
-  const indexHtml = path.join(clientDist, 'index.html');
-  if (!fs.existsSync(indexHtml)) return next();
-  res.sendFile(indexHtml);
-});
-
 // ─── Start ────────────────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT) || 3001;
 const HOST = process.env.HOST ?? '0.0.0.0';
+
+// Run crash-recovery before accepting connections.
+// Failure is non-fatal — log and continue.
+let recoveryReport: unknown = null;
+try {
+  recoveryReport = await runRecovery({ betLog, registry, alerter: consoleAlerter });
+} catch (err) {
+  console.error('[recovery] error during startup sweep (continuing):', err);
+}
+console.log('[recovery] report', JSON.stringify(recoveryReport));
+
+// Start the daily reconciliation sweep (00:15 UTC). Gated: never auto-starts
+// under test (the engine + on-demand endpoint are the tested core; this timer
+// is thin glue). It also never throws out of the timer (catch + log per operator).
+if (process.env['NODE_ENV'] !== 'test') {
+  scheduleDailyReconciliation(reconciler, registry, { hourUtc: 0, minuteUtc: 15 });
+  console.log('[reconciliation] daily sweep scheduled for 00:15 UTC');
+}
+
+// ─── Bootstrap first admin from env ──────────────────────────────────────────
+// ADMIN_BOOTSTRAP_USER=username:password:role1,role2
+// Idempotent: skipped if admin table already has any users, or env is unset.
+try {
+  const bootstrapEnv = process.env['ADMIN_BOOTSTRAP_USER'];
+  if (bootstrapEnv && (await adminUsers.count()) === 0) {
+    const colonIdx1 = bootstrapEnv.indexOf(':');
+    const colonIdx2 = bootstrapEnv.indexOf(':', colonIdx1 + 1);
+    if (colonIdx1 < 0 || colonIdx2 < 0) {
+      throw new Error('ADMIN_BOOTSTRAP_USER must be "username:password:role1,role2"');
+    }
+    const u = bootstrapEnv.slice(0, colonIdx1);
+    const p = bootstrapEnv.slice(colonIdx1 + 1, colonIdx2);
+    const rolesStr = bootstrapEnv.slice(colonIdx2 + 1);
+    const parsedRoles = (rolesStr || 'admin').split(',').map((r) => r.trim());
+    const invalidRoles = parsedRoles.filter((r) => !isAdminRole(r));
+    if (invalidRoles.length > 0) {
+      console.error(
+        `[admin] bootstrap skipped: ADMIN_BOOTSTRAP_USER has invalid role(s) ${invalidRoles.join(', ')}; expected admin|finance|support|viewer`,
+      );
+    } else {
+      const roles = parsedRoles as AdminRole[];
+      const hash = await bcrypt.hash(p, 10);
+      await adminUsers.create(u, hash, roles);
+      console.log(`[admin] bootstrapped initial admin '${u}'`);
+    }
+  }
+} catch (err) {
+  console.error('[admin] bootstrap failed (continuing):', err);
+}
+
 server.listen(PORT, HOST, () => {
   console.log(`[server] listening on ${HOST}:${PORT}`);
-  console.log(`[server] RTP=${CONFIG.rtp}  maxMultiplier=${CONFIG.maxMultiplier}  growth=${GROWTH_RATE}`);
+  console.log(`[server] RTP=${CONFIG.rtp}  maxMultiplier=${CONFIG.maxMultiplier}  growth=${Round.GROWTH_RATE}`);
   startBettingPhase();
 });
 

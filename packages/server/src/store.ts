@@ -29,8 +29,11 @@ import type { HistoryEntry, Session, SessionStats } from '@crash/shared/types';
 import { ZERO_STATS } from '@crash/shared/types';
 import {
   ANON_ADJ, ANON_NOUN, BETS_PER_MINUTE, HISTORY_LIMIT,
-  SESSION_TTL_SEC, STARTING_BALANCE,
+  SESSION_TTL_SEC,
 } from '@crash/shared/config';
+
+// TEMP demo seed; Task 3.1 replaces this with the operator authenticate balance.
+export const DEFAULT_DEMO_BALANCE = 1000;
 
 // ─── Boot ────────────────────────────────────────────────────────────────────
 const __filename = fileURLToPath(import.meta.url);
@@ -134,6 +137,74 @@ function quantize(n: number): number {
 
 // ─── Session lifecycle ───────────────────────────────────────────────────────
 
+/** 8-hour TTL for operator-backed iframe sessions (spec §3). */
+const OPERATOR_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+/** Mint a new operator-backed session from a wallet authenticate response (Task 3.1a). */
+export async function createOperatorSession(opts: {
+  operatorId: string;
+  playerId: string;
+  currency: string;
+  balanceMinor: number;
+  displayName: string;
+  rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
+  gameId?: string;
+}): Promise<Session> {
+  ensureOnline();
+  const sessionId = newId();
+  const now = Date.now();
+  const session: Session = {
+    sessionId,
+    displayName: opts.displayName,
+    // Populate the legacy `balance` field with balanceMinor so the existing
+    // WS/stats code keeps working. Task 3.2 will teach the client to prefer balanceMinor.
+    balance: opts.balanceMinor,
+    createdAt: now,
+    expiresAt: now + OPERATOR_SESSION_TTL_MS,
+    operatorId: opts.operatorId,
+    playerId: opts.playerId,
+    currency: opts.currency,
+    balanceMinor: opts.balanceMinor,
+    rgLimits: opts.rgLimits,
+    gameId: opts.gameId ?? 'galaxy-crash',
+  };
+  await jput(sessKey(sessionId), session);
+  await jput(statsKey(sessionId), { ...ZERO_STATS });
+  return session;
+}
+
+/**
+ * Mint a personal-lobby REAL-money session bound to a casino player. Balance is
+ * mirrored from the Postgres wallet at start; the wallet_ledger stays the source
+ * of truth (bets/wins settle against it, the session balance is just the last
+ * value we pushed to the client).
+ */
+export async function createPlayerSession(opts: {
+  lobbyPlayerId: string;
+  username: string;
+  gameId: string;
+  balanceMinor: number;
+  currency?: string;
+}): Promise<Session> {
+  ensureOnline();
+  const sessionId = newId();
+  const now = Date.now();
+  const session: Session = {
+    sessionId,
+    displayName: opts.username,
+    balance: opts.balanceMinor,
+    createdAt: now,
+    expiresAt: now + OPERATOR_SESSION_TTL_MS,
+    currency: opts.currency ?? 'USD',
+    balanceMinor: opts.balanceMinor,
+    gameId: opts.gameId,
+    lobbyPlayerId: opts.lobbyPlayerId,
+  };
+  await jput(sessKey(sessionId), session);
+  await jput(statsKey(sessionId), { ...ZERO_STATS });
+  return session;
+}
+
 export async function createSession(opts: { displayName?: string; balance?: number } = {}): Promise<Session> {
   ensureOnline();
   const sessionId = newId();
@@ -141,7 +212,7 @@ export async function createSession(opts: { displayName?: string; balance?: numb
   const session: Session = {
     sessionId,
     displayName: (opts.displayName ?? '').trim() || randomDisplayName(),
-    balance: opts.balance ?? STARTING_BALANCE,
+    balance: opts.balance ?? DEFAULT_DEMO_BALANCE,
     createdAt: now,
     expiresAt: now + SESSION_TTL_SEC * 1000,
   };

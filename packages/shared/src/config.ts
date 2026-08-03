@@ -14,9 +14,6 @@ export const CLIENT_PORT = 5173;
 
 // ─── Session + economy ──────────────────────────────────────────────────────
 
-/** Default balance handed to every freshly-minted session, in credits. */
-export const STARTING_BALANCE = 1000;
-
 /** Hard cap on a single bet, in credits. The server rejects anything larger. */
 export const MAX_STAKE = 1000;
 

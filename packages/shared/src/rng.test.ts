@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   crashPointFor,
+  crashPointForMessage,
+  crashMessage,
+  DEFAULT_GAME_ID,
   generateServerSeed,
   commitSeed,
   verifyCommit,
@@ -63,6 +66,54 @@ function fractionWhere(
   }
   return hits / rounds;
 }
+
+// ---------------------------------------------------------------------------
+// 0. Multi-game domain separation (2026-07-24)
+// ---------------------------------------------------------------------------
+
+describe('multi-game crash points', () => {
+  const seed = generateServerSeed();
+
+  it('default game keeps the legacy nonce → identical crash points', () => {
+    expect(crashMessage(42, DEFAULT_GAME_ID)).toBe('42');
+    expect(crashPointForMessage(seed, crashMessage(42, DEFAULT_GAME_ID)))
+      .toBe(crashPointFor(seed, 42));
+  });
+
+  it('a non-default game gets an independent crash point on the same (seed, round)', () => {
+    // Over many rounds the two series must not be identical (independent draws).
+    let differences = 0;
+    for (let r = 0; r < 200; r++) {
+      const base = crashPointForMessage(seed, crashMessage(r, DEFAULT_GAME_ID));
+      const jet = crashPointForMessage(seed, crashMessage(r, 'cosmic-jet'));
+      if (base !== jet) differences++;
+    }
+    expect(differences).toBeGreaterThan(150); // overwhelmingly different
+  });
+
+  it('two different non-default games diverge from each other', () => {
+    let differences = 0;
+    for (let r = 0; r < 200; r++) {
+      const a = crashPointForMessage(seed, crashMessage(r, 'cosmic-jet'));
+      const b = crashPointForMessage(seed, crashMessage(r, 'nebula-dash'));
+      if (a !== b) differences++;
+    }
+    expect(differences).toBeGreaterThan(150);
+  });
+
+  it('each game honours its OWN configured RTP', () => {
+    // Empirical RTP of a domain-separated game at its own rtp ≈ that rtp.
+    const rtp = 0.9;
+    const targets = [1.5, 2.0, 3.0];
+    let staked = 0, payout = 0;
+    for (let r = 0; r < 60_000; r++) {
+      const cp = crashPointForMessage(seed, crashMessage(r, 'low-rtp'), { rtp, maxMultiplier: 10_000 });
+      for (const m of targets) { staked++; if (cp >= m) payout += m; }
+    }
+    expect(payout / staked).toBeGreaterThan(rtp - 0.05);
+    expect(payout / staked).toBeLessThan(rtp + 0.05);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // 1. Determinism

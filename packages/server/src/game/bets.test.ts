@@ -1,0 +1,719 @@
+/**
+ * Integration test for the operator-backed bet engine (Task 1.6).
+ *
+ * TRUE end-to-end: real WalletClient → real HTTP → real operator-stub →
+ * real BetLog (:memory: sqlite). NOT mocked.
+ *
+ * The operator stub is started on an ephemeral port (startServer(0)) and torn
+ * down in afterAll. Player balances are reset between tests via resetStubState().
+ */
+
+// Mock the store module to prevent RocksDB from being opened when bets.ts is
+// imported. The legacy cashOutBet code (which we do NOT change) imports store,
+// but operator-backed functions (the new code under test) never use it.
+import { vi } from 'vitest';
+vi.mock('../store.js', () => ({
+  adjustBalance: vi.fn(),
+  appendHistory: vi.fn(),
+  recordWin: vi.fn(),
+  StoreOfflineError: class StoreOfflineError extends Error {},
+  getStats: vi.fn(),
+}));
+
+// Also mock the WS hub — same reason (bets.ts imports broadcast/sendToSession).
+vi.mock('../ws/hub.js', () => ({
+  broadcast: vi.fn(),
+  sendToSession: vi.fn(),
+}));
+
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
+import { WalletClient, PgBetLog, WalletError, WalletNetworkError, type Alerter, type AlertEvent } from '@crash/wallet';
+import type { Operator } from '@crash/wallet';
+import type { BetRow } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
+import type { Server } from 'node:http';
+
+// Import the operator stub — startServer returns an http.Server directly.
+// The signing key is read at module scope from SIGNING_KEY_B64, which defaults
+// to the constant below when STUB_SIGNING_KEY env is not set.
+import {
+  startServer,
+  resetStubState,
+} from '../../../../tools/operator-stub/src/index.js';
+
+import {
+  placeOperatorBet,
+  cashOutOperatorBet,
+  expireOperatorBetsOnCrash,
+  type OperatorBetDeps,
+} from './bets.js';
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+// Default signing key from the stub (read when the module is imported).
+// Must match the DEFAULT_KEY_B64 constant in tools/operator-stub/src/index.ts.
+const STUB_DEFAULT_KEY_B64 = 'dGVzdC1zdHViLWtleS0zMmJ5dGVzLXYwLXBhZGRpbmc=';
+const SIGNING_KEY = Buffer.from(STUB_DEFAULT_KEY_B64, 'base64');
+
+// ---------------------------------------------------------------------------
+// Shared state
+// ---------------------------------------------------------------------------
+
+let server: Server;
+let port: number;
+let walletClient: WalletClient;
+
+// ---------------------------------------------------------------------------
+// Suite setup / teardown
+// ---------------------------------------------------------------------------
+
+beforeAll(async () => {
+  // Start the operator stub on an ephemeral port.
+  // startServer(port) returns an http.Server directly.
+  server = startServer(0) as unknown as Server;
+
+  // Wait for the server to be listening.
+  await new Promise<void>((resolve) => {
+    server.once('listening', resolve);
+  });
+
+  const addr = server.address();
+  port = typeof addr === 'object' && addr !== null ? addr.port : 0;
+  if (!port) throw new Error('Could not determine stub server port');
+
+  // Construct the Operator object matching the Operator type.
+  const operator: Operator = {
+    operatorId: 'op-test',
+    name: 'Test Operator',
+    walletBaseUrl: `http://localhost:${port}`,
+    apiKey: 'op-test',
+    signingKey: SIGNING_KEY,
+    adapter: 'native',
+    currencies: ['EUR'],
+    minBetMinor: 1,
+    maxBetMinor: 10_000_000,
+    rtpVariant: 97,
+    jurisdictions: [],
+    status: 'active',
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  // The WalletClient uses a fast no-op sleep for tests so retries are
+  // near-instantaneous.
+  walletClient = new WalletClient(operator, {
+    sleep: (_ms: number) => Promise.resolve(),
+  });
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve, reject) => {
+    server.close((err) => (err ? reject(err) : resolve()));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-test setup
+// ---------------------------------------------------------------------------
+
+// Fresh BetLog per test (each gets its own :memory: database).
+let betLog: PgBetLog;
+let testDb: TestDb;
+let deps: OperatorBetDeps;
+
+// Track alert events per test.
+const alertEmits: AlertEvent[] = [];
+const fakeAlerter: Alerter = { emit: (e) => alertEmits.push(e) };
+
+beforeEach(async () => {
+  resetStubState();
+  alertEmits.length = 0;
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
+  deps = {
+    walletClient,
+    betLog,
+    alerter: fakeAlerter,
+  };
+});
+
+afterEach(async () => {
+  // Ensure STUB_FAIL_NEXT_WIN is cleared even if a test failed mid-way.
+  delete process.env['STUB_FAIL_NEXT_WIN'];
+  resetStubState();
+  await testDb.cleanup();
+});
+
+// ---------------------------------------------------------------------------
+// ID helpers
+// ---------------------------------------------------------------------------
+
+let _seq = 0;
+function uid(prefix: string): string {
+  return `${prefix}-${Date.now()}-${++_seq}`;
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: happy bet → win
+// ---------------------------------------------------------------------------
+
+it('happy path: placeOperatorBet → ARMED, cashOutOperatorBet → SETTLED, balance +10000', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+  const operatorId = 'op-test';
+  const playerId = 'pid-1';
+  const amountMinor = 10_000;
+  const winAmountMinor = 20_000;
+  const multiplier = 2.0;
+
+  // Step 1: place bet
+  const placeResult = await placeOperatorBet(deps, {
+    operatorId,
+    playerId,
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  const armedRow = placeResult.row;
+
+  expect(armedRow.state).toBe('ARMED');
+  expect(armedRow.betId).toBe(betId);
+  expect(armedRow.betOpTxnId).toBeTruthy();
+  // Post-debit balance surfaced by placeOperatorBet: 100000 - 10000 = 90000
+  expect(placeResult.balanceMinor).toBe(90_000);
+  expect(placeResult.currency).toBe('EUR');
+
+  // Step 2: cash out
+  const cashoutResult = await cashOutOperatorBet(deps, {
+    betId,
+    winTxnId,
+    multiplier,
+    winAmountMinor,
+    settledAt: Math.floor(Date.now() / 1000),
+  });
+  const settledRow = cashoutResult.row;
+
+  expect(settledRow.state).toBe('SETTLED');
+  expect(settledRow.winOpTxnId).toBeTruthy();
+  expect(settledRow.winAmountMinor).toBe(winAmountMinor);
+  expect(settledRow.multiplier).toBe(multiplier);
+  // Post-credit balance surfaced by cashOutOperatorBet: 90000 + 20000 = 110000
+  expect(cashoutResult.balanceMinor).toBe(110_000);
+  expect(cashoutResult.currency).toBe('EUR');
+
+  // Step 3: assert bet log is SETTLED
+  const storedRow = await betLog.getById(betId);
+  expect(storedRow?.state).toBe('SETTLED');
+
+  // Step 4: verify stub balance — started at 100000, -10000 bet, +20000 win = 110000
+  const balResp = await walletClient.balance({ playerId, sessionId });
+  expect(balResp.balance).toBe(110_000);
+  expect(balResp.currency).toBe('EUR');
+});
+
+// ---------------------------------------------------------------------------
+// Test 2: insufficient funds
+// ---------------------------------------------------------------------------
+
+it('insufficient funds: placeOperatorBet rejects with WalletError, row VOIDED, balance unchanged', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+
+  // pid-1 starts with EUR 100000; attempt to bet 100001 — exceeds balance
+  const amountMinor = 100_001;
+
+  let thrownError: WalletError | undefined;
+  try {
+    await placeOperatorBet(deps, {
+      operatorId: 'op-test',
+      playerId: 'pid-1',
+      sessionId,
+      roundId,
+      currency: 'EUR',
+      amountMinor,
+      betId,
+      betTxnId,
+      gameId: 'galaxy-crash',
+    });
+    expect.fail('Should have thrown WalletError');
+  } catch (err) {
+    expect(err).toBeInstanceOf(WalletError);
+    thrownError = err as WalletError;
+  }
+
+  expect(thrownError!.code).toBe('INSUFFICIENT_FUNDS');
+  expect(thrownError!.retryable).toBe(false);
+
+  // Bet row must be VOIDED with betTxnId recovery key retained
+  const row = await betLog.getById(betId);
+  expect(row?.state).toBe('VOIDED');
+  expect(row?.errorCode).toBe('INSUFFICIENT_FUNDS');
+  expect(row?.betTxnId).toBe(betTxnId);
+
+  // Balance must be unchanged — still 100000
+  const balResp = await walletClient.balance({ playerId: 'pid-1', sessionId });
+  expect(balResp.balance).toBe(100_000);
+});
+
+// ---------------------------------------------------------------------------
+// Test 3: win retry then success (STUB_FAIL_NEXT_WIN)
+// ---------------------------------------------------------------------------
+
+it('win retry: single /win 500 is retried by WalletClient and ultimately SETTLES', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-2';
+
+  // Place a bet for pid-2 (USD 100000)
+  const placeResult = await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-2',
+    sessionId,
+    roundId,
+    currency: 'USD',
+    amountMinor: 5_000,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  expect(placeResult.row.state).toBe('ARMED');
+
+  // Arm the one-shot win failure BEFORE calling cashOut.
+  // The stub checks this env var lazily inside shouldFailNextWin().
+  process.env['STUB_FAIL_NEXT_WIN'] = '1';
+
+  // The WalletClient (win policy: 6 attempts, backoff overridden to 0 via
+  // the sleep no-op injected in beforeAll) will retry past the one 500.
+  const cashoutResult = await cashOutOperatorBet(deps, {
+    betId,
+    winTxnId,
+    multiplier: 3.0,
+    winAmountMinor: 15_000,
+    settledAt: Math.floor(Date.now() / 1000),
+  });
+
+  expect(cashoutResult.row.state).toBe('SETTLED');
+  expect(cashoutResult.row.winOpTxnId).toBeTruthy();
+
+  // No alert should have been emitted (win succeeded after retry)
+  expect(alertEmits).toHaveLength(0);
+
+  // Balance: 100000 - 5000 (bet) + 15000 (win) = 110000
+  const balResp = await walletClient.balance({ playerId: 'pid-2', sessionId });
+  expect(balResp.balance).toBe(110_000);
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: crash → LOST, no win call
+// ---------------------------------------------------------------------------
+
+it('crash: expireOperatorBetsOnCrash marks ARMED bets as LOST, returns count, idempotent on second call', async () => {
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+  const amountMinor = 10_000;
+
+  // Place a bet
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-1',
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+
+  // Confirm ARMED
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
+
+  // Crash the round — should transition ARMED → LOST
+  const count = await expireOperatorBetsOnCrash({ betLog }, roundId);
+  expect(count).toBe(1);
+  expect((await betLog.getById(betId))?.state).toBe('LOST');
+
+  // Second call: LOST is terminal, should be skipped silently → returns 0
+  const count2 = await expireOperatorBetsOnCrash({ betLog }, roundId);
+  expect(count2).toBe(0);
+
+  // Balance should only reflect the bet debit — no win credit
+  // pid-1 started at 100000, bet 10000 → 90000
+  const balResp = await walletClient.balance({ playerId: 'pid-1', sessionId });
+  expect(balResp.balance).toBe(90_000);
+});
+
+it('multi-game: expireOperatorBetsOnCrash(gameId) only expires that game, leaves siblings ARMED', async () => {
+  const roundId = uid('round');
+
+  const betA = uid('bet');
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test', playerId: 'pid-1', sessionId: 'sess-pid-1', roundId,
+    currency: 'EUR', amountMinor: 10_000, betId: betA, betTxnId: uid('btxn'),
+    gameId: 'galaxy-crash',
+  });
+  const betB = uid('bet');
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test', playerId: 'pid-1', sessionId: 'sess-pid-1b', roundId,
+    currency: 'EUR', amountMinor: 10_000, betId: betB, betTxnId: uid('btxn'),
+    gameId: 'cosmic-jet',
+  });
+
+  expect((await betLog.getById(betA))?.gameId).toBe('galaxy-crash');
+  expect((await betLog.getById(betB))?.gameId).toBe('cosmic-jet');
+
+  // galaxy-crash crashes; cosmic-jet is still flying.
+  const n = await expireOperatorBetsOnCrash({ betLog }, roundId, 'galaxy-crash');
+  expect(n).toBe(1);
+  expect((await betLog.getById(betA))?.state).toBe('LOST');
+  expect((await betLog.getById(betB))?.state).toBe('ARMED'); // sibling untouched
+
+  // Now cosmic-jet crashes.
+  const m = await expireOperatorBetsOnCrash({ betLog }, roundId, 'cosmic-jet');
+  expect(m).toBe(1);
+  expect((await betLog.getById(betB))?.state).toBe('LOST');
+});
+
+// ---------------------------------------------------------------------------
+// Test 5: ambiguous /bet failure → ROLLBACK_PENDING
+// ---------------------------------------------------------------------------
+
+it('ambiguous /bet failure: WalletNetworkError → ROLLBACK_PENDING with betTxnId and errorCode retained', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const roundId = uid('round');
+
+  // Construct a WalletClient whose fetchImpl always throws (simulates econnrefused).
+  // The client exhausts its retries (4 attempts with no-op sleep) and surfaces a
+  // WalletNetworkError. No stub call ever happens.
+  const alwaysThrowFetch: typeof fetch = async () => {
+    throw new Error('econnrefused');
+  };
+
+  // Build a standalone operator config matching the test suite's operator,
+  // but pointing at a host that will never be reached (fetchImpl overrides it).
+  const failingOperator = {
+    operatorId: 'op-test',
+    name: 'Test Operator',
+    walletBaseUrl: 'http://localhost:0',
+    apiKey: 'op-test',
+    signingKey: SIGNING_KEY,
+    adapter: 'native' as const,
+    currencies: ['EUR'],
+    minBetMinor: 1,
+    maxBetMinor: 10_000_000,
+    rtpVariant: 97,
+    jurisdictions: [],
+    status: 'active' as const,
+    createdAt: 0,
+    updatedAt: 0,
+  };
+
+  const failingClient = new WalletClient(failingOperator, {
+    fetchImpl: alwaysThrowFetch,
+    sleep: async () => {},  // instant backoff so test doesn't wait
+  });
+
+  // Fresh betLog (shared per-test betLog is used here; row is in :memory:)
+  const failingDeps: OperatorBetDeps = {
+    walletClient: failingClient,
+    betLog,
+  };
+
+  let thrown: unknown;
+  try {
+    await placeOperatorBet(failingDeps, {
+      operatorId: 'op-test',
+      playerId: 'pid-1',
+      sessionId: 'sess-pid-1',
+      roundId,
+      currency: 'EUR',
+      amountMinor: 5_000,
+      betId,
+      betTxnId,
+      gameId: 'galaxy-crash',
+    });
+    expect.fail('Should have thrown a WalletError');
+  } catch (err) {
+    thrown = err;
+  }
+
+  // Must throw a WalletError (specifically WalletNetworkError — subclass of WalletError)
+  expect(thrown).toBeInstanceOf(WalletError);
+  expect(thrown).toBeInstanceOf(WalletNetworkError);
+
+  // Row must be ROLLBACK_PENDING (ambiguous — operator may have debited)
+  const row = await betLog.getById(betId);
+  expect(row?.state).toBe('ROLLBACK_PENDING');
+  expect(row?.betTxnId).toBe(betTxnId);
+  expect(row?.errorCode).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Test 6: winTxnId persisted at SETTLING (before /win completes)
+// ---------------------------------------------------------------------------
+
+it('SETTLING: winTxnId is persisted to betLog BEFORE the /win HTTP call completes', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+
+  // Place a happy bet against the real stub so the row reaches ARMED.
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-1',
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor: 5_000,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
+
+  // Build an intercepting WalletClient for the /win call.
+  // It reads the betLog row BEFORE forwarding to the real stub, capturing the
+  // state at the exact moment the /win request is about to be sent. This lets
+  // us assert that winTxnId was already persisted (Fix 2) before the HTTP round-trip.
+  let preWinSnapshot: { state: string; winTxnId: string | null } | null = null;
+
+  const interceptingFetch: typeof fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : (input as URL).toString();
+    if (url.endsWith('/win')) {
+      const row = await betLog.getById(betId);
+      preWinSnapshot = { state: row!.state, winTxnId: row!.winTxnId };
+    }
+    return globalThis.fetch(input as Parameters<typeof fetch>[0], init);
+  };
+
+  const winClient = new WalletClient(
+    {
+      operatorId: 'op-test',
+      name: 'Test Operator',
+      walletBaseUrl: `http://localhost:${port}`,
+      apiKey: 'op-test',
+      signingKey: SIGNING_KEY,
+      adapter: 'native' as const,
+      currencies: ['EUR'],
+      minBetMinor: 1,
+      maxBetMinor: 10_000_000,
+      rtpVariant: 97,
+      jurisdictions: [],
+      status: 'active' as const,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    {
+      fetchImpl: interceptingFetch,
+      sleep: async () => {},
+    },
+  );
+
+  const winDeps: OperatorBetDeps = {
+    walletClient: winClient,
+    betLog,
+  };
+
+  // Cash out using the intercepting client
+  const cashoutResult = await cashOutOperatorBet(winDeps, {
+    betId,
+    winTxnId,
+    multiplier: 2.0,
+    winAmountMinor: 10_000,
+    settledAt: Math.floor(Date.now() / 1000),
+  });
+
+  // The pre-/win snapshot must show SETTLING with winTxnId already written
+  expect(preWinSnapshot).not.toBeNull();
+  expect(preWinSnapshot!.state).toBe('SETTLING');
+  expect(preWinSnapshot!.winTxnId).toBe(winTxnId);
+
+  // Post-condition: final row is SETTLED with the same winTxnId
+  expect(cashoutResult.row.state).toBe('SETTLED');
+  expect(cashoutResult.row.winTxnId).toBe(winTxnId);
+  expect(cashoutResult.row.winOpTxnId).toBeTruthy();
+});
+
+// ---------------------------------------------------------------------------
+// Test 7 (Fix 3 / Gap-2): forgotten-wiring — no alerter field still alerts
+// ---------------------------------------------------------------------------
+
+it('forgotten-wiring: cashOutOperatorBet with no alerter field surfaces win_failed via ConsoleAlerter fallback (never silently swallowed)', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+
+  // Build a WalletClient whose /win always rejects — simulates exhausted retries.
+  const alwaysThrowFetch: typeof fetch = async (_input, _init) => {
+    throw new Error('econnrefused');
+  };
+  const failingClient = new WalletClient(
+    {
+      operatorId: 'op-test',
+      name: 'Test Operator',
+      walletBaseUrl: `http://localhost:${port}`,
+      apiKey: 'op-test',
+      signingKey: SIGNING_KEY,
+      adapter: 'native' as const,
+      currencies: ['EUR'],
+      minBetMinor: 1,
+      maxBetMinor: 10_000_000,
+      rtpVariant: 97,
+      jurisdictions: [],
+      status: 'active' as const,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    { fetchImpl: alwaysThrowFetch, sleep: async () => {} },
+  );
+
+  // Place the bet using the real stub so the row reaches ARMED.
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-1',
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor: 5_000,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
+
+  // deps WITHOUT an alerter field — the ConsoleAlerter fallback must fire.
+  const depsNoAlerter: OperatorBetDeps = {
+    walletClient: failingClient,
+    betLog,
+    // intentionally no alerter
+  };
+
+  const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    await cashOutOperatorBet(depsNoAlerter, {
+      betId,
+      winTxnId,
+      multiplier: 2.0,
+      winAmountMinor: 10_000,
+      settledAt: Math.floor(Date.now() / 1000),
+    });
+  } catch {
+    // expected — win exhausted
+  }
+
+  // Bet must be WIN_FAILED in the log
+  expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
+
+  // ConsoleAlerter fallback must have written a [alert] win_failed line to stderr
+  const alertLine = consoleSpy.mock.calls.find(
+    (args) => typeof args[0] === 'string' && args[0].includes('[alert] win_failed'),
+  );
+  expect(alertLine).toBeDefined();
+
+  consoleSpy.mockRestore();
+});
+
+// ---------------------------------------------------------------------------
+// Test 8 (Fix 4 / Gap-1): positive shape assertion — exactly one cashout-exhaustion alert
+// ---------------------------------------------------------------------------
+
+it('cashout-exhaustion alert: injected alerter receives exactly one win_failed call with correct shape (no double-alert)', async () => {
+  const betId = uid('bet');
+  const betTxnId = uid('btxn');
+  const winTxnId = uid('wtxn');
+  const roundId = uid('round');
+  const sessionId = 'sess-pid-1';
+
+  // WalletClient whose /win always rejects after retries.
+  const alwaysThrowFetch: typeof fetch = async () => {
+    throw new Error('econnrefused');
+  };
+  const failingClient = new WalletClient(
+    {
+      operatorId: 'op-test',
+      name: 'Test Operator',
+      walletBaseUrl: `http://localhost:${port}`,
+      apiKey: 'op-test',
+      signingKey: SIGNING_KEY,
+      adapter: 'native' as const,
+      currencies: ['EUR'],
+      minBetMinor: 1,
+      maxBetMinor: 10_000_000,
+      rtpVariant: 97,
+      jurisdictions: [],
+      status: 'active' as const,
+      createdAt: 0,
+      updatedAt: 0,
+    },
+    { fetchImpl: alwaysThrowFetch, sleep: async () => {} },
+  );
+
+  // Place using the real stub so the row reaches ARMED.
+  await placeOperatorBet(deps, {
+    operatorId: 'op-test',
+    playerId: 'pid-1',
+    sessionId,
+    roundId,
+    currency: 'EUR',
+    amountMinor: 5_000,
+    betId,
+    betTxnId,
+    gameId: 'galaxy-crash',
+  });
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
+
+  // Inject a fresh vi.fn() alerter to capture exactly what is emitted.
+  const emitSpy = vi.fn();
+  const spiedAlerter: Alerter = { emit: emitSpy };
+  const depsWithSpy: OperatorBetDeps = {
+    walletClient: failingClient,
+    betLog,
+    alerter: spiedAlerter,
+  };
+
+  try {
+    await cashOutOperatorBet(depsWithSpy, {
+      betId,
+      winTxnId,
+      multiplier: 2.0,
+      winAmountMinor: 10_000,
+      settledAt: Math.floor(Date.now() / 1000),
+    });
+  } catch {
+    // expected
+  }
+
+  // Exactly ONE alert emitted — no double-alert (single-alert invariant)
+  expect(emitSpy).toHaveBeenCalledTimes(1);
+
+  // Shape must match the cashout-exhaustion win_failed spec
+  expect(emitSpy).toHaveBeenCalledWith({
+    kind: 'win_failed',
+    source: 'cashout',
+    betRow: expect.objectContaining({ betId }),
+    error: expect.any(String),
+  });
+
+  // Confirm the row also reached WIN_FAILED in the log
+  expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
+});

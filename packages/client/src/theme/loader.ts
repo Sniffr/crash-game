@@ -52,7 +52,12 @@ export function clearTheme() {
  */
 export async function fetchServerTheme(): Promise<Theme | null> {
   try {
-    const res = await fetch('/api/theme');
+    // Multi-game: launch redirects to /?session=…&game=<id>. Forward the game
+    // so the server serves that catalogue game's theme (falls back to the
+    // single active theme when absent).
+    const game = new URLSearchParams(location.search).get('game');
+    const url = game ? `/api/theme?game=${encodeURIComponent(game)}` : '/api/theme';
+    const res = await fetch(url);
     if (res.status === 204 || !res.ok) return null;
     const parsed = await res.json() as Partial<Theme>;
     return mergeWithDefault(parsed);

@@ -1,0 +1,208 @@
+# Wallet conformance suite — targets the SoftSwiss-format stub (softswiss-stub.ts).
+#
+# Drives the SAME REAL WalletClient as native.yaml, but with the softswiss
+# adapter injected (runSuite adapterName:'softswiss'). The `request` blocks use
+# the CANONICAL WalletClient field names (playerId, txnId, amountMinor, …) — the
+# adapter translates them into the SoftSwiss snake_case /callback dialect, so the
+# YAML shape is identical to native.yaml. Only the EXPECTED mappings differ where
+# the dialect maps differently (notably insufficient-funds → HTTP 402, not 409).
+#
+# Responses are SUBSET-matched; errorCode / httpStatus / attempts are exact.
+# request_uuids/txnIds are distinct per case to avoid idempotency cross-talk.
+
+# --- authenticate --------------------------------------------------------------
+
+- name: ss authenticate happy (tok-pid-1)
+  endpoint: authenticate
+  request:
+    token: tok-pid-1
+    ip: 127.0.0.1
+    userAgent: conformance/1.0
+    gameId: galaxy-crash
+  expect:
+    ok: true
+    response:
+      playerId: pid-1
+      currency: EUR
+    attempts: 1
+
+- name: ss authenticate bad token
+  endpoint: authenticate
+  request:
+    token: nope
+    ip: 127.0.0.1
+    userAgent: conformance/1.0
+    gameId: galaxy-crash
+  expect:
+    ok: false
+    errorCode: TOKEN_INVALID
+    httpStatus: 401
+
+# --- balance -------------------------------------------------------------------
+
+- name: ss balance pid-1
+  endpoint: balance
+  request:
+    playerId: pid-1
+    sessionId: sess-ss-1
+  expect:
+    ok: true
+    response:
+      currency: EUR
+    attempts: 1
+
+# --- bet -----------------------------------------------------------------------
+
+- name: ss bet happy (pid-1 EUR 5000)
+  endpoint: bet
+  request:
+    playerId: pid-1
+    sessionId: sess-ss-1
+    roundId: round-ss-1
+    betId: bet-ss-1
+    txnId: txn-bet-ss-1
+    amountMinor: 5000
+    currency: EUR
+    gameId: galaxy-crash
+    placedAt: 1700000000
+  expect:
+    ok: true
+    response:
+      currency: EUR
+    attempts: 1
+
+- name: ss bet insufficient funds (402, not native 409)
+  endpoint: bet
+  request:
+    playerId: pid-1
+    sessionId: sess-ss-1
+    roundId: round-ss-2
+    betId: bet-ss-2
+    txnId: txn-bet-ss-2
+    # > balance (100000) but <= max bet (500000) so the funds check fires
+    # before the over-limit check.
+    amountMinor: 200000
+    currency: EUR
+    gameId: galaxy-crash
+    placedAt: 1700000000
+  expect:
+    ok: false
+    errorCode: INSUFFICIENT_FUNDS
+    httpStatus: 402
+
+- name: ss bet over-limit
+  endpoint: bet
+  request:
+    playerId: pid-1
+    sessionId: sess-ss-1
+    roundId: round-ss-3
+    betId: bet-ss-3
+    txnId: txn-bet-ss-3
+    amountMinor: 600000
+    currency: EUR
+    gameId: galaxy-crash
+    placedAt: 1700000000
+  expect:
+    ok: false
+    # Unmapped RS_ERROR_BET_LIMIT → generic 422 business error (adapter rule 4d).
+    errorCode: RS_ERROR_BET_LIMIT
+    httpStatus: 422
+
+# --- win -----------------------------------------------------------------------
+
+- name: ss win happy (pid-1 EUR)
+  endpoint: win
+  request:
+    playerId: pid-1
+    sessionId: sess-ss-1
+    roundId: round-ss-1
+    betId: bet-ss-1
+    betTxnId: txn-bet-ss-1
+    txnId: txn-win-ss-1
+    amountMinor: 10000
+    multiplier: 2.0
+    currency: EUR
+    settledAt: 1700000005
+  expect:
+    ok: true
+    response:
+      currency: EUR
+    attempts: 1
+
+# Win-retry: armed fault injection makes the FIRST /win (action:win) return a
+# SIGNED HTTP 500 once. The adapter surfaces it as a retryable UPSTREAM_ERROR
+# and the WalletClient retries; the second attempt succeeds. attempts:2 proves
+# the retry. Requires armFaultInjection against the in-process stub.
+- name: ss win-retry (one injected 500 then success)
+  endpoint: win
+  faultInjection: failNextWin
+  request:
+    playerId: pid-1
+    sessionId: sess-ss-1
+    roundId: round-ss-1
+    betId: bet-ss-1
+    betTxnId: txn-bet-ss-1
+    txnId: txn-win-ss-retry
+    amountMinor: 7000
+    multiplier: 1.4
+    currency: EUR
+    settledAt: 1700000006
+  expect:
+    ok: true
+    attempts: 2
+
+# --- rollback ------------------------------------------------------------------
+# References the bet placed above (betTxnId: txn-bet-ss-1). The softswiss adapter
+# encodes betTxnId → reference_transaction_uuid; the stub keyed the bet by its
+# transaction_uuid (= the bet's request_uuid = txn-bet-ss-1), so this reverses a
+# real debit rather than a noop.
+
+- name: ss rollback happy (reverse bet-ss-1)
+  endpoint: rollback
+  request:
+    playerId: pid-1
+    betTxnId: txn-bet-ss-1
+    txnId: txn-rollback-ss-1
+    reason: round_voided
+  expect:
+    ok: true
+    response:
+      status: rolled_back
+      currency: EUR
+    attempts: 1
+
+# Unknown reference → RS_ERROR_TRANSACTION_DOES_NOT_EXIST → adapter maps to
+# noop-success (ok:true, status:'noop').
+- name: ss rollback unknown (noop success)
+  endpoint: rollback
+  request:
+    playerId: pid-1
+    betTxnId: txn-does-not-exist
+    txnId: txn-rollback-ss-2
+    reason: round_voided
+  expect:
+    ok: true
+    response:
+      status: noop
+
+# --- round-end -----------------------------------------------------------------
+# Fire-and-forget: ok:true means "did not throw".
+
+- name: ss round-end (fire-and-forget)
+  endpoint: roundEnd
+  request:
+    roundId: round-ss-1
+    playerId: pid-1
+    crashPoint: 2.37
+    serverSeedHash: abc123
+    serverSeed: def456
+    bets:
+      - betId: bet-ss-1
+        txnId: txn-bet-ss-1
+        amountMinor: 5000
+        result: win
+        winTxnId: txn-win-ss-1
+        winAmountMinor: 10000
+        multiplier: 2.0
+  expect:
+    ok: true

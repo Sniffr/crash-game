@@ -1,3 +1,5 @@
+import { decimalsFor, symbolFor, toMinor } from '../lib/money';
+
 interface BetPanelProps {
   phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT';
   hasBet: boolean;
@@ -13,6 +15,12 @@ interface BetPanelProps {
   betAmounts: number[];
   onPlaceBet: () => void;
   onCashout: () => void;
+  /** Operator max bet in minor units. When set, enforces an upper limit on bets. */
+  maxBetMinor?: number;
+  /** ISO-4217 currency code for operator sessions. */
+  currency?: string;
+  /** True when this is an operator-backed session (balance is in minor units). */
+  isOperator?: boolean;
 }
 
 const BETTING_TOTAL_MS = 5000;
@@ -32,8 +40,33 @@ export default function BetPanel({
   betAmounts,
   onPlaceBet,
   onCashout,
+  maxBetMinor,
+  currency,
+  isOperator = false,
 }: BetPanelProps) {
-  const canBet = phase === 'BETTING' && !hasBet && balance >= betAmount;
+  const decimals = decimalsFor(currency);
+  const symbol = symbolFor(currency);
+
+  // For operator sessions: balance is in minor units, betAmount is in major units typed by user.
+  // Convert betAmount to minor units for all comparisons.
+  const betAmountMinor = isOperator ? toMinor(betAmount, currency) : betAmount;
+
+  // Balance check: for operator sessions compare minor units; for legacy compare decimal credits.
+  const hasEnoughBalance = isOperator
+    ? balance >= betAmountMinor
+    : balance >= betAmount;
+
+  // Operator max-bet enforcement
+  const exceedsMaxBet = isOperator && maxBetMinor != null && betAmountMinor > maxBetMinor;
+
+  // Max allowed bet in major units (for the input's max attribute and double button)
+  const maxBetMajor = isOperator && maxBetMinor != null
+    ? maxBetMinor / Math.pow(10, decimals)
+    : isOperator
+    ? balance / Math.pow(10, decimals)
+    : balance;
+
+  const canBet = phase === 'BETTING' && !hasBet && hasEnoughBalance && !exceedsMaxBet;
   const canCashout = phase === 'FLYING' && hasBet;
   const isCashedOut = hasBet && phase !== 'FLYING' && phase !== 'BETTING';
 
@@ -97,21 +130,22 @@ export default function BetPanel({
       {/* Stake input */}
       <div className="flex items-center gap-2 mb-2.5">
         <button
-          onClick={() => setBetAmount(Math.max(1, Math.floor(betAmount / 2)))}
+          onClick={() => setBetAmount(Math.max(1 / Math.pow(10, decimals), betAmount / 2))}
           className="w-9 h-10 rounded-control bg-space-800/80 border border-space-500/40 text-slate-300 hover:bg-space-700 hover:text-white transition font-mono"
           aria-label="halve"
         >−</button>
         <input
           type="number"
           value={betAmount}
-          onChange={(e) => setBetAmount(Math.max(1, Number(e.target.value) || 1))}
+          onChange={(e) => setBetAmount(Math.max(1 / Math.pow(10, decimals), Number(e.target.value) || 1 / Math.pow(10, decimals)))}
           className="flex-1 bg-space-800/80 border border-space-500/40 rounded-control px-3 h-10 text-white text-base font-mono font-semibold focus:outline-none focus:border-plasma-500/60 focus:ring-1 focus:ring-plasma-500/30 tabular-nums text-center"
-          min={1}
-          max={balance}
+          min={1 / Math.pow(10, decimals)}
+          max={maxBetMajor}
           inputMode="decimal"
+          step={1 / Math.pow(10, decimals)}
         />
         <button
-          onClick={() => setBetAmount(Math.max(1, Math.min(balance, betAmount * 2)))}
+          onClick={() => setBetAmount(Math.max(1 / Math.pow(10, decimals), Math.min(maxBetMajor, betAmount * 2)))}
           className="w-9 h-10 rounded-control bg-space-800/80 border border-space-500/40 text-slate-300 hover:bg-space-700 hover:text-white transition font-mono"
           aria-label="double"
         >+</button>
@@ -129,7 +163,7 @@ export default function BetPanel({
                 : 'bg-space-800/40 text-slate-400 border-space-500/30 hover:border-space-500/60 hover:text-slate-200'
             }`}
           >
-            ${amt}
+            {symbol}{amt}
           </button>
         ))}
       </div>
@@ -158,7 +192,7 @@ export default function BetPanel({
           onClick={onPlaceBet}
           className="w-full h-12 rounded-control bg-gradient-to-r from-aurora-500 to-plasma-500 text-space-950 font-display font-bold text-sm uppercase tracking-[0.18em] hover:brightness-110 transition active:scale-[0.99] shadow-lg shadow-aurora-500/20"
         >
-          Place Bet · ${betAmount.toFixed(2)}
+          Place Bet · {symbol}{betAmount.toFixed(Math.min(decimals, 8))}
           {seconds != null && (
             <span className="ml-2 opacity-60">({seconds}s)</span>
           )}
@@ -170,7 +204,7 @@ export default function BetPanel({
           onClick={onCashout}
           className="w-full h-12 rounded-control bg-gradient-to-r from-solar-500 to-nebula-500 text-space-950 font-display font-bold text-sm uppercase tracking-[0.18em] hover:brightness-110 transition active:scale-[0.99] btn-pulse-cashout"
         >
-          Cash Out · ${(betAmount * currentMultiplier).toFixed(2)}
+          Cash Out · {symbol}{(betAmount * currentMultiplier).toFixed(Math.min(decimals, 8))}
         </button>
       )}
 
@@ -186,7 +220,13 @@ export default function BetPanel({
         </div>
       )}
 
-      {!canBet && !canCashout && !isCashedOut && !hasBet && phase === 'BETTING' && balance < betAmount && (
+      {exceedsMaxBet && !hasBet && phase === 'BETTING' && (
+        <div className="w-full h-12 rounded-control bg-space-800/50 border border-nebula-500/30 text-nebula-400/80 font-semibold text-sm uppercase tracking-[0.18em] flex items-center justify-center">
+          Above operator limit
+        </div>
+      )}
+
+      {!canBet && !canCashout && !isCashedOut && !hasBet && !exceedsMaxBet && phase === 'BETTING' && !hasEnoughBalance && (
         <div className="w-full h-12 rounded-control bg-space-800/50 border border-nebula-500/30 text-nebula-400/80 font-semibold text-sm uppercase tracking-[0.18em] flex items-center justify-center">
           Insufficient balance
         </div>

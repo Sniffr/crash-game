@@ -11,10 +11,19 @@
     "dev:client": "cd packages/client && npm run dev",
     "dev:creator": "cd packages/creator && npm run dev",
     "dev:all": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:creator\"",
-    "build": "npm run build --workspace=packages/shared --workspace=packages/server --workspace=packages/client",
+    "build": "npm run build --workspace=packages/shared --workspace=packages/wallet --workspace=packages/adapters --workspace=packages/server --workspace=packages/client",
     "test": "cd packages/shared && npm test"
   },
   "devDependencies": {
-    "concurrently": "^8.2.0"
+    "@types/pg": "^8.20.3",
+    "concurrently": "^8.2.0",
+    "yaml": "^2.9.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1101.0",
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0",
+    "pino": "^10.3.1",
+    "prom-client": "^15.1.3"
   }
 }
