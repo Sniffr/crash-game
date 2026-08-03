@@ -90,15 +90,17 @@ Hot player session state stays in **RocksDB** (ephemeral cache, not money) for W
 ## 6. Phasing
 
 - **Wave A (done, live):** `games`+`game_assets`+`players`+`wallet_ledger` on Postgres; Creator uploads assets to S3; lobby + demo/real launch; games catalogue migrated SQLite→PG (async + snapshot).
-- **Wave B (in progress):** port `bet_log`, `operators`, `admin`, `idempotency`, `reconciliation` SQLite→Postgres.
+- **Wave B (done):** ported `bet_log`, `operators`, `admin`, `idempotency`, `reconciliation` SQLite→Postgres. The entire platform now runs on the `casino` Postgres DB; SQLite is gone (RocksDB kept only for hot session cache).
 
 ### Wave B progress
 
 - **pt1 (done, wired, live):** `PgOperatorRegistry` — Postgres-backed with an in-memory read cache (sync reads on hot paths, async writes + refresh). Wired into prod (`index.ts`, admin, operator, signature middleware, `WalletClientCache` via the `OperatorReader` interface). Live-verified: create operator → Postgres → served from cache. Reusable PG test harness added (`pg-test-support.ts` → isolated schema per test file on a local `crash-test-pg` docker container).
 - **pt2 (done, tested — NOT yet wired to prod):** `PgBetLog` (full async port of the 1179-line ledger incl. FOR-UPDATE state-machine transition, idempotency, keyset lists, GGR/NGR report), `PgAdminAudit`/`PgAdminUsers`, `PgOperatorAudit`. 30 integration tests against real Postgres.
-- **pt3 (remaining):** the prod cut-over — swap `index.ts` to the pt2 repos, add `await` at the ~54 `betLog` call sites (bets.ts 26, admin.ts 11, operator.ts 10, recovery.ts 7) + admin-users auth sites, port the `Reconciler` to Postgres, and drop `better-sqlite3`.
+- **pt3 (done):** the prod cut-over — the whole B2B ledger now runs on Postgres and `better-sqlite3` is gone.
+  - **pt3a:** swapped `index.ts` to the Pg repos + `PgReconciler`; every `betLog`/`adminUsers`/`reconciler` call site converted to `await`, driven exhaustively by the TypeScript compiler (retyping consumers to the async repos made tsc flag every un-awaited call — a Promise misused as a value — so no missing `await` can hide on a result-using path). Fire-and-forget writes (idempotency, OPERATOR_PAUSED transitions) awaited explicitly. Live-verified against the real casino DB.
+  - **pt3b:** converted all 17 money-path test files from SQLite doubles to real Postgres via `makeTestDb()` (per-test isolated schema), so the async wiring is genuinely test-validated. Deleted the SQLite repo classes (BetLog, OperatorRegistry, GamesRepo, Reconciler, AdminAudit, AdminUsers, OperatorAudit) — keeping their shared types/errors — and removed `better-sqlite3` from both package.json files + the lockfile.
 
-**Safety gate for pt3 (important):** the existing money-path unit tests inject the **SQLite** repos as doubles. Because `await` on a synchronous SQLite call still executes, those tests would *not* catch a missing `await` on the real async `PgBetLog` — a silent floating-promise money bug. So pt3 must first convert the money-path test harnesses (`bets.test.ts`, `handlers-operator.test.ts`, `admin-*`, `operator-*`, `recovery`, `reconciler`) to construct the **Pg** repos via `makeTestDb()`, so the async wiring is actually validated, before/with the prod swap. This is deliberately a focused, careful increment rather than a rushed tail-end change on money code.
+**Safety gate (how pt3 was made safe):** the SQLite-double unit tests could not catch a missing `await` on the async `PgBetLog` (await on a sync value still runs). So the cut-over relied on two things instead: (1) the TypeScript compiler flagging every un-awaited result-using call once consumers were retyped to the async repos, and (2) converting the money-path tests to real Postgres so the async path is exercised for real. RocksDB remains the only on-disk store (hot session cache — not money).
 
 ## 7. Definition of done (Wave A)
 
