@@ -41,9 +41,9 @@ import { voidOperatorBet } from '../game/bets.js';
 import type { OperatorAuthedRequest } from './middleware/verify-operator-signature.js';
 import { enforceTenantScope } from './middleware/tenant-scope.js';
 import { decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
-import type { BetLog, PgOperatorRegistry, BetState, Cursor } from '@crash/wallet';
+import type { PgBetLog, PgOperatorRegistry, BetState, Cursor } from '@crash/wallet';
 import type { WalletClientCache } from '../wallet/client-cache.js';
-import type { OperatorAudit } from './operator-audit.js';
+import type { PgOperatorAudit } from './operator-audit-pg.js';
 
 // Valid BetState values for ?state= filter validation — derived from the single
 // source of truth in state-machine.ts (mirrors admin.ts; prevents drift).
@@ -95,12 +95,12 @@ function toBetItem(bet: import('@crash/wallet').BetRow) {
  * will extend terminate in-place without touching the Phase-3.3 core logic.
  */
 export interface OperatorRouterDeps {
-  betLog: BetLog;
+  betLog: PgBetLog;
   registry: PgOperatorRegistry;
   walletClientCache: WalletClientCache;
   /** Owns the operator_audit table. Every mutation on this surface is recorded
    *  best-effort (record() never throws). Reads are NOT audited. (spec §2.6) */
-  operatorAudit: OperatorAudit;
+  operatorAudit: PgOperatorAudit;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // List rounds with at least one of the calling operator's bets. operatorId is
   // forced; a query-param operatorId is ignored. RoundSummary shape WITHOUT yourBets.
 
-  router.get('/rounds', (req: Request, res): void => {
+  router.get('/rounds', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
 
     const page = readPage(req, res);
@@ -320,7 +320,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
     }
 
     // operatorId forced — scopes the GROUP BY round_id to this operator's bets.
-    const { rows, nextCursor } = deps.betLog.listRoundsFiltered(
+    const { rows, nextCursor } = await deps.betLog.listRoundsFiltered(
       { operatorId, from, to, minMultiplier, maxMultiplier },
       page,
     );
@@ -351,11 +351,11 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // An empty FILTERED list → 404 ROUND_NOT_FOUND, which byte-identically covers
   // both "round doesn't exist" and "round is another operator's" (no leak).
 
-  router.get('/rounds/:roundId', (req: Request, res): void => {
+  router.get('/rounds/:roundId', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
     const { roundId } = req.params as { roundId: string };
 
-    const allBets = deps.betLog.listByRound(roundId);
+    const allBets = await deps.betLog.listByRound(roundId);
     const bets = allBets.filter((b) => b.operatorId === operatorId);
 
     if (bets.length === 0) {
@@ -396,7 +396,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // ─── GET /op/v1/bets (spec §5.1) ────────────────────────────────────────────
   // operatorId forced. Optional playerId/state/betId/txnId/from/to filters.
 
-  router.get('/bets', (req: Request, res): void => {
+  router.get('/bets', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
 
     const page = readPage(req, res);
@@ -420,7 +420,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.betLog.listBetsFiltered(
+    const { rows, nextCursor } = await deps.betLog.listBetsFiltered(
       {
         operatorId, // forced — never trust a query-param operatorId on this surface
         playerId: q['playerId'],
@@ -439,11 +439,11 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // ─── GET /op/v1/bets/:betId (spec §5.2) ─────────────────────────────────────
   // Single bet + derived timeline + walletCalls. Cross-tenant/not-found → 404.
 
-  router.get('/bets/:betId', (req: Request, res): void => {
+  router.get('/bets/:betId', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
     const { betId } = req.params as { betId: string };
 
-    const bet = deps.betLog.getById(betId);
+    const bet = await deps.betLog.getById(betId);
     if (!enforceTenantScope(bet?.operatorId ?? null, req, res, 'BET_NOT_FOUND', `No bet with id '${betId}'`)) {
       return;
     }
@@ -487,7 +487,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
     if (ownedBet.rollbackTxnId) txnIds.push({ kind: 'rollback', txnId: ownedBet.rollbackTxnId });
 
     for (const { kind, txnId } of txnIds) {
-      const entry = deps.betLog.getIdempotency(operatorId, txnId);
+      const entry = await deps.betLog.getIdempotency(operatorId, txnId);
       if (entry) {
         let resp: unknown = null;
         try { resp = JSON.parse(entry.responseJson); } catch { resp = entry.responseJson; }
@@ -509,14 +509,14 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // Sessions derived from bet_log (GROUP BY session_id). Zero rows → 404
   // PLAYER_NOT_FOUND (byte-identical for unknown player and cross-tenant player).
 
-  router.get('/players/:playerId/sessions', (req: Request, res): void => {
+  router.get('/players/:playerId/sessions', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
     const { playerId } = req.params as { playerId: string };
 
     const page = readPage(req, res);
     if (!page) return;
 
-    const { rows, nextCursor } = deps.betLog.listSessionsByPlayer(operatorId, playerId, page);
+    const { rows, nextCursor } = await deps.betLog.listSessionsByPlayer(operatorId, playerId, page);
 
     // A first-page empty result means this player has no sessions under this operator
     // (or doesn't exist / is another operator's) → 404, no existence leak.
@@ -531,7 +531,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // ─── GET /op/v1/players/:playerId/bets (spec §6.2) ──────────────────────────
   // Same as /bets but playerId is forced from the path (not query). operatorId forced.
 
-  router.get('/players/:playerId/bets', (req: Request, res): void => {
+  router.get('/players/:playerId/bets', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
     const { playerId } = req.params as { playerId: string };
 
@@ -556,7 +556,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.betLog.listBetsFiltered(
+    const { rows, nextCursor } = await deps.betLog.listBetsFiltered(
       {
         operatorId,       // forced
         playerId,         // forced from path param
@@ -596,7 +596,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // ONLY — 'operator' is forbidden here (operator id is the implicit scope and is
   // never returned as a field). ourShareMinor / shareBps are NEVER returned.
 
-  router.get('/financial/summary', (req: Request, res): void => {
+  router.get('/financial/summary', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
     const q = req.query as Record<string, string | undefined>;
 
@@ -655,7 +655,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
     const currency = q['currency'] || undefined;
 
     // operatorId forced — scopes the aggregate even though 'operator' is not a groupBy axis.
-    const reportRows = deps.betLog.financialReport({ operatorId, currency, from, to, groupBy });
+    const reportRows = await deps.betLog.financialReport({ operatorId, currency, from, to, groupBy });
 
     // Drop operatorId entirely (operator never sees its own id as a field) and
     // NEVER include ourShareMinor / shareBps (studio-internal — spec §8 forbids them here).
@@ -676,7 +676,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // Reconciliation feed: txn_idempotency joined with bet_log, scoped to this
   // operator. operatorId field is NOT returned (it's implicit).
 
-  router.get('/operator-tx', (req: Request, res): void => {
+  router.get('/operator-tx', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
 
     const page = readPage(req, res);
@@ -694,7 +694,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
     }
 
     // operatorId forced — scopes the feed to this operator's transactions.
-    const { rows, nextCursor } = deps.betLog.listIdempotencyFiltered({ operatorId, from, to }, page);
+    const { rows, nextCursor } = await deps.betLog.listIdempotencyFiltered({ operatorId, from, to }, page);
 
     const items = rows.map((r) => {
       // Derive status/errorCode from the stored response shape (mirrors admin §W).
@@ -735,7 +735,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // min/max; fan it out per enabled currency (honest representation — per-currency
   // limits are a Phase-future addition; mirrors /games).
 
-  router.get('/limits', (req: Request, res): void => {
+  router.get('/limits', async (req: Request, res): Promise<void> => {
     const op = (req as OperatorAuthedRequest).operator;
     res.status(200).json({
       limits: op.currencies.map((c) => ({
@@ -749,7 +749,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // ─── GET /op/v1/games/:gameId/config (spec §9.3) ────────────────────────────
   // Only 'galaxy-crash' is valid; anything else → 404 NOT_FOUND.
 
-  router.get('/games/:gameId/config', (req: Request, res): void => {
+  router.get('/games/:gameId/config', async (req: Request, res): Promise<void> => {
     const op = (req as OperatorAuthedRequest).operator;
     const { gameId } = req.params as { gameId: string };
 
@@ -793,7 +793,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
       const message = typeof body.message === 'string' ? body.message : 'Session closed by operator.';
 
       // Discover the player's session universe, scoped to this operator.
-      const sessionIds = deps.betLog.listDistinctSessionIdsByPlayer(operatorId, playerId);
+      const sessionIds = await deps.betLog.listDistinctSessionIdsByPlayer(operatorId, playerId);
 
       if (sessionIds.length === 0) {
         // Unknown player OR cross-tenant player — byte-identical 404, no audit.
@@ -830,7 +830,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // affordance for when a persistent player_locks table lands (Phase-future). The
   // operator's own system is responsible for re-enabling launches for this player.
 
-  router.post('/players/:playerId/unlock', (req: Request, res): void => {
+  router.post('/players/:playerId/unlock', async (req: Request, res): Promise<void> => {
     const operatorId = (req as OperatorAuthedRequest).operator.operatorId;
     const { playerId } = req.params as { playerId: string };
 

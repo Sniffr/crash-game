@@ -13,7 +13,8 @@
 // sweep. No Promise.all — serial processing prevents retry stampedes.
 // ---------------------------------------------------------------------------
 
-import { BetLog, type BetRow } from './bet-log.js';
+import { type BetRow } from './bet-log.js';
+import type { PgBetLog } from './bet-log-pg.js';
 import type { OperatorReader } from './operator-registry.js';
 import { WalletClient } from './client.js';
 import { WalletError } from './errors.js';
@@ -25,7 +26,7 @@ import { type Alerter, consoleAlerter } from './alerter.js';
 // ---------------------------------------------------------------------------
 
 export interface RecoveryDeps {
-  betLog: BetLog;
+  betLog: PgBetLog;
   registry: OperatorReader;
   /** Build (or look up cached) WalletClient for an Operator. Defaults to `new WalletClient(op)`. */
   clientFactory?: (op: Operator) => WalletClient;
@@ -98,7 +99,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
   // to the `pending` bucket.
   // ---------------------------------------------------------------------------
 
-  const pendingRows = betLog.listByState('PENDING', maxPerState);
+  const pendingRows = await betLog.listByState('PENDING', maxPerState);
   report.pending.found = pendingRows.length;
 
   // Set of betIds that we moved from PENDING → ROLLBACK_PENDING in this run.
@@ -108,7 +109,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
 
   for (const row of pendingRows) {
     try {
-      betLog.transition(row.betId, 'rollback_started', {
+      await betLog.transition(row.betId, 'rollback_started', {
         errorCode: 'recovery_pending_at_startup',
       });
       pendingOriginatedBetIds.add(row.betId);
@@ -124,7 +125,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
   // Re-list AFTER the PENDING sweep so newly-moved rows are included.
   // ---------------------------------------------------------------------------
 
-  const rollbackPendingRows = betLog.listByState('ROLLBACK_PENDING', maxPerState);
+  const rollbackPendingRows = await betLog.listByState('ROLLBACK_PENDING', maxPerState);
   report.rollbackPending.found = rollbackPendingRows.length;
 
   for (const row of rollbackPendingRows) {
@@ -152,7 +153,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
         reason: 'round_voided',
       });
 
-      betLog.transition(row.betId, 'rollback_completed', { rollbackTxnId });
+      await betLog.transition(row.betId, 'rollback_completed', { rollbackTxnId });
       bucket.resolved++;
     } catch (err) {
       if (err instanceof WalletError) {
@@ -177,7 +178,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
   // and winAmountMinor (written by Sub-fix A at cashout_requested time).
   // ---------------------------------------------------------------------------
 
-  const settlingRows = betLog.listByState('SETTLING', maxPerState);
+  const settlingRows = await betLog.listByState('SETTLING', maxPerState);
   report.settling.found = settlingRows.length;
 
   for (const row of settlingRows) {
@@ -217,7 +218,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
         settledAt: Math.floor(Date.now() / 1000),
       });
 
-      betLog.transition(row.betId, 'win_settled', {
+      await betLog.transition(row.betId, 'win_settled', {
         winTxnId: row.winTxnId,
         winOpTxnId: resp.operatorTxnId,
         winAmountMinor: row.winAmountMinor,
@@ -228,7 +229,7 @@ export async function runRecovery(deps: RecoveryDeps): Promise<RecoveryReport> {
       if (err instanceof WalletError) {
         let failedRow: BetRow;
         try {
-          failedRow = betLog.transition(row.betId, 'win_failed', {
+          failedRow = await betLog.transition(row.betId, 'win_failed', {
             winTxnId: row.winTxnId,
             errorCode: err.code,
           });

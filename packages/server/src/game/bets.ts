@@ -10,7 +10,7 @@ import {
 import { broadcast, sendToSession } from '../ws/hub';
 import {
   type WalletClient,
-  type BetLog,
+  type PgBetLog,
   type BetRow,
   WalletError,
   WalletNetworkError,
@@ -158,8 +158,8 @@ export async function tryCashoutBet(
       const winTxnId = randomUUID();
       const winAmountMinor = Math.round(bet.amountMinor * atMultiplier);
       try {
-        deps.betLog.transition(bet.betId, 'cashout_requested', { winTxnId, multiplier: atMultiplier, winAmountMinor });
-        deps.betLog.transition(bet.betId, 'win_failed', { winTxnId, errorCode: 'OPERATOR_PAUSED_AT_CASHOUT' });
+        await deps.betLog.transition(bet.betId, 'cashout_requested', { winTxnId, multiplier: atMultiplier, winAmountMinor });
+        await deps.betLog.transition(bet.betId, 'win_failed', { winTxnId, errorCode: 'OPERATOR_PAUSED_AT_CASHOUT' });
       } catch (transitionErr) {
         // Already terminal (e.g. already SETTLED/LOST/VOIDED) — log and continue
         console.error('[tryCashoutBet] OPERATOR_PAUSED betLog transition failed (likely already-terminal row):', transitionErr);
@@ -170,7 +170,7 @@ export async function tryCashoutBet(
       bet.winTxnId = winTxnId;
 
       // Emit win_failed alert — this IS a WIN_FAILED situation (operator paused)
-      const failedRow = deps.betLog.getById(bet.betId);
+      const failedRow = await deps.betLog.getById(bet.betId);
       if (failedRow) {
         (deps.alerter ?? consoleAlerter).emit({
           kind: 'win_failed',
@@ -312,7 +312,7 @@ export interface OperatorBetDeps {
   /** WalletClient from @crash/wallet, already constructed for the operator */
   walletClient: WalletClient;
   /** BetLog from @crash/wallet, shared instance */
-  betLog: BetLog;
+  betLog: PgBetLog;
   /**
    * Alerter emitted when a /win call fails after the client exhausted its retries,
    * or when the OPERATOR_PAUSED path drives a WIN_FAILED. Defaults to consoleAlerter.
@@ -347,13 +347,13 @@ export interface PlaceOperatorBetResult {
 /**
  * Place an operator-backed bet.
  *
- * 1. betLog.create({...}) → row state PENDING
+ * 1. await betLog.create({...}) → row state PENDING
  * 2. walletClient.bet({...}) — the client handles its own retry/backoff per spec §8
- * 3a. success → betLog.transition(betId,'bet_accepted',{betOpTxnId: resp.operatorTxnId}) → ARMED; return the ARMED BetRow + post-debit balanceMinor + currency
- * 3b. WalletError/WalletNetworkError → betLog.transition(betId,'bet_rejected',{errorCode: err.code}) → VOIDED; rethrow the WalletError
+ * 3a. success → await betLog.transition(betId,'bet_accepted',{betOpTxnId: resp.operatorTxnId}) → ARMED; return the ARMED BetRow + post-debit balanceMinor + currency
+ * 3b. WalletError/WalletNetworkError → await betLog.transition(betId,'bet_rejected',{errorCode: err.code}) → VOIDED; rethrow the WalletError
  *
  * No operator balance is ever mutated locally.
- * If betLog.create throws DuplicateBetIdError/DuplicateBetTxnIdError, it propagates (caller's bug).
+ * If await betLog.create throws DuplicateBetIdError/DuplicateBetTxnIdError, it propagates (caller's bug).
  */
 export async function placeOperatorBet(
   deps: OperatorBetDeps,
@@ -362,7 +362,7 @@ export async function placeOperatorBet(
   const { walletClient, betLog } = deps;
 
   // Step 1: create PENDING log entry
-  betLog.create({
+  await betLog.create({
     betId: input.betId,
     operatorId: input.operatorId,
     playerId: input.playerId,
@@ -392,7 +392,7 @@ export async function placeOperatorBet(
     );
 
     // Step 3a: success → ARMED; surface post-debit balance for the WS frame
-    const row = betLog.transition(input.betId, 'bet_accepted', {
+    const row = await betLog.transition(input.betId, 'bet_accepted', {
       betOpTxnId: resp.operatorTxnId,
     });
     return { row, balanceMinor: resp.balanceMinor, currency: resp.currency };
@@ -414,11 +414,11 @@ export async function placeOperatorBet(
 
     if (isConfirmedRejection) {
       // Signed 4xx: operator definitively says "no debit happened" → VOIDED
-      betLog.transition(input.betId, 'bet_rejected', { errorCode: walletErr.code });
+      await betLog.transition(input.betId, 'bet_rejected', { errorCode: walletErr.code });
     } else {
       // Ambiguous /bet failure — operator may have debited. Task 1.7 issues
       // /rollback (spec §5.5: unknown txnId => 200 noop).
-      betLog.transition(input.betId, 'rollback_started', { errorCode: walletErr.code });
+      await betLog.transition(input.betId, 'rollback_started', { errorCode: walletErr.code });
     }
 
     throw walletErr;
@@ -459,14 +459,14 @@ function emitWinFailed(alerter: Alerter | undefined, failedRow: BetRow, errorCod
  * Cash out an operator-backed bet.
  *
  * Pre: bet is ARMED or FLYING (the round started). Transition path:
- *   betLog.transition(betId,'cashout_requested') → SETTLING
+ *   await betLog.transition(betId,'cashout_requested') → SETTLING
  *   walletClient.win({...})  (client retries internally per §8)
  *   success → transition(betId,'win_settled',{...}) → SETTLED; return SETTLED BetRow + post-credit balanceMinor + currency
  *   WalletError after client exhausted retries → transition(betId,'win_failed',{...}) → WIN_FAILED;
  *      emit via deps.alerter (or consoleAlerter fallback); rethrow the WalletError.
  *      DO NOT credit the player locally. DO NOT loop forever.
  *
- * If the bet is not in a cashable state, betLog.transition throws InvalidTransitionError — propagates.
+ * If the bet is not in a cashable state, await betLog.transition throws InvalidTransitionError — propagates.
  */
 export async function cashOutOperatorBet(
   deps: OperatorBetDeps,
@@ -478,7 +478,7 @@ export async function cashOutOperatorBet(
   // the /win HTTP call. If the process dies after the operator credits but
   // before win_settled commits, Task 1.7 can read winTxnId from the SETTLING
   // row and safely retry /win without double-credit risk (spec §9).
-  const settlingRow = betLog.transition(input.betId, 'cashout_requested', { winTxnId: input.winTxnId, multiplier: input.multiplier, winAmountMinor: input.winAmountMinor });
+  const settlingRow = await betLog.transition(input.betId, 'cashout_requested', { winTxnId: input.winTxnId, multiplier: input.multiplier, winAmountMinor: input.winAmountMinor });
 
   // Call the operator /win endpoint (wrapped for metrics — transparent: rethrows unchanged)
   try {
@@ -499,7 +499,7 @@ export async function cashOutOperatorBet(
     );
 
     // Success → SETTLED; surface post-credit balance for the WS frame
-    const row = betLog.transition(input.betId, 'win_settled', {
+    const row = await betLog.transition(input.betId, 'win_settled', {
       winTxnId: input.winTxnId,
       winOpTxnId: resp.operatorTxnId,
       winAmountMinor: input.winAmountMinor,
@@ -509,7 +509,7 @@ export async function cashOutOperatorBet(
   } catch (err) {
     // Client exhausted its retries — transition to WIN_FAILED
     if (err instanceof WalletError) {
-      const failedRow = betLog.transition(input.betId, 'win_failed', {
+      const failedRow = await betLog.transition(input.betId, 'win_failed', {
         winTxnId: input.winTxnId,
         errorCode: err.code,
       });
@@ -523,7 +523,7 @@ export async function cashOutOperatorBet(
     const wrapped = new WalletNetworkError(
       err instanceof Error ? err.message : String(err),
     );
-    const failedRow = betLog.transition(input.betId, 'win_failed', {
+    const failedRow = await betLog.transition(input.betId, 'win_failed', {
       winTxnId: input.winTxnId,
       errorCode: wrapped.code,
     });
@@ -565,7 +565,7 @@ export async function voidOperatorBet(
     throw new Error('[voidOperatorBet] OperatorWiringDeps not initialized — bootstrap defect');
   }
 
-  const row = deps.betLog.getById(betId);
+  const row = await deps.betLog.getById(betId);
   if (!row) return 'skipped';
 
   // Already terminal — nothing to do
@@ -576,7 +576,7 @@ export async function voidOperatorBet(
   const client = deps.walletClientCache.get(row.operatorId);
   if (!client) {
     try {
-      deps.betLog.transition(betId, 'rollback_started', { errorCode: reason });
+      await deps.betLog.transition(betId, 'rollback_started', { errorCode: reason });
     } catch (err) {
       // InvalidTransitionError: row already moved (race); skip silently
       if (!(err instanceof InvalidTransitionError)) {
@@ -593,7 +593,7 @@ export async function voidOperatorBet(
 
   // Transition to ROLLBACK_PENDING, persisting reason as errorCode
   try {
-    deps.betLog.transition(betId, 'rollback_started', { errorCode: reason });
+    await deps.betLog.transition(betId, 'rollback_started', { errorCode: reason });
   } catch (err) {
     if (err instanceof InvalidTransitionError) {
       // Row already moved — skip silently (idempotent)
@@ -605,7 +605,7 @@ export async function voidOperatorBet(
   // Deterministic rollback txnId — mirrors recovery.ts line 134:
   //   const rollbackTxnId = row.rollbackTxnId ?? `rb-${row.betTxnId}`;
   // This ensures a later recovery pass dedupes via spec §9 instead of double-refunding.
-  const freshRow = deps.betLog.getById(betId);
+  const freshRow = await deps.betLog.getById(betId);
   const rollbackTxnId = freshRow?.rollbackTxnId ?? `rb-${row.betTxnId}`;
 
   try {
@@ -619,7 +619,7 @@ export async function voidOperatorBet(
       }),
     );
 
-    deps.betLog.transition(betId, 'rollback_completed', { rollbackTxnId });
+    await deps.betLog.transition(betId, 'rollback_completed', { rollbackTxnId });
     return 'voided';
   } catch (err) {
     // Leave in ROLLBACK_PENDING for the Phase 1.7 recovery worker to re-drive.
@@ -641,22 +641,22 @@ export async function voidOperatorBet(
 
 /**
  * For a crash: every still-ARMED/FLYING operator bet for the round loses.
- * betLog.transition(betId,'round_crashed') → LOST.
+ * await betLog.transition(betId,'round_crashed') → LOST.
  * NO operator call — operator already debited at /bet.
  *
  * Returns the count of bets transitioned. Never throws for an already-terminal
  * bet — skips those silently.
  *
  * NOTE: walletClient is intentionally not required here — no HTTP call is
- * needed on crash. The function only needs betLog.
+ * needed on crash. The function only needs await betLog.
  */
 export async function expireOperatorBetsOnCrash(
-  deps: { betLog: BetLog },
+  deps: { betLog: PgBetLog },
   roundId: string,
   gameId?: string,
 ): Promise<number> {
   const { betLog } = deps;
-  const rows = betLog.listByRound(roundId);
+  const rows = await betLog.listByRound(roundId);
   let count = 0;
 
   for (const row of rows) {
@@ -668,7 +668,7 @@ export async function expireOperatorBetsOnCrash(
       continue;
     }
     try {
-      betLog.transition(row.betId, 'round_crashed');
+      await betLog.transition(row.betId, 'round_crashed');
       count++;
     } catch (e) {
       if (!(e instanceof InvalidTransitionError)) throw e;

@@ -12,7 +12,7 @@
  * rather than throwing). Call it only from the server bootstrap path.
  */
 
-import type { Reconciler, OperatorReader } from '@crash/wallet';
+import type { PgReconciler, OperatorReader } from '@crash/wallet';
 
 const DAY_SECONDS = 24 * 60 * 60;
 const DAY_MS = DAY_SECONDS * 1000;
@@ -34,7 +34,7 @@ export function msUntilNextRun(now: Date, hourUtc: number, minuteUtc: number): n
  * pending timer (used by tests / graceful shutdown).
  */
 export function scheduleDailyReconciliation(
-  reconciler: Reconciler,
+  reconciler: PgReconciler,
   registry: OperatorReader,
   opts: { hourUtc: number; minuteUtc: number },
 ): { stop: () => void } {

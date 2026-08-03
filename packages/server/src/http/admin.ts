@@ -10,12 +10,13 @@
  */
 
 import { Router } from 'express';
-import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, Reconciler, ReconStatus } from '@crash/wallet';
+import type { WalletClient, PgBetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, PgReconciler, ReconStatus } from '@crash/wallet';
 import { WalletError, PgOperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, PgGamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
-import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
-import { AdminUsers, DuplicateAdminError, AdminNotFoundError, isAdminRole } from '../admin/admin-store.js';
+import type { AdminRole } from '../admin/admin-store.js';
+import type { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
+import { DuplicateAdminError, AdminNotFoundError, isAdminRole } from '../admin/admin-store.js';
 import {
   requireAdminJwt,
   requireRole,
@@ -33,13 +34,13 @@ const BET_STATES = new Set<string>(ALL_BET_STATES);
 
 export interface AdminRouterDeps {
   walletClientCache: WalletClientCache;
-  betLog: BetLog;
-  adminAudit: AdminAudit;
-  adminUsers: AdminUsers;
+  betLog: PgBetLog;
+  adminAudit: PgAdminAudit;
+  adminUsers: PgAdminUsers;
   registry: PgOperatorRegistry;
   games: PgGamesRepo;
   revoked: Set<string>;
-  reconciler: Reconciler;
+  reconciler: PgReconciler;
   nowSeconds?: () => number;
 }
 
@@ -123,7 +124,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const found = deps.adminUsers.getByUsername(username);
+    const found = await deps.adminUsers.getByUsername(username);
 
     // Identical response for unknown-user vs bad-password — no enumeration.
     if (!found || !(await bcrypt.compare(password, found.passwordHash))) {
@@ -138,7 +139,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }
 
     // Success
-    deps.adminUsers.recordLogin(username);
+    await deps.adminUsers.recordLogin(username);
     const { token, jti, expiresAt } = await signAdminJwt(
       { sub: username, roles: found.user.roles },
       { ttlSeconds: 28800, nowSeconds: deps.nowSeconds },
@@ -184,8 +185,8 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // D. GET /me
   // =========================================================================
 
-  router.get('/me', (req, res): void => {
-    const found = deps.adminUsers.getByUsername(req.admin!.username);
+  router.get('/me', async (req, res): Promise<void> => {
+    const found = await deps.adminUsers.getByUsername(req.admin!.username);
     res.status(200).json({
       username: req.admin!.username,
       roles: req.admin!.roles,
@@ -197,8 +198,8 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // E. GET /admins — list
   // =========================================================================
 
-  router.get('/admins', requireRole('admin'), (req, res): void => {
-    const items = deps.adminUsers.list({ limit: 100 });
+  router.get('/admins', requireRole('admin'), async (req, res): Promise<void> => {
+    const items = await deps.adminUsers.list({ limit: 100 });
     res.status(200).json({ items, nextCursor: null, count: items.length });
   });
 
@@ -236,7 +237,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
 
     try {
       const hash = await bcrypt.hash(password, 10);
-      const user = deps.adminUsers.create(username, hash, roles);
+      const user = await deps.adminUsers.create(username, hash, roles);
 
       deps.adminAudit.record({
         actor: req.admin!.username,
@@ -287,7 +288,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }
 
     try {
-      const user = deps.adminUsers.update(username, patch);
+      const user = await deps.adminUsers.update(username, patch);
 
       deps.adminAudit.record({
         actor: req.admin!.username,
@@ -310,7 +311,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // H. DELETE /admins/:username
   // =========================================================================
 
-  router.delete('/admins/:username', requireRole('admin'), (req, res): void => {
+  router.delete('/admins/:username', requireRole('admin'), async (req, res): Promise<void> => {
     const { username } = req.params as { username: string };
 
     if (username === req.admin!.username) {
@@ -319,7 +320,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }
 
     try {
-      deps.adminUsers.delete(username);
+      await deps.adminUsers.delete(username);
 
       deps.adminAudit.record({
         actor: req.admin!.username,
@@ -341,7 +342,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // I. GET /operators — list
   // =========================================================================
 
-  router.get('/operators', (req, res): void => {
+  router.get('/operators', async (req, res): Promise<void> => {
     const statusFilter = req.query['status'] as OperatorStatus | undefined;
     const q = req.query['q'] as string | undefined;
 
@@ -415,7 +416,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // K. GET /operators/:id — detail
   // =========================================================================
 
-  router.get('/operators/:id', (req, res): void => {
+  router.get('/operators/:id', async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
     const op = deps.registry.getById(id);
 
@@ -593,7 +594,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // P. GET /operators/:id/credentials — one-shot
   // =========================================================================
 
-  router.get('/operators/:id/credentials', requireRole('admin'), (req, res): void => {
+  router.get('/operators/:id/credentials', requireRole('admin'), async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
 
     // Check operator exists
@@ -787,7 +788,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       }
 
       // Step 2: Fetch the bet row.
-      const row = deps.betLog.getById(betId);
+      const row = await deps.betLog.getById(betId);
       if (!row) {
         deps.adminAudit.record({
           actor,
@@ -905,7 +906,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
 
       // Step 7 (success): transition WIN_FAILED → SETTLED.
       try {
-        deps.betLog.transition(betId, 'win_force_credited', {
+        await deps.betLog.transition(betId, 'win_force_credited', {
           winOpTxnId: winResp.operatorTxnId,
         });
       } catch (transitionErr) {
@@ -993,7 +994,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // S. GET /rounds — derived from bet_log GROUP BY round_id
   // =========================================================================
 
-  router.get('/rounds', (req, res): void => {
+  router.get('/rounds', async (req, res): Promise<void> => {
     const page = readPage(req, res);
     if (!page) return;
 
@@ -1015,7 +1016,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.betLog.listRoundsFiltered(
+    const { rows, nextCursor } = await deps.betLog.listRoundsFiltered(
       { operatorId: q['operatorId'], from, to, minMultiplier, maxMultiplier },
       page,
     );
@@ -1051,10 +1052,10 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // T. GET /rounds/:roundId — full detail
   // =========================================================================
 
-  router.get('/rounds/:roundId', (req, res): void => {
+  router.get('/rounds/:roundId', async (req, res): Promise<void> => {
     const { roundId } = req.params as { roundId: string };
 
-    const bets = deps.betLog.listByRound(roundId);
+    const bets = await deps.betLog.listByRound(roundId);
     if (bets.length === 0) {
       res.status(404).json({ error: { code: 'ROUND_NOT_FOUND', message: `No bets found for round '${roundId}'` } });
       return;
@@ -1101,7 +1102,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // U. GET /bets — filtered + paginated
   // =========================================================================
 
-  router.get('/bets', (req, res): void => {
+  router.get('/bets', async (req, res): Promise<void> => {
     const page = readPage(req, res);
     if (!page) return;
 
@@ -1124,7 +1125,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.betLog.listBetsFiltered(
+    const { rows, nextCursor } = await deps.betLog.listBetsFiltered(
       {
         operatorId: q['operatorId'],
         playerId: q['playerId'],
@@ -1148,10 +1149,10 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // V. GET /bets/:betId — single bet + derived timeline + walletCalls
   // =========================================================================
 
-  router.get('/bets/:betId', (req, res): void => {
+  router.get('/bets/:betId', async (req, res): Promise<void> => {
     const { betId } = req.params as { betId: string };
 
-    const bet = deps.betLog.getById(betId);
+    const bet = await deps.betLog.getById(betId);
     if (!bet) {
       res.status(404).json({ error: { code: 'BET_NOT_FOUND', message: `No bet with id '${betId}'` } });
       return;
@@ -1201,7 +1202,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     if (bet.rollbackTxnId) txnIds.push({ kind: 'rollback', txnId: bet.rollbackTxnId, operatorId: bet.operatorId });
 
     for (const { kind, txnId, operatorId } of txnIds) {
-      const entry = deps.betLog.getIdempotency(operatorId, txnId);
+      const entry = await deps.betLog.getIdempotency(operatorId, txnId);
       if (entry) {
         let req: unknown = null;
         let resp: unknown = null;
@@ -1227,7 +1228,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // W. GET /transactions — finance|admin only
   // =========================================================================
 
-  router.get('/transactions', requireRole('finance', 'admin'), (req, res): void => {
+  router.get('/transactions', requireRole('finance', 'admin'), async (req, res): Promise<void> => {
     const page = readPage(req, res);
     if (!page) return;
 
@@ -1249,7 +1250,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.betLog.listIdempotencyFiltered(
+    const { rows, nextCursor } = await deps.betLog.listIdempotencyFiltered(
       {
         operatorId: q['operatorId'],
         playerId: q['playerId'],
@@ -1300,7 +1301,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // X. GET /audit — admin only
   // =========================================================================
 
-  router.get('/audit', requireRole('admin'), (req, res): void => {
+  router.get('/audit', requireRole('admin'), async (req, res): Promise<void> => {
     const page = readPage(req, res);
     if (!page) return;
 
@@ -1316,7 +1317,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.adminAudit.listFiltered(
+    const { rows, nextCursor } = await deps.adminAudit.listFiltered(
       { actor: q['actor'], action: q['action'], target: q['target'], from, to },
       page,
     );
@@ -1352,7 +1353,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   //    VOIDED bets are excluded (stake was refunded in full).
   // =========================================================================
 
-  router.get('/financial/ggr', requireRole('finance', 'admin'), (req, res): void => {
+  router.get('/financial/ggr', requireRole('finance', 'admin'), async (req, res): Promise<void> => {
     const q = req.query as Record<string, string | undefined>;
 
     // --- Parse `from` (required, integer unix seconds)
@@ -1407,7 +1408,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     const currency = q['currency'] || undefined;
 
     try {
-      const rows = deps.betLog.financialReport({ operatorId, currency, from, to, groupBy });
+      const rows = await deps.betLog.financialReport({ operatorId, currency, from, to, groupBy });
       res.status(200).json({ from, to, groupBy: [...groupBy], rows });
     } catch (err) {
       if (err instanceof Error && err.message.includes('groupBy')) {
@@ -1429,7 +1430,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   //    registry. Currencies are NEVER mixed — totals are per-currency only.
   // =========================================================================
 
-  router.get('/financial/settlement', requireRole('finance', 'admin'), (req, res): void => {
+  router.get('/financial/settlement', requireRole('finance', 'admin'), async (req, res): Promise<void> => {
     const q = req.query as Record<string, string | undefined>;
 
     // --- Parse period (required, format YYYY-MM)
@@ -1450,7 +1451,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     const from = Math.floor(Date.UTC(year, month - 1, 1) / 1000);
     const to = Math.floor(Date.UTC(year, month, 1) / 1000); // first second of NEXT month (exclusive)
 
-    const rawRows = deps.betLog.financialReport({ from, to, groupBy: ['operator', 'currency'] });
+    const rawRows = await deps.betLog.financialReport({ from, to, groupBy: ['operator', 'currency'] });
 
     // Group rows by operatorId, then build nested currencies array per spec §8.2
     const byOperator = new Map<string, Array<{
@@ -1515,7 +1516,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   //     map preserves per-currency isolation per spec §2.3.
   // =========================================================================
 
-  router.post('/financial/settlement/:period/invoice', requireRole('finance', 'admin'), (req, res): void => {
+  router.post('/financial/settlement/:period/invoice', requireRole('finance', 'admin'), async (req, res): Promise<void> => {
     const { period } = req.params as { period: string };
 
     // --- Validate period format
@@ -1544,7 +1545,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     const to = Math.floor(Date.UTC(year, month, 1) / 1000);
 
     // --- Run financial report for this operator+period
-    const rawRows = deps.betLog.financialReport({ operatorId, from, to, groupBy: ['operator', 'currency'] });
+    const rawRows = await deps.betLog.financialReport({ operatorId, from, to, groupBy: ['operator', 'currency'] });
 
     if (rawRows.length === 0) {
       res.status(404).json({
@@ -1629,7 +1630,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   //     Half-open window [from, to) on started_at. NOT audited (read-only).
   // =========================================================================
 
-  router.get('/reconciliation/runs', (req, res): void => {
+  router.get('/reconciliation/runs', async (req, res): Promise<void> => {
     const page = readPage(req, res);
     if (!page) return;
 
@@ -1652,7 +1653,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const { rows, nextCursor } = deps.reconciler.listRuns(
+    const { rows, nextCursor } = await deps.reconciler.listRuns(
       {
         operatorId: q['operatorId'],
         from,
@@ -1682,7 +1683,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   //     Spec §9.2. 404 RECONCILIATION_RUN_NOT_FOUND if absent.
   // =========================================================================
 
-  router.get('/reconciliation/runs/:id', (req, res): void => {
+  router.get('/reconciliation/runs/:id', async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
     const runId = Number(id);
     if (!Number.isInteger(runId)) {
@@ -1690,7 +1691,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
 
-    const found = deps.reconciler.getRun(runId);
+    const found = await deps.reconciler.getRun(runId);
     if (!found) {
       res.status(404).json({ error: { code: 'RECONCILIATION_RUN_NOT_FOUND', message: `No reconciliation run with id '${runId}'` } });
       return;

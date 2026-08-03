@@ -9,8 +9,7 @@ import { WebSocketServer } from 'ws';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
-import { BetLog, PgOperatorRegistry, PgGamesRepo, Reconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry, PgGamesRepo, PgReconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
 import { PlayersRepo } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { createLobbyRouter } from './http/lobby';
@@ -23,9 +22,10 @@ import { initThemeLoader, getActiveTheme } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
-import { OperatorAudit } from './http/operator-audit';
+import { PgOperatorAudit } from './http/operator-audit-pg';
 import { createAdminRouter } from './http/admin';
-import { AdminAudit, AdminUsers, isAdminRole } from './admin/admin-store';
+import { PgAdminAudit, PgAdminUsers } from './admin/admin-store-pg';
+import { isAdminRole } from './admin/admin-store';
 import * as bcrypt from 'bcryptjs';
 import type { AdminRole } from './admin/admin-store';
 import { WalletClientCache } from './wallet/client-cache';
@@ -41,18 +41,15 @@ import { getRecentHistory } from './game/history';
 // ---------------------------------------------------------------------------
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dbPath = process.env['DB_PATH'] ?? path.join(__dirname, '../../../data/galaxy-crash.db');
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-const db = new Database(dbPath);
-const betLog = new BetLog(db);
-const adminAudit = new AdminAudit(db);
-const operatorAudit = new OperatorAudit(db);
-const adminUsers = new AdminUsers(db);
-const revoked = new Set<string>();
 
-// Postgres (casino DB): games catalogue + personal-lobby players/wallet (Wave A)
-// + operators (Wave B). Operators load into an in-memory cache at boot below.
+// Everything durable lives in the casino Postgres DB (Wave A + Wave B). The only
+// remaining on-disk store is RocksDB for hot session cache (see store.ts).
 const pool = getPool();
+const betLog = new PgBetLog(pool);
+const adminAudit = new PgAdminAudit(pool);
+const operatorAudit = new PgOperatorAudit(pool);
+const adminUsers = new PgAdminUsers(pool);
+const revoked = new Set<string>();
 const registry = new PgOperatorRegistry(pool);
 const walletClientCache = new WalletClientCache(registry, betLog);
 const games = new PgGamesRepo(pool);
@@ -76,7 +73,7 @@ const defaultLedgerSource: OperatorLedgerSource = async () => [];
 console.log(
   '[reconciliation] no operator ledger source configured — runs will report our txns as missing_on_operator (Phase-future: wire to each operator\'s reconciliation feed).',
 );
-const reconciler = new Reconciler(db, { source: defaultLedgerSource, betLog });
+const reconciler = new PgReconciler(pool, { source: defaultLedgerSource, betLog });
 
 const app = express();
 // Capture raw body bytes for HMAC signing (verifyOperatorSignature §4.2).
@@ -232,7 +229,7 @@ if (process.env['NODE_ENV'] !== 'test') {
 // Idempotent: skipped if admin table already has any users, or env is unset.
 try {
   const bootstrapEnv = process.env['ADMIN_BOOTSTRAP_USER'];
-  if (bootstrapEnv && adminUsers.count() === 0) {
+  if (bootstrapEnv && (await adminUsers.count()) === 0) {
     const colonIdx1 = bootstrapEnv.indexOf(':');
     const colonIdx2 = bootstrapEnv.indexOf(':', colonIdx1 + 1);
     if (colonIdx1 < 0 || colonIdx2 < 0) {
@@ -250,7 +247,7 @@ try {
     } else {
       const roles = parsedRoles as AdminRole[];
       const hash = await bcrypt.hash(p, 10);
-      adminUsers.create(u, hash, roles);
+      await adminUsers.create(u, hash, roles);
       console.log(`[admin] bootstrapped initial admin '${u}'`);
     }
   }

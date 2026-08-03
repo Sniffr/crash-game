@@ -13,7 +13,8 @@ import {
   ResponseSignatureError,
   walletErrorFromResponse,
 } from './errors.js';
-import { type BetLog, type IdempotencyEntry, type TxnKind, IdempotencyMismatchError } from './bet-log.js';
+import { type IdempotencyEntry, type TxnKind, IdempotencyMismatchError } from './bet-log.js';
+import type { PgBetLog } from './bet-log-pg.js';
 import type { WalletAdapter, AdapterEndpoint } from './adapter.js';
 import type {
   AuthenticateRequest,
@@ -131,7 +132,7 @@ export interface WalletClientOptions {
   /** When supplied, bet/win/rollback become crash-safe idempotent: a prior
    *  recorded outcome for the same txnId short-circuits the HTTP call and
    *  replays the recorded result. Pairs with the Task 1.7 recovery worker. */
-  betLog?: BetLog;
+  betLog?: PgBetLog;
   /** When supplied, the client delegates the wire request/response translation
    *  to this adapter (foreign protocol) instead of the built-in native path.
    *  Injected by the server composition layer per operator.adapter (Task 7.1).
@@ -150,7 +151,7 @@ export class WalletClient {
   private readonly nowSeconds: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly maxRollbackAttempts: number;
-  private readonly betLog: BetLog | undefined;
+  private readonly betLog: PgBetLog | undefined;
   private readonly adapter: WalletAdapter | undefined;
 
   constructor(operator: Operator, opts?: WalletClientOptions) {
@@ -232,7 +233,7 @@ export class WalletClient {
 
     const requestHash = idempotencyFingerprint(requestPayload);
 
-    const existing = this.betLog.getIdempotency(this.operator.operatorId, txnId);
+    const existing = await this.betLog.getIdempotency(this.operator.operatorId, txnId);
 
     if (existing) {
       if (existing.requestHash === requestHash) {
@@ -274,7 +275,7 @@ export class WalletClient {
           },
         });
         try {
-          this.betLog.putIdempotency({
+          await this.betLog.putIdempotency({
             txnId,
             operatorId: this.operator.operatorId,
             kind,
@@ -293,7 +294,7 @@ export class WalletClient {
 
     // Success: persist then return (best-effort; operator dedupes on replay per spec §9)
     try {
-      this.betLog.putIdempotency({
+      await this.betLog.putIdempotency({
         txnId,
         operatorId: this.operator.operatorId,
         kind,

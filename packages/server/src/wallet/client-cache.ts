@@ -1,5 +1,5 @@
 import { WalletClient } from '@crash/wallet';
-import type { BetLog, OperatorReader } from '@crash/wallet';
+import type { PgBetLog, OperatorReader } from '@crash/wallet';
 import { getAdapter } from '@crash/adapters';
 
 /** Lazy per-operatorId cache of WalletClient instances. Each client is constructed
@@ -12,7 +12,7 @@ export class WalletClientCache {
 
   constructor(
     private readonly registry: OperatorReader,
-    private readonly betLog: BetLog,
+    private readonly betLog: PgBetLog,
   ) {}
 
   /** Returns a WalletClient for the operator, or null if the operator is unknown or paused. */
