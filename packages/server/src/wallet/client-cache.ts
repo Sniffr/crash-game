@@ -1,5 +1,5 @@
 import { WalletClient } from '@crash/wallet';
-import type { Operator, BetLog, OperatorRegistry } from '@crash/wallet';
+import type { BetLog, OperatorReader } from '@crash/wallet';
 import { getAdapter } from '@crash/adapters';
 
 /** Lazy per-operatorId cache of WalletClient instances. Each client is constructed
@@ -11,7 +11,7 @@ export class WalletClientCache {
   private readonly clients = new Map<string, WalletClient>();
 
   constructor(
-    private readonly registry: OperatorRegistry,
+    private readonly registry: OperatorReader,
     private readonly betLog: BetLog,
   ) {}
 

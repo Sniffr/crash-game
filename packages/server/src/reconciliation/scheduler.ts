@@ -12,7 +12,7 @@
  * rather than throwing). Call it only from the server bootstrap path.
  */
 
-import type { Reconciler, OperatorRegistry } from '@crash/wallet';
+import type { Reconciler, OperatorReader } from '@crash/wallet';
 
 const DAY_SECONDS = 24 * 60 * 60;
 const DAY_MS = DAY_SECONDS * 1000;
@@ -35,7 +35,7 @@ export function msUntilNextRun(now: Date, hourUtc: number, minuteUtc: number): n
  */
 export function scheduleDailyReconciliation(
   reconciler: Reconciler,
-  registry: OperatorRegistry,
+  registry: OperatorReader,
   opts: { hourUtc: number; minuteUtc: number },
 ): { stop: () => void } {
   let timer: ReturnType<typeof setTimeout> | null = null;

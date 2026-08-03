@@ -8,7 +8,7 @@
 
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import { verify, NonceCache } from '@crash/wallet';
-import type { OperatorRegistry, Operator } from '@crash/wallet';
+import type { OperatorReader, Operator } from '@crash/wallet';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,7 +79,7 @@ function sendError(
  * Phase 6 mounts it on /op/*. (TODO seam.)
  */
 export function verifyOperatorSignature(
-  registry: OperatorRegistry,
+  registry: OperatorReader,
   opts?: VerifyOperatorSignatureOptions,
 ): RequestHandler {
   const maxSkewSeconds = opts?.maxSkewSeconds ?? 300;

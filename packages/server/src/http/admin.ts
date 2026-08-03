@@ -11,7 +11,7 @@
 
 import { Router } from 'express';
 import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, Reconciler, ReconStatus } from '@crash/wallet';
-import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, PgGamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
+import { WalletError, PgOperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, PgGamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
@@ -36,7 +36,7 @@ export interface AdminRouterDeps {
   betLog: BetLog;
   adminAudit: AdminAudit;
   adminUsers: AdminUsers;
-  registry: OperatorRegistry;
+  registry: PgOperatorRegistry;
   games: PgGamesRepo;
   revoked: Set<string>;
   reconciler: Reconciler;
@@ -364,7 +364,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     const body = req.body as Record<string, unknown> | undefined ?? {};
 
     try {
-      const { operator, credentials } = deps.registry.create({
+      const { operator, credentials } = await deps.registry.create({
         operatorId: body['operatorId'] as string,
         name: body['name'] as string,
         walletBaseUrl: body['walletBaseUrl'] as string,
@@ -440,7 +440,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // L. PATCH /operators/:id — update fields
   // =========================================================================
 
-  router.patch('/operators/:id', requireRole('admin'), (req, res): void => {
+  router.patch('/operators/:id', requireRole('admin'), async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as Record<string, unknown>;
 
@@ -465,7 +465,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }
 
     try {
-      const op = deps.registry.update(id, {
+      const op = await deps.registry.update(id, {
         name: body['name'] as string | undefined,
         walletBaseUrl: body['walletBaseUrl'] as string | undefined,
         adapter: body['adapter'] as 'native' | 'softswiss' | undefined,
@@ -502,11 +502,11 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // M. POST /operators/:id/regen-signing-key
   // =========================================================================
 
-  router.post('/operators/:id/regen-signing-key', requireRole('admin'), (req, res): void => {
+  router.post('/operators/:id/regen-signing-key', requireRole('admin'), async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
 
     try {
-      const creds = deps.registry.regenSigningKey(id);
+      const creds = await deps.registry.regenSigningKey(id);
 
       // Stash for one-shot retrieval
       oneShot.set(id, { apiKey: creds.apiKey, signingKey: creds.signingKeyBase64 });
@@ -537,12 +537,12 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // N. POST /operators/:id/pause
   // =========================================================================
 
-  router.post('/operators/:id/pause', requireRole('admin'), (req, res): void => {
+  router.post('/operators/:id/pause', requireRole('admin'), async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { reason?: unknown };
 
     try {
-      deps.registry.update(id, { status: 'paused' });
+      await deps.registry.update(id, { status: 'paused' });
       deps.walletClientCache.invalidate(id);
 
       deps.adminAudit.record({
@@ -566,11 +566,11 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // O. POST /operators/:id/resume
   // =========================================================================
 
-  router.post('/operators/:id/resume', requireRole('admin'), (req, res): void => {
+  router.post('/operators/:id/resume', requireRole('admin'), async (req, res): Promise<void> => {
     const { id } = req.params as { id: string };
 
     try {
-      deps.registry.update(id, { status: 'active' });
+      await deps.registry.update(id, { status: 'active' });
       deps.walletClientCache.invalidate(id);
 
       deps.adminAudit.record({

@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { BetLog, type BetRow } from './bet-log.js';
-import { OperatorRegistry } from './operator-registry.js';
+import type { OperatorReader } from './operator-registry.js';
 import { WalletClient } from './client.js';
 import { WalletError } from './errors.js';
 import type { Operator } from './types.js';
@@ -26,7 +26,7 @@ import { type Alerter, consoleAlerter } from './alerter.js';
 
 export interface RecoveryDeps {
   betLog: BetLog;
-  registry: OperatorRegistry;
+  registry: OperatorReader;
   /** Build (or look up cached) WalletClient for an Operator. Defaults to `new WalletClient(op)`. */
   clientFactory?: (op: Operator) => WalletClient;
   /** Alerter fired when a SETTLING row exhausts /win retries. Defaults to consoleAlerter. */

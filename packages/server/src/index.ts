@@ -10,7 +10,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, PgGamesRepo, Reconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
+import { BetLog, PgOperatorRegistry, PgGamesRepo, Reconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
 import { PlayersRepo } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { createLobbyRouter } from './http/lobby';
@@ -45,15 +45,16 @@ const dbPath = process.env['DB_PATH'] ?? path.join(__dirname, '../../../data/gal
 fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 const betLog = new BetLog(db);
-const registry = new OperatorRegistry(db);
 const adminAudit = new AdminAudit(db);
 const operatorAudit = new OperatorAudit(db);
 const adminUsers = new AdminUsers(db);
 const revoked = new Set<string>();
-const walletClientCache = new WalletClientCache(registry, betLog);
 
-// Postgres (casino DB): games catalogue + personal-lobby players/wallet (Wave A).
+// Postgres (casino DB): games catalogue + personal-lobby players/wallet (Wave A)
+// + operators (Wave B). Operators load into an in-memory cache at boot below.
 const pool = getPool();
+const registry = new PgOperatorRegistry(pool);
+const walletClientCache = new WalletClientCache(registry, betLog);
 const games = new PgGamesRepo(pool);
 const players = new PlayersRepo(pool);
 const wallet = new WalletLedger(pool);
@@ -92,6 +93,8 @@ initThemeLoader();
 // seed can copy the active theme.
 try {
   await bootstrapCasinoSchema(pool);
+  await registry.refresh(); // prime the operator cache (sync reads on hot paths)
+  console.log(`[operators] loaded ${registry.list().length} operators from Postgres`);
   if (!(await games.getById('galaxy-crash'))) {
     const seededTheme = getActiveTheme() ?? {};
     const gt = (seededTheme as { gameType?: string }).gameType === 'gif' ? 'gif' : 'sprite';

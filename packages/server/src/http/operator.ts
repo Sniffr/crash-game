@@ -41,7 +41,7 @@ import { voidOperatorBet } from '../game/bets.js';
 import type { OperatorAuthedRequest } from './middleware/verify-operator-signature.js';
 import { enforceTenantScope } from './middleware/tenant-scope.js';
 import { decodeCursor, parseLimit, ALL_BET_STATES } from '@crash/wallet';
-import type { BetLog, OperatorRegistry, BetState, Cursor } from '@crash/wallet';
+import type { BetLog, PgOperatorRegistry, BetState, Cursor } from '@crash/wallet';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { OperatorAudit } from './operator-audit.js';
 
@@ -96,7 +96,7 @@ function toBetItem(bet: import('@crash/wallet').BetRow) {
  */
 export interface OperatorRouterDeps {
   betLog: BetLog;
-  registry: OperatorRegistry;
+  registry: PgOperatorRegistry;
   walletClientCache: WalletClientCache;
   /** Owns the operator_audit table. Every mutation on this surface is recorded
    *  best-effort (record() never throws). Reads are NOT audited. (spec §2.6) */
@@ -855,7 +855,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
   // operator-wide bound affecting ALL currencies. Per-currency persistence is
   // Phase-future — the same fan-out gap as GET /limits and GET /games.
 
-  router.post('/limits', (req: Request, res): void => {
+  router.post('/limits', async (req: Request, res): Promise<void> => {
     const op = (req as OperatorAuthedRequest).operator;
     const operatorId = op.operatorId;
 
@@ -885,7 +885,7 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
     }
 
     // Persist operator-wide (per-currency persistence is Phase-future — see above).
-    deps.registry.update(operatorId, {
+    await deps.registry.update(operatorId, {
       minBetMinor: minBetMinor as number,
       maxBetMinor: maxBetMinor as number,
     });

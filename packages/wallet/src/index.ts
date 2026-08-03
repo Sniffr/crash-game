@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './operator-registry.js';
+export * from './operator-registry-pg.js';
 export * from './games-repo.js';
 export * from './games-repo-pg.js';
 export * from './pg.js';

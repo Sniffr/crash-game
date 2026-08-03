@@ -37,6 +37,15 @@ export class OperatorNotFoundError extends Error {
   }
 }
 
+// Read-only operator lookups. Both the SQLite OperatorRegistry and the Postgres
+// PgOperatorRegistry (in-memory cache) serve these synchronously, so hot paths
+// (signature middleware, WalletClientCache) never await.
+export interface OperatorReader {
+  getById(operatorId: string): import('./types.js').Operator | null;
+  getByApiKey(apiKey: string): import('./types.js').Operator | null;
+  list(opts?: { status?: import('./types.js').OperatorStatus }): import('./types.js').Operator[];
+}
+
 // ---------------------------------------------------------------------------
 // Derive the Statement type from the prepare() method signature so we don't
 // have to use the Database namespace (which is unavailable via `import type`).
