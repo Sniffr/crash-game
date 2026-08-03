@@ -562,8 +562,11 @@ export default function App() {
   const placeBet = () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
-    if (session.operatorId) {
-      // Operator session: send amountMinor (integer minor units)
+    // A money session (operator OR personal-lobby real-money) carries balanceMinor
+    // + currency and settles in integer minor units. Only the legacy anonymous
+    // demo session uses decimal credits.
+    if (typeof session.balanceMinor === 'number' && session.currency) {
+      // Money session: send amountMinor (integer minor units)
       const amountMinor = toMinor(betAmount, session.currency);
       ws.send(JSON.stringify({
         type: 'place_bet',
