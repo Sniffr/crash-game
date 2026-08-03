@@ -78,13 +78,13 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import crypto from 'node:crypto';
-import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 
 import { WalletClientCache } from '../wallet/client-cache.js';
 import { verifyOperatorSignature } from './middleware/verify-operator-signature.js';
 import { createOperatorRouter } from './operator.js';
-import { OperatorAudit } from './operator-audit.js';
+import { PgOperatorAudit } from './operator-audit-pg.js';
 
 // ---------------------------------------------------------------------------
 // Signing helpers
@@ -130,9 +130,9 @@ async function getAs(path: string, key: Buffer, apiKey: string) {
 const OPERATOR_A_ID = 'read-test-op-a';
 const OPERATOR_B_ID = 'read-test-op-b';
 
-let db: InstanceType<typeof Database>;
-let registry: OperatorRegistry;
-let betLog: BetLog;
+let testDb: TestDb;
+let registry: PgOperatorRegistry;
+let betLog: PgBetLog;
 let walletClientCache: WalletClientCache;
 
 let OP_A_KEY: Buffer;
@@ -168,11 +168,12 @@ interface SeedBet {
   winOpTxnId?: string | null;
 }
 
-function seedBet(b: SeedBet): { betId: string; betTxnId: string } {
+async function seedBet(b: SeedBet): Promise<{ betId: string; betTxnId: string }> {
   const n = ++betSeq;
   const betId = `bet-${n}`;
   const betTxnId = `txn-bet-${n}`;
-  db.prepare(`
+  await testDb.pool.query(
+    `
     INSERT INTO bet_log (
       bet_id, operator_id, player_id, session_id, round_id, currency,
       amount_minor, state, bet_txn_id,
@@ -180,51 +181,49 @@ function seedBet(b: SeedBet): { betId: string; betTxnId: string } {
       win_amount_minor, multiplier, error_code,
       created_at, updated_at
     ) VALUES (
-      @bet_id, @operator_id, @player_id, @session_id, @round_id, @currency,
-      @amount_minor, @state, @bet_txn_id,
-      @win_txn_id, @rollback_txn_id, @bet_op_txn_id, @win_op_txn_id,
-      @win_amount_minor, @multiplier, NULL,
-      @created_at, @created_at
+      $1, $2, $3, $4, $5, $6,
+      $7, $8, $9,
+      $10, $11, $12, $13,
+      $14, $15, NULL,
+      $16, $16
     )
-  `).run({
-    bet_id: betId,
-    operator_id: b.operatorId,
-    player_id: b.playerId,
-    session_id: b.sessionId,
-    round_id: b.roundId,
-    currency: b.currency,
-    amount_minor: b.amountMinor,
-    state: b.state,
-    bet_txn_id: betTxnId,
-    win_txn_id: b.winTxnId ?? null,
-    rollback_txn_id: b.rollbackTxnId ?? null,
-    bet_op_txn_id: b.betOpTxnId ?? null,
-    win_op_txn_id: b.winOpTxnId ?? null,
-    win_amount_minor: b.winAmountMinor ?? null,
-    multiplier: b.multiplier ?? null,
-    created_at: b.createdAt,
-  });
+  `,
+    [
+      betId,
+      b.operatorId,
+      b.playerId,
+      b.sessionId,
+      b.roundId,
+      b.currency,
+      b.amountMinor,
+      b.state,
+      betTxnId,
+      b.winTxnId ?? null,
+      b.rollbackTxnId ?? null,
+      b.betOpTxnId ?? null,
+      b.winOpTxnId ?? null,
+      b.winAmountMinor ?? null,
+      b.multiplier ?? null,
+      b.createdAt,
+    ],
+  );
   return { betId, betTxnId };
 }
 
-function seedIdempotency(opts: {
+async function seedIdempotency(opts: {
   txnId: string;
   operatorId: string;
   kind: 'bet' | 'win' | 'rollback';
   responseJson: string;
   createdAt: number;
-}): void {
-  db.prepare(`
+}): Promise<void> {
+  await testDb.pool.query(
+    `
     INSERT INTO txn_idempotency (txn_id, operator_id, kind, request_hash, response_json, created_at)
-    VALUES (@txn_id, @operator_id, @kind, @request_hash, @response_json, @created_at)
-  `).run({
-    txn_id: opts.txnId,
-    operator_id: opts.operatorId,
-    kind: opts.kind,
-    request_hash: 'hash',
-    response_json: opts.responseJson,
-    created_at: opts.createdAt,
-  });
+    VALUES ($1, $2, $3, $4, $5, $6)
+  `,
+    [opts.txnId, opts.operatorId, opts.kind, 'hash', opts.responseJson, opts.createdAt],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -236,26 +235,28 @@ const BASE_TS = 1_716_000_000; // a fixed reference unix-seconds timestamp
 beforeAll(async () => {
   // No live wallet/stub server needed: all Task 6.3 endpoints are read-only and
   // never call the operator wallet. walletBaseUrl is a registry field only.
-  db = new Database(':memory:');
-  betLog = new BetLog(db);
-  registry = new OperatorRegistry(db);
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
+  registry = new PgOperatorRegistry(testDb.pool);
 
-  registry.create({
+  await registry.create({
     operatorId: OPERATOR_A_ID,
     name: 'Read Test Operator A',
     walletBaseUrl: 'http://localhost:0',
     currencies: ['EUR', 'USD'],
     status: 'active',
   });
-  db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-    STUB_DEFAULT_KEY_B64,
-    OPERATOR_A_ID,
+  await testDb.pool.query(
+    `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+    [STUB_DEFAULT_KEY_B64, OPERATOR_A_ID],
   );
+  // Raw signing-key write bypassed the registry cache — refresh so getById/getByApiKey see it.
+  await registry.refresh();
   const opA = registry.getById(OPERATOR_A_ID)!;
   OP_A_API_KEY = opA.apiKey;
   OP_A_KEY = Buffer.from(STUB_DEFAULT_KEY_B64, 'base64');
 
-  registry.create({
+  await registry.create({
     operatorId: OPERATOR_B_ID,
     name: 'Read Test Operator B',
     walletBaseUrl: 'http://localhost:0',
@@ -278,7 +279,7 @@ beforeAll(async () => {
   testApp.use(
     '/op/v1',
     verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit: new OperatorAudit(db) }),
+    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit: new PgOperatorAudit(testDb.pool) }),
   );
 
   // -------------------------------------------------------------------------
@@ -298,31 +299,31 @@ beforeAll(async () => {
     const ts = BASE_TS + i * 100;
 
     // Each round: one SETTLED win bet + one LOST bet.
-    const win = seedBet({
+    const win = await seedBet({
       operatorId: OPERATOR_A_ID, playerId: player, sessionId: session, roundId,
       currency: 'EUR', amountMinor: 10_000, state: 'SETTLED', createdAt: ts,
       winAmountMinor: 24_500, multiplier: 2.45,
       winTxnId: `txn-win-${i}`, betOpTxnId: `op-bet-${i}`, winOpTxnId: `op-win-${i}`,
     });
-    seedIdempotency({ txnId: win.betTxnId, operatorId: OPERATOR_A_ID, kind: 'bet', responseJson: JSON.stringify({ ok: true, operatorTxnId: `op-bet-${i}` }), createdAt: ts });
-    seedIdempotency({ txnId: `txn-win-${i}`, operatorId: OPERATOR_A_ID, kind: 'win', responseJson: JSON.stringify({ ok: true, operatorTxnId: `op-win-${i}` }), createdAt: ts + 1 });
+    await seedIdempotency({ txnId: win.betTxnId, operatorId: OPERATOR_A_ID, kind: 'bet', responseJson: JSON.stringify({ ok: true, operatorTxnId: `op-bet-${i}` }), createdAt: ts });
+    await seedIdempotency({ txnId: `txn-win-${i}`, operatorId: OPERATOR_A_ID, kind: 'win', responseJson: JSON.stringify({ ok: true, operatorTxnId: `op-win-${i}` }), createdAt: ts + 1 });
 
-    const lost = seedBet({
+    const lost = await seedBet({
       operatorId: OPERATOR_A_ID, playerId: player, sessionId: session, roundId,
       currency: 'EUR', amountMinor: 5_000, state: 'LOST', createdAt: ts + 2,
       betOpTxnId: `op-bet-lost-${i}`,
     });
-    seedIdempotency({ txnId: lost.betTxnId, operatorId: OPERATOR_A_ID, kind: 'bet', responseJson: JSON.stringify({ ok: true, operatorTxnId: `op-bet-lost-${i}` }), createdAt: ts + 2 });
+    await seedIdempotency({ txnId: lost.betTxnId, operatorId: OPERATOR_A_ID, kind: 'bet', responseJson: JSON.stringify({ ok: true, operatorTxnId: `op-bet-lost-${i}` }), createdAt: ts + 2 });
   }
 
   // Shared round: one OP_A bet + one OP_B bet in the same round_id.
   const sharedTs = BASE_TS + 5000;
-  seedBet({
+  await seedBet({
     operatorId: OPERATOR_A_ID, playerId: 'pid-a-1', sessionId: 'ses-a-1', roundId: 'rnd-shared',
     currency: 'EUR', amountMinor: 7_000, state: 'SETTLED', createdAt: sharedTs,
     winAmountMinor: 14_000, multiplier: 2.0, winTxnId: 'txn-win-shared-a',
   });
-  seedBet({
+  await seedBet({
     operatorId: OPERATOR_B_ID, playerId: 'pid-b-1', sessionId: 'ses-b-1', roundId: 'rnd-shared',
     currency: 'EUR', amountMinor: 99_000, state: 'SETTLED', createdAt: sharedTs + 1,
     winAmountMinor: 198_000, multiplier: 2.0,
@@ -331,12 +332,12 @@ beforeAll(async () => {
   // OP_B standalone rounds/bets (so /bets and /operator-tx have B rows to exclude).
   for (let i = 0; i < 4; i++) {
     const ts = BASE_TS + 8000 + i * 100;
-    const b = seedBet({
+    const b = await seedBet({
       operatorId: OPERATOR_B_ID, playerId: 'pid-b-1', sessionId: 'ses-b-1', roundId: `rnd-b-${i}`,
       currency: 'EUR', amountMinor: 3_000, state: 'SETTLED', createdAt: ts,
       winAmountMinor: 6_000, multiplier: 2.0, winTxnId: `txn-b-win-${i}`,
     });
-    seedIdempotency({ txnId: b.betTxnId, operatorId: OPERATOR_B_ID, kind: 'bet', responseJson: JSON.stringify({ ok: true }), createdAt: ts });
+    await seedIdempotency({ txnId: b.betTxnId, operatorId: OPERATOR_B_ID, kind: 'bet', responseJson: JSON.stringify({ ok: true }), createdAt: ts });
   }
 
   // A live session in the store for the GET /sessions/:id tests.
@@ -358,8 +359,8 @@ beforeAll(async () => {
   });
 });
 
-afterAll(() => {
-  db.close();
+afterAll(async () => {
+  await testDb.cleanup();
 });
 
 // ---------------------------------------------------------------------------

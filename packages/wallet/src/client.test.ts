@@ -4,8 +4,9 @@ import { http, HttpResponse } from 'msw';
 import { WalletClient } from './client.js';
 import { WalletError, WalletNetworkError, ResponseSignatureError } from './errors.js';
 import { sign, signResponse, verify } from './signing.js';
-import { BetLog, IdempotencyMismatchError } from './bet-log.js';
-import Database from 'better-sqlite3';
+import { IdempotencyMismatchError } from './bet-log.js';
+import { PgBetLog } from './bet-log-pg.js';
+import { makeTestDb, type TestDb } from './pg-test-support.js';
 import type { Operator } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -74,8 +75,14 @@ interface CapturedRequest {
 
 const server = setupServer();
 
+// Track PgBetLog test databases created per test so we can drop them after.
+const testDbs: TestDb[] = [];
+
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
-afterEach(() => server.resetHandlers());
+afterEach(async () => {
+  server.resetHandlers();
+  await Promise.all(testDbs.splice(0).map((db) => db.cleanup()));
+});
 afterAll(() => server.close());
 
 // ---------------------------------------------------------------------------
@@ -503,7 +510,7 @@ it('authenticate — resolves with full player shape on signed 200', async () =>
 // ===========================================================================
 
 // Helper: make a WalletClient with a BetLog
-function makeClientWithBetLog(betLog: BetLog, opts?: {
+function makeClientWithBetLog(betLog: PgBetLog, opts?: {
   sleep?: (ms: number) => Promise<void>;
   nowSeconds?: () => number;
   maxRollbackAttempts?: number;
@@ -518,9 +525,11 @@ function makeClientWithBetLog(betLog: BetLog, opts?: {
   });
 }
 
-// Fresh in-memory BetLog for each idempotency test
-function makeBetLog(): BetLog {
-  return new BetLog(new Database(':memory:'));
+// Fresh isolated Postgres-backed BetLog for each idempotency test
+async function makeBetLog(): Promise<PgBetLog> {
+  const db = await makeTestDb();
+  testDbs.push(db);
+  return new PgBetLog(db.pool);
 }
 
 // Win / rollback fixtures
@@ -598,7 +607,7 @@ it('success short-circuits replay — 2nd call skips HTTP; fresh client replays 
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   // First call — should hit HTTP
@@ -637,7 +646,7 @@ it('confirmed rejection (409) persists and replays as throw with no additional H
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   // First call — hits HTTP, stores confirmed rejection
@@ -675,7 +684,7 @@ it('non-confirmed failure (5xx) does not persist — recovery can retry freely',
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog, { sleep, maxRollbackAttempts: 1 });
 
   // First round: 4 attempts (bet maxAttempts)
@@ -684,7 +693,7 @@ it('non-confirmed failure (5xx) does not persist — recovery can retry freely',
   expect(afterFirstRound).toBe(4); // bet exhausts 4 attempts
 
   // Must NOT have persisted an idempotency row
-  expect(betLog.getIdempotency(TEST_OPERATOR.operatorId, BET_REQ.txnId)).toBeNull();
+  expect(await betLog.getIdempotency(TEST_OPERATOR.operatorId, BET_REQ.txnId)).toBeNull();
 
   // Second round: same txnId+body → makes NEW HTTP calls (no short-circuit)
   await client.bet(BET_REQ).catch(() => {});
@@ -707,7 +716,7 @@ it('divergent body with same txnId → IdempotencyMismatchError; no additional H
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   // First call: succeeds (txnId = 'txn-001', amountMinor = 1000)
@@ -737,7 +746,7 @@ it('win success persists and replays without HTTP', async () => {
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   const r1 = await client.win(WIN_REQ);
@@ -750,7 +759,7 @@ it('win success persists and replays without HTTP', async () => {
   expect(callCount).toBe(1); // no additional HTTP
 
   // Verify row stored with kind='win' and correct txnId
-  const entry = betLog.getIdempotency(TEST_OPERATOR.operatorId, WIN_REQ.txnId);
+  const entry = await betLog.getIdempotency(TEST_OPERATOR.operatorId, WIN_REQ.txnId);
   expect(entry).not.toBeNull();
   expect(entry!.kind).toBe('win');
   expect(entry!.txnId).toBe(WIN_REQ.txnId);
@@ -772,7 +781,7 @@ it('rollback success persists and replays without HTTP', async () => {
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog, { maxRollbackAttempts: 4 });
 
   const r1 = await client.rollback(ROLLBACK_REQ);
@@ -785,7 +794,7 @@ it('rollback success persists and replays without HTTP', async () => {
   expect(callCount).toBe(1); // no additional HTTP
 
   // Verify row stored with kind='rollback' and correct txnId
-  const entry = betLog.getIdempotency(TEST_OPERATOR.operatorId, ROLLBACK_REQ.txnId);
+  const entry = await betLog.getIdempotency(TEST_OPERATOR.operatorId, ROLLBACK_REQ.txnId);
   expect(entry).not.toBeNull();
   expect(entry!.kind).toBe('rollback');
   expect(entry!.txnId).toBe(ROLLBACK_REQ.txnId);
@@ -827,7 +836,7 @@ it('authenticate and roundEnd with betLog — no idempotency rows written; 2 HTT
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   const authReq = { token: 'tok-1', ip: '1.2.3.4', userAgent: 'Mozilla/5.0', gameId: 'galaxy-crash' };
@@ -848,8 +857,8 @@ it('authenticate and roundEnd with betLog — no idempotency rows written; 2 HTT
 
   // No idempotency rows at all
   // (authenticate/roundEnd have no txnId; we verify the table is empty)
-  const db = (betLog as unknown as { db: import('better-sqlite3').Database }).db;
-  const rows = db.prepare('SELECT * FROM txn_idempotency').all();
+  const pool = (betLog as unknown as { pool: import('pg').Pool }).pool;
+  const { rows } = await pool.query('SELECT * FROM txn_idempotency');
   expect(rows).toHaveLength(0);
 });
 
@@ -874,10 +883,10 @@ it('success persistence failure does NOT mask success — bet resolves even when
   );
 
   // Stub betLog: getIdempotency returns null (no existing record), putIdempotency throws
-  const stubbedBetLog: BetLog = {
+  const stubbedBetLog: PgBetLog = {
     getIdempotency: (_operatorId: string, _txnId: string) => null,
     putIdempotency: (_entry: unknown) => { throw new Error('DB write failed'); },
-  } as unknown as BetLog;
+  } as unknown as PgBetLog;
 
   nonceCounter = 0;
   const client = new WalletClient(TEST_OPERATOR, {
@@ -912,10 +921,10 @@ it('confirmed-rejection persistence failure — original WalletError propagates 
   );
 
   // Stub betLog: getIdempotency returns null, putIdempotency throws
-  const stubbedBetLog: BetLog = {
+  const stubbedBetLog: PgBetLog = {
     getIdempotency: (_operatorId: string, _txnId: string) => null,
     putIdempotency: (_entry: unknown) => { throw new Error('DB write failed'); },
-  } as unknown as BetLog;
+  } as unknown as PgBetLog;
 
   nonceCounter = 0;
   const client = new WalletClient(TEST_OPERATOR, {
@@ -950,7 +959,7 @@ it('replay differing only in placedAt short-circuits to cached BetResponse (no I
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   // First call succeeds (1 HTTP call)
@@ -978,7 +987,7 @@ it('replay differing only in settledAt short-circuits to cached WinResponse (no 
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   // First call succeeds (1 HTTP call)
@@ -1009,7 +1018,7 @@ it('genuine different-transaction (same txnId, different amountMinor) still thro
     }),
   );
 
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
   const client = makeClientWithBetLog(betLog);
 
   // First call: succeeds (txnId = 'txn-001', amountMinor = 1000)
@@ -1074,7 +1083,7 @@ it('spec §9 cross-operator isolation — two operators with same txnId persist 
   );
 
   // Both clients share the SAME betLog (the key invariant being tested)
-  const betLog = makeBetLog();
+  const betLog = await makeBetLog();
 
   let nonceCounterLocal = 0;
   const clientA = new WalletClient(TEST_OPERATOR, {
@@ -1105,8 +1114,8 @@ it('spec §9 cross-operator isolation — two operators with same txnId persist 
   expect(callCountB).toBe(1); // still 1 — op-B's replay short-circuited
 
   // Verify both rows exist in the DB, scoped to their respective operators
-  const rowA = betLog.getIdempotency(TEST_OPERATOR.operatorId, betReqSharedTxnId.txnId);
-  const rowB = betLog.getIdempotency(OP_B.operatorId, betReqSharedTxnId.txnId);
+  const rowA = await betLog.getIdempotency(TEST_OPERATOR.operatorId, betReqSharedTxnId.txnId);
+  const rowB = await betLog.getIdempotency(OP_B.operatorId, betReqSharedTxnId.txnId);
   expect(rowA).not.toBeNull();
   expect(rowB).not.toBeNull();
   expect(rowA!.operatorId).toBe(TEST_OPERATOR.operatorId);

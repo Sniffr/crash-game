@@ -66,10 +66,11 @@ vi.mock('../game/history.js', () => ({
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import Database from 'better-sqlite3';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
+import type { Pool } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
-import { BetLog, OperatorRegistry } from '@crash/wallet';
-import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
+import { PgBetLog, PgOperatorRegistry } from '@crash/wallet';
+import { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
 import { createAdminRouter } from './admin.js';
 import { WalletClientCache } from '../wallet/client-cache.js';
 
@@ -79,19 +80,24 @@ import { WalletClientCache } from '../wallet/client-cache.js';
 
 interface Harness {
   app: express.Application;
-  db: InstanceType<typeof Database>;
-  betLog: BetLog;
-  adminAudit: AdminAudit;
-  adminUsers: AdminUsers;
-  registry: OperatorRegistry;
+  pool: Pool;
+  betLog: PgBetLog;
+  adminAudit: PgAdminAudit;
+  adminUsers: PgAdminUsers;
+  registry: PgOperatorRegistry;
 }
 
-function makeHarness(): Harness {
-  const db = new Database(':memory:');
-  const betLog = new BetLog(db);
-  const registry = new OperatorRegistry(db);
-  const adminAudit = new AdminAudit(db);
-  const adminUsers = new AdminUsers(db);
+// Per-test Postgres schemas created via makeTestDb(); cleaned up in afterEach.
+const openDbs: TestDb[] = [];
+
+async function makeHarness(): Promise<Harness> {
+  const testDb = await makeTestDb();
+  openDbs.push(testDb);
+  const pool = testDb.pool;
+  const betLog = new PgBetLog(pool);
+  const registry = new PgOperatorRegistry(pool);
+  const adminAudit = new PgAdminAudit(pool);
+  const adminUsers = new PgAdminUsers(pool);
   const revoked = new Set<string>();
   const walletClientCache = new WalletClientCache(registry, betLog);
 
@@ -106,7 +112,7 @@ function makeHarness(): Harness {
     revoked,
   }));
 
-  return { app, db, betLog, adminAudit, adminUsers, registry };
+  return { app, pool, betLog, adminAudit, adminUsers, registry };
 }
 
 // ---------------------------------------------------------------------------
@@ -121,12 +127,13 @@ beforeEach(() => {
   process.env['JWT_SECRET'] = TEST_SECRET;
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (savedJwtSecret === undefined) {
     delete process.env['JWT_SECRET'];
   } else {
     process.env['JWT_SECRET'] = savedJwtSecret;
   }
+  await Promise.all(openDbs.splice(0).map((d) => d.cleanup()));
 });
 
 // ---------------------------------------------------------------------------
@@ -164,7 +171,7 @@ interface SeedResult {
   now: number;
 }
 
-function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
+async function seedFixture(betLog: PgBetLog, adminAudit: PgAdminAudit, pool: Pool): Promise<SeedResult> {
   const now = Math.floor(Date.now() / 1000);
   const op1 = 'fixture-op1';
   const op2 = 'fixture-op2';
@@ -185,7 +192,7 @@ function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
   const settledBetIds: string[] = [];
 
   // Helper to insert a bet at a specific timestamp and advance it
-  function insertBet(opts: {
+  async function insertBet(opts: {
     op: string;
     player: string;
     round: string;
@@ -193,36 +200,37 @@ function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
     offset: number; // seconds before now
     multiplier?: number;
     currency?: string;
-  }): string {
+  }): Promise<string> {
     const betId = uid('bet');
     const betTxnId = uid('btxn');
     const currency = opts.currency ?? 'EUR';
     const createdAt = now - opts.offset;
 
     // Direct SQL insert for full control over timestamps
-    betLog['db'].prepare(`
-      INSERT INTO bet_log (
+    await pool.query(
+      `INSERT INTO bet_log (
         bet_id, operator_id, player_id, session_id, round_id, currency,
         amount_minor, state, bet_txn_id,
         win_txn_id, rollback_txn_id, bet_op_txn_id, win_op_txn_id,
         win_amount_minor, multiplier, error_code,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?, NULL, ?, ?)
-    `).run(
-      betId,
-      opts.op,
-      opts.player,
-      `sess-${opts.player}`,
-      opts.round,
-      currency,
-      5000,
-      opts.state,
-      betTxnId,
-      opts.state !== 'PENDING' ? `op-bet-txn-${betId}` : null,
-      opts.state === 'SETTLED' ? 10000 : null,
-      opts.state === 'SETTLED' ? (opts.multiplier ?? 2.0) : null,
-      createdAt,
-      createdAt + 1,
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, $10, NULL, $11, $12, NULL, $13, $14)`,
+      [
+        betId,
+        opts.op,
+        opts.player,
+        `sess-${opts.player}`,
+        opts.round,
+        currency,
+        5000,
+        opts.state,
+        betTxnId,
+        opts.state !== 'PENDING' ? `op-bet-txn-${betId}` : null,
+        opts.state === 'SETTLED' ? 10000 : null,
+        opts.state === 'SETTLED' ? (opts.multiplier ?? 2.0) : null,
+        createdAt,
+        createdAt + 1,
+      ],
     );
 
     allBetIds.push(betId);
@@ -232,9 +240,9 @@ function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
   }
 
   // Insert idempotency row for a settled bet
-  function insertIdempotency(betLog: BetLog, betId: string, op: string, createdAt: number): void {
+  async function insertIdempotency(betId: string, op: string, createdAt: number): Promise<void> {
     const txnId = uid('txn');
-    betLog.putIdempotency({
+    await betLog.putIdempotency({
       txnId,
       operatorId: op,
       kind: 'bet',
@@ -243,7 +251,7 @@ function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
       createdAt,
     });
     // Update the bet's bet_txn_id to match so the JOIN works
-    betLog['db'].prepare('UPDATE bet_log SET bet_txn_id = ? WHERE bet_id = ?').run(txnId, betId);
+    await pool.query('UPDATE bet_log SET bet_txn_id = $1 WHERE bet_id = $2', [txnId, betId]);
   }
 
   // Seed 130 bets spread evenly across 5 rounds (26 bets per round):
@@ -256,18 +264,18 @@ function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
     const r2 = rounds[(i + 2) % rounds.length]!;
     const r3 = rounds[(i + 3) % rounds.length]!;
     const r4 = rounds[(i + 4) % rounds.length]!;
-    const b1 = insertBet({ op: op1, player: p1, round: r0, state: 'SETTLED', offset, multiplier: 2.0 + (i * 0.1) });
-    insertBet({ op: op1, player: p2, round: r1, state: 'ARMED', offset: offset + 1 });
-    insertBet({ op: op2, player: p3, round: r2, state: 'LOST', offset: offset + 2 });
-    insertBet({ op: op2, player: p1, round: r3, state: 'SETTLED', offset: offset + 3, multiplier: 1.5 });
-    insertBet({ op: op1, player: p3, round: r4, state: 'WIN_FAILED', offset: offset + 4 });
-    insertIdempotency(betLog, b1, op1, now - offset);
+    const b1 = await insertBet({ op: op1, player: p1, round: r0, state: 'SETTLED', offset, multiplier: 2.0 + (i * 0.1) });
+    await insertBet({ op: op1, player: p2, round: r1, state: 'ARMED', offset: offset + 1 });
+    await insertBet({ op: op2, player: p3, round: r2, state: 'LOST', offset: offset + 2 });
+    await insertBet({ op: op2, player: p1, round: r3, state: 'SETTLED', offset: offset + 3, multiplier: 1.5 });
+    await insertBet({ op: op1, player: p3, round: r4, state: 'WIN_FAILED', offset: offset + 4 });
+    await insertIdempotency(b1, op1, now - offset);
   }
 
-  // Seed some audit rows
-  adminAudit.record({ actor: 'alice', action: 'operator.create', target: 'operator:fixture-op1', payload: { test: true } });
-  adminAudit.record({ actor: 'bob', action: 'operator.pause', target: 'operator:fixture-op2', payload: { reason: 'test' } });
-  adminAudit.record({ actor: 'alice', action: 'force_credit', target: uid('bet'), payload: { result: 'settled' } });
+  // Seed some audit rows (recordAsync so the writes are durable before we assert)
+  await adminAudit.recordAsync({ actor: 'alice', action: 'operator.create', target: 'operator:fixture-op1', payload: { test: true } });
+  await adminAudit.recordAsync({ actor: 'bob', action: 'operator.pause', target: 'operator:fixture-op2', payload: { reason: 'test' } });
+  await adminAudit.recordAsync({ actor: 'alice', action: 'force_credit', target: uid('bet'), payload: { result: 'settled' } });
 
   return { op1, op2, p1, p2, p3, rounds, allBetIds, op1BetIds, settledBetIds, now };
 }
@@ -278,9 +286,9 @@ function seedFixture(betLog: BetLog, adminAudit: AdminAudit): SeedResult {
 
 describe('GET /admin/v1/bets — pagination', () => {
   it('first page returns limit=50 items + nextCursor; following cursor yields next batch; final page nextCursor null; union = all rows, no dupes', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const totalCount = seed.allBetIds.length; // 130
@@ -337,9 +345,9 @@ describe('GET /admin/v1/bets — pagination', () => {
 
 describe('GET /admin/v1/bets — filters', () => {
   it('?operatorId= returns only that operator\'s bets', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -354,9 +362,9 @@ describe('GET /admin/v1/bets — filters', () => {
   });
 
   it('?state=SETTLED returns only SETTLED bets', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -371,8 +379,8 @@ describe('GET /admin/v1/bets — filters', () => {
   });
 
   it('?state=BOGUS → 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -384,9 +392,9 @@ describe('GET /admin/v1/bets — filters', () => {
   });
 
   it('?playerId= filters by player', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -400,9 +408,9 @@ describe('GET /admin/v1/bets — filters', () => {
   });
 
   it('?operatorId= + ?state= combined filter (AND)', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -418,9 +426,9 @@ describe('GET /admin/v1/bets — filters', () => {
 
 describe('GET /admin/v1/rounds', () => {
   it('groups bets by round_id correctly — betCount per round matches fixture', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -439,9 +447,9 @@ describe('GET /admin/v1/rounds', () => {
   });
 
   it('?from&to window filters rounds by time', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // Only request rounds within the last 60 seconds (should get some but not all given offsets up to ~260s)
@@ -456,9 +464,9 @@ describe('GET /admin/v1/rounds', () => {
   });
 
   it('?minMultiplier filters to rounds with max multiplier >= threshold', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // With a very high minMultiplier, expect 0 rounds
@@ -471,8 +479,8 @@ describe('GET /admin/v1/rounds', () => {
   });
 
   it('bad cursor → 400 INVALID_CURSOR', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -486,9 +494,9 @@ describe('GET /admin/v1/rounds', () => {
 
 describe('GET /admin/v1/rounds/:roundId', () => {
   it('returns round summary + bets array', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const roundId = seed.rounds[0]!;
@@ -507,8 +515,8 @@ describe('GET /admin/v1/rounds/:roundId', () => {
   });
 
   it('unknown roundId → 404 ROUND_NOT_FOUND', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -522,9 +530,9 @@ describe('GET /admin/v1/rounds/:roundId', () => {
 
 describe('GET /admin/v1/bets/:betId', () => {
   it('returns bet + timeline + walletCalls', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const betId = seed.settledBetIds[0]!;
@@ -547,8 +555,8 @@ describe('GET /admin/v1/bets/:betId', () => {
   });
 
   it('unknown betId → 404 BET_NOT_FOUND', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -560,8 +568,8 @@ describe('GET /admin/v1/bets/:betId', () => {
   });
 
   it('bad cursor on /bets → 400 INVALID_CURSOR', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -575,9 +583,9 @@ describe('GET /admin/v1/bets/:betId', () => {
 
 describe('GET /admin/v1/transactions — roles + shape', () => {
   it('viewer token → 403 FORBIDDEN', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
     const token = await loginAs(app, 'viewer1', 'pw');
 
     const res = await request(app)
@@ -589,9 +597,9 @@ describe('GET /admin/v1/transactions — roles + shape', () => {
   });
 
   it('finance token → 200 OK', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    adminUsers.create('finance1', await bcrypt.hash('pw', 10), ['finance']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await adminUsers.create('finance1', await bcrypt.hash('pw', 10), ['finance']);
     const token = await loginAs(app, 'finance1', 'pw');
 
     const res = await request(app)
@@ -603,9 +611,9 @@ describe('GET /admin/v1/transactions — roles + shape', () => {
   });
 
   it('admin token → 200 OK (superuser bypasses finance guard)', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -618,9 +626,9 @@ describe('GET /admin/v1/transactions — roles + shape', () => {
   });
 
   it('§7.1 item shape: txnId, operatorId, kind, attempts=null, totalMs=null present', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -639,8 +647,8 @@ describe('GET /admin/v1/transactions — roles + shape', () => {
   });
 
   it('bad cursor → 400 INVALID_CURSOR', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('finance1', await bcrypt.hash('pw', 10), ['finance']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('finance1', await bcrypt.hash('pw', 10), ['finance']);
     const token = await loginAs(app, 'finance1', 'pw');
 
     const res = await request(app)
@@ -654,9 +662,9 @@ describe('GET /admin/v1/transactions — roles + shape', () => {
 
 describe('GET /admin/v1/audit — roles + filter + cursor', () => {
   it('viewer → 403 FORBIDDEN', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
     const token = await loginAs(app, 'viewer1', 'pw');
 
     const res = await request(app)
@@ -668,9 +676,9 @@ describe('GET /admin/v1/audit — roles + filter + cursor', () => {
   });
 
   it('admin → 200; payload decoded to object', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -689,9 +697,9 @@ describe('GET /admin/v1/audit — roles + filter + cursor', () => {
   });
 
   it('?action= filter returns only matching rows', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -705,8 +713,8 @@ describe('GET /admin/v1/audit — roles + filter + cursor', () => {
   });
 
   it('bad cursor → 400 INVALID_CURSOR', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -718,44 +726,60 @@ describe('GET /admin/v1/audit — roles + filter + cursor', () => {
   });
 });
 
-describe('EXPLAIN QUERY PLAN — index coverage', () => {
-  it('bets-by-operatorId filter uses idx_betlog_operator index (not full scan)', () => {
-    const { db } = makeHarness();
+describe('EXPLAIN — index coverage', () => {
+  it('bets-by-operatorId filter uses idx_betlog_operator index (not full scan)', async () => {
+    const { pool } = await makeHarness();
 
-    // Run EXPLAIN QUERY PLAN for the operator-only filter query
-    const plan = db.prepare(
-      `EXPLAIN QUERY PLAN
-       SELECT * FROM bet_log
-       WHERE operator_id = ?
-       ORDER BY created_at DESC, bet_id DESC
-       LIMIT 50`,
-    ).all('any-op') as Array<{ detail: string }>;
-
-    const planText = plan.map((r) => r.detail).join(' ');
-    // Should use the index, not scan the full table without index guidance
-    // Accept either 'USING INDEX' or 'USING COVERING INDEX'
-    expect(planText.toUpperCase()).toContain('USING INDEX');
+    // Run EXPLAIN for the operator-only filter query. On an empty table the
+    // planner would default to a Seq Scan, so disable seqscan first to prove the
+    // index is available and preferred for this access pattern.
+    const client = await pool.connect();
+    try {
+      await client.query('SET enable_seqscan = off');
+      const { rows } = await client.query(
+        `EXPLAIN SELECT * FROM bet_log
+         WHERE operator_id = $1
+         ORDER BY created_at DESC, bet_id DESC
+         LIMIT 50`,
+        ['any-op'],
+      );
+      const planText = (rows as Array<Record<string, string>>)
+        .map((r) => r['QUERY PLAN']).join(' ');
+      expect(planText).toContain('Index Scan');
+      expect(planText).toContain('idx_betlog_operator');
+    } finally {
+      client.release();
+    }
   });
 
-  it('uses index for operator-filtered transactions query (no SCAN of txn_idempotency)', () => {
-    const { db } = makeHarness();
+  it('uses index for operator-filtered transactions query (no SCAN of txn_idempotency)', async () => {
+    const { pool } = await makeHarness();
 
-    const plan = db.prepare(`EXPLAIN QUERY PLAN
-      SELECT * FROM txn_idempotency
-      WHERE operator_id = ?
-      ORDER BY created_at DESC, txn_id DESC
-      LIMIT 50`).all('any-op') as Array<{ detail: string }>;
-
-    const planText = plan.map((r) => r.detail).join(' | ').toUpperCase();
-    expect(planText).toContain('USING INDEX');
+    const client = await pool.connect();
+    try {
+      await client.query('SET enable_seqscan = off');
+      const { rows } = await client.query(
+        `EXPLAIN SELECT * FROM txn_idempotency
+         WHERE operator_id = $1
+         ORDER BY created_at DESC, txn_id DESC
+         LIMIT 50`,
+        ['any-op'],
+      );
+      const planText = (rows as Array<Record<string, string>>)
+        .map((r) => r['QUERY PLAN']).join(' | ');
+      expect(planText).toContain('Index Scan');
+      expect(planText).toContain('idx_txn_idemp_op');
+    } finally {
+      client.release();
+    }
   });
 });
 
 describe('GET /admin/v1/rounds — HAVING-cursor pagination traversal', () => {
   it('paginates rounds with HAVING-cursor: 2 pages, no dups, no gaps', async () => {
-    const { app, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const seed = seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const seed = await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const seenRoundIds = new Set<string>();
@@ -792,13 +816,13 @@ describe('GET /admin/v1/rounds — HAVING-cursor pagination traversal', () => {
 
 describe('GET /admin/v1/transactions — keyset pagination traversal', () => {
   it('paginates transactions across 3 pages, no dups, no gaps', async () => {
-    const { app, db, betLog, adminAudit, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFixture(betLog, adminAudit);
+    const { app, pool, betLog, adminAudit, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    await seedFixture(betLog, adminAudit, pool);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // Count fixture txns up front so the assertion is honest about the total.
-    const totalTxns = db.prepare('SELECT COUNT(*) as c FROM txn_idempotency').get() as { c: number };
+    const totalTxns = { c: Number((await pool.query('SELECT COUNT(*) AS c FROM txn_idempotency')).rows[0].c) };
     const limit = 10;
 
     const seenTxnIds = new Set<string>();

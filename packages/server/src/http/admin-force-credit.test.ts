@@ -4,8 +4,8 @@
  * Migrated from X-Admin-Token to JWT (Task 5.2): setup creates an admin user,
  * calls POST /admin/v1/auth/login, and sends Authorization: Bearer <token>.
  *
- * Uses a real operator stub (startServer(0)), real OperatorRegistry + BetLog
- * (:memory: SQLite), real WalletClientCache, AdminAudit + AdminUsers on the same `:memory:` db.
+ * Uses a real operator stub (startServer(0)), real PgOperatorRegistry + PgBetLog
+ * (isolated Postgres schema), real WalletClientCache, PgAdminAudit + PgAdminUsers on the same pool.
  *
  * Mirror of operator-terminate.test.ts harness.
  */
@@ -71,9 +71,9 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from
 import request from 'supertest';
 import express from 'express';
 import crypto from 'node:crypto';
-import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, WalletClient } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry, PgGamesRepo, PgReconciler, WalletClient } from '@crash/wallet';
 import type { Operator } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import type { Server } from 'node:http';
 import * as bcrypt from 'bcryptjs';
 
@@ -86,7 +86,7 @@ import { WalletClientCache } from '../wallet/client-cache.js';
 import { setOperatorWiringDeps } from '../game/operator-deps.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
 import { createAdminRouter } from './admin.js';
-import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
+import { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
 
 // Also import helpers to place/settle bets in tests
 import { placeOperatorBet, cashOutOperatorBet } from '../game/bets.js';
@@ -113,11 +113,11 @@ const TEST_JWT_SECRET = 'test-force-credit-secret';
 let stubServer: Server;
 let stubPort: number;
 
-let db: InstanceType<typeof Database>;
-let registry: OperatorRegistry;
-let betLog: BetLog;
-let adminAudit: AdminAudit;
-let adminUsers: AdminUsers;
+let testDb: TestDb;
+let registry: PgOperatorRegistry;
+let betLog: PgBetLog;
+let adminAudit: PgAdminAudit;
+let adminUsers: PgAdminUsers;
 let walletClientCache: WalletClientCache;
 let revoked: Set<string>;
 
@@ -142,26 +142,29 @@ beforeAll(async () => {
   stubPort = typeof addr === 'object' && addr !== null ? addr.port : 0;
   if (!stubPort) throw new Error('Could not determine stub port');
 
-  // 2. In-memory SQLite: registry + betLog + adminAudit + adminUsers share the same db
-  db = new Database(':memory:');
-  betLog = new BetLog(db);
-  registry = new OperatorRegistry(db);
-  adminAudit = new AdminAudit(db);
-  adminUsers = new AdminUsers(db);
+  // 2. Isolated Postgres schema: registry + betLog + adminAudit + adminUsers share the same pool
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
+  registry = new PgOperatorRegistry(testDb.pool);
+  adminAudit = new PgAdminAudit(testDb.pool);
+  adminUsers = new PgAdminUsers(testDb.pool);
   revoked = new Set<string>();
 
   // Register operator A — points at the real stub with stub's fixed signing key
-  registry.create({
+  await registry.create({
     operatorId: OPERATOR_A_ID,
     name: 'Operator A',
     walletBaseUrl: `http://localhost:${stubPort}`,
     currencies: [CURRENCY],
     status: 'active',
   });
-  db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-    STUB_DEFAULT_KEY_B64,
-    OPERATOR_A_ID,
+  await testDb.pool.query(
+    `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+    [STUB_DEFAULT_KEY_B64, OPERATOR_A_ID],
   );
+  // The signing key was patched out-of-band; refresh the in-memory cache so the
+  // registry (and any WalletClient built from it) uses the stub's key.
+  await registry.refresh();
 
   // 3. Build WalletClientCache + wire DI seam
   walletClientCache = new WalletClientCache(registry, betLog);
@@ -192,9 +195,11 @@ beforeAll(async () => {
   });
 
   // 4. Create admin user for JWT login
-  adminUsers.create(TEST_ADMIN_USER, await bcrypt.hash(TEST_ADMIN_PASS, 10), ['admin']);
+  await adminUsers.create(TEST_ADMIN_USER, await bcrypt.hash(TEST_ADMIN_PASS, 10), ['admin']);
 
   // 5. Build the test express app with admin routes (JWT-based)
+  const games = new PgGamesRepo(testDb.pool);
+  const reconciler = new PgReconciler(testDb.pool, { source: async () => [], betLog });
   testApp = express();
   testApp.use(express.json({
     verify: (req, _res, buf) => {
@@ -203,7 +208,7 @@ beforeAll(async () => {
   }));
   testApp.use(
     '/admin/v1',
-    createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, revoked }),
+    createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, games, revoked, reconciler }),
   );
 });
 
@@ -211,7 +216,7 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) =>
     stubServer.close((err) => (err ? reject(err) : resolve())),
   );
-  db.close();
+  await testDb.cleanup();
 });
 
 // ---------------------------------------------------------------------------
@@ -234,7 +239,7 @@ beforeEach(async () => {
   revoked.clear();
 
   // Clear admin_audit rows so each test sees an isolated audit trail
-  db.exec('DELETE FROM admin_audit');
+  await testDb.pool.query('DELETE FROM admin_audit');
 
   // Obtain a fresh JWT token by logging in
   const loginRes = await request(testApp)
@@ -268,6 +273,23 @@ function uid(prefix: string): string {
 
 function forceCreditPath(betId: string) {
   return `/admin/v1/bet-log/${betId}/force-credit`;
+}
+
+/**
+ * Poll adminAudit.list() until `predicate` holds. Admin audit `.record()` is
+ * fire-and-forget (the handler returns before the INSERT commits), so under
+ * concurrent Postgres load the row may not be visible the instant the HTTP
+ * response arrives. This bounded poll makes audit assertions deterministic.
+ */
+async function listAuditUntil(
+  predicate: (rows: Awaited<ReturnType<typeof adminAudit.list>>) => boolean,
+): Promise<Awaited<ReturnType<typeof adminAudit.list>>> {
+  let rows = await adminAudit.list({ limit: 100 });
+  for (let i = 0; i < 50 && !predicate(rows); i++) {
+    await new Promise((r) => setTimeout(r, 20));
+    rows = await adminAudit.list({ limit: 100 });
+  }
+  return rows;
 }
 
 /** Authenticated admin request with valid JWT. */
@@ -359,7 +381,7 @@ async function induceWinFailed(opts: {
   }
 
   // Confirm WIN_FAILED state
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   if (row?.state !== 'WIN_FAILED') {
     throw new Error(`Expected WIN_FAILED, got ${row?.state}`);
   }
@@ -440,7 +462,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(res.body.error.code).toBe('INVALID_REQUEST');
 
     // No audit row for a pre-validation 400 (design choice documented in handler)
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await adminAudit.list({ limit: 100 });
     // May have login audit rows — filter for force_credit only
     const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
     expect(forceCreditRows).toHaveLength(0);
@@ -458,13 +480,13 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
   it('unknown betId → 404 BET_NOT_FOUND + admin_audit row (result not_found)', async () => {
     const betId = 'does-not-exist-' + uid('x');
     // Clear audit rows before this specific test to isolate force_credit rows
-    db.exec('DELETE FROM admin_audit');
+    await testDb.pool.query('DELETE FROM admin_audit');
     const res = await adminRequest(betId, { reason: 'checking if it exists' });
 
     expect(res.status).toBe(404);
     expect(res.body.error.code).toBe('BET_NOT_FOUND');
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await listAuditUntil((rows) => rows.some((r) => r.action === 'force_credit'));
     const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
     expect(forceCreditRows).toHaveLength(1);
     const auditRow = forceCreditRows[0]!;
@@ -494,15 +516,15 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
         gameId: 'galaxy-crash',
       },
     );
-    expect(betLog.getById(betId)?.state).toBe('ARMED');
+    expect((await betLog.getById(betId))?.state).toBe('ARMED');
 
-    db.exec('DELETE FROM admin_audit');
+    await testDb.pool.query('DELETE FROM admin_audit');
     const res = await adminRequest(betId, { reason: 'trying to force-credit an ARMED bet' });
 
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('BET_NOT_WIN_FAILED');
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await listAuditUntil((rows) => rows.some((r) => r.action === 'force_credit'));
     const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
     expect(forceCreditRows).toHaveLength(1);
     const auditRow = forceCreditRows[0]!;
@@ -518,9 +540,9 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
   it('HAPPY: WIN_FAILED bet with healthy stub → 200 ok:true state SETTLED; betLog SETTLED; exactly one audit row result settled with operatorTxnId', async () => {
     // Induce a WIN_FAILED row (place bet, fail /win, reach WIN_FAILED)
     const betId = await induceWinFailed({ playerId: PLAYER_ID });
-    expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+    expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 
-    db.exec('DELETE FROM admin_audit');
+    await testDb.pool.query('DELETE FROM admin_audit');
     // The stub is now healthy (default state) — force-credit should succeed
     const res = await adminRequest(betId, { reason: 'ops manual recovery - operator back online' });
 
@@ -532,10 +554,10 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(res.body.operatorTxnId).toBeTruthy();
 
     // BetLog must show SETTLED
-    expect(betLog.getById(betId)?.state).toBe('SETTLED');
+    expect((await betLog.getById(betId))?.state).toBe('SETTLED');
 
     // Exactly one force_credit audit row
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await listAuditUntil((rows) => rows.some((r) => r.action === 'force_credit'));
     const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
     expect(forceCreditRows).toHaveLength(1);
     const auditRow = forceCreditRows[0]!;
@@ -575,7 +597,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(placeResult.row.state).toBe('ARMED');
 
     // Step 2: Compute fingerprint and insert a confirmed-rejection idempotency row
-    const row = betLog.getById(betId)!;
+    const row = (await betLog.getById(betId))!;
     const winReqStableFields = {
       playerId: row.playerId,
       sessionId: row.sessionId,
@@ -603,7 +625,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
         balanceMinor: undefined,
       },
     });
-    betLog.putIdempotency({
+    await betLog.putIdempotency({
       txnId: winTxnId,
       operatorId: OPERATOR_A_ID,
       kind: 'win',
@@ -613,15 +635,15 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     });
 
     // Step 3: Transition betLog row to SETTLING → WIN_FAILED with the winTxnId
-    betLog.transition(betId, 'cashout_requested', {
+    await betLog.transition(betId, 'cashout_requested', {
       winTxnId,
       multiplier: 2.0,
       winAmountMinor: 10_000,
     });
-    betLog.transition(betId, 'win_failed', { errorCode: 'BET_LIMIT_EXCEEDED' });
-    expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+    await betLog.transition(betId, 'win_failed', { errorCode: 'BET_LIMIT_EXCEEDED' });
+    expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 
-    db.exec('DELETE FROM admin_audit');
+    await testDb.pool.query('DELETE FROM admin_audit');
     // Step 4 & 5: Force-credit — WalletClient finds the idempotency entry and
     // replays the WalletError immediately (no HTTP call → no timeout).
     const res = await adminRequest(betId, { reason: 'operator BET_LIMIT_EXCEEDED — still refusing' });
@@ -633,10 +655,10 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(res.body.error).toBeTruthy();
 
     // Row must still be WIN_FAILED
-    expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+    expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 
     // Audit row with result 'failed'
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await listAuditUntil((rows) => rows.some((r) => r.action === 'force_credit'));
     const forceCreditRows = auditRows.filter((r) => r.action === 'force_credit');
     expect(forceCreditRows).toHaveLength(1);
     const failedAuditRow = forceCreditRows[0]!;
@@ -653,17 +675,19 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     // Register a third operator and create a WIN_FAILED row for it
     const OP_C_ID = 'op-c-paused';
     try {
-      registry.create({
+      await registry.create({
         operatorId: OP_C_ID,
         name: 'Operator C (paused)',
         walletBaseUrl: `http://localhost:${stubPort}`,
         currencies: [CURRENCY],
         status: 'active',
       });
-      db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-        STUB_DEFAULT_KEY_B64,
-        OP_C_ID,
+      await testDb.pool.query(
+        `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+        [STUB_DEFAULT_KEY_B64, OP_C_ID],
       );
+      // Reflect the out-of-band signing-key patch in the in-memory cache.
+      await registry.refresh();
     } catch {
       // may already exist
     }
@@ -672,7 +696,7 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     const betId = uid('bet');
     const betTxnId = uid('btxn');
     const winTxnId = uid('wtxn');
-    betLog.create({
+    await betLog.create({
       betId,
       operatorId: OP_C_ID,
       playerId: 'pid-1',
@@ -682,19 +706,20 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
       amountMinor: 5_000,
       betTxnId,
     });
-    betLog.transition(betId, 'bet_accepted', { betOpTxnId: 'fake-op-txn-c' });
-    betLog.transition(betId, 'cashout_requested', {
+    await betLog.transition(betId, 'bet_accepted', { betOpTxnId: 'fake-op-txn-c' });
+    await betLog.transition(betId, 'cashout_requested', {
       winTxnId,
       multiplier: 2.0,
       winAmountMinor: 10_000,
     });
-    betLog.transition(betId, 'win_failed', { errorCode: 'UPSTREAM_ERROR' });
+    await betLog.transition(betId, 'win_failed', { errorCode: 'UPSTREAM_ERROR' });
 
-    expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+    expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 
     // Pause the operator — walletClientCache.get() returns null
-    db.prepare(`UPDATE operators SET status = 'paused' WHERE operator_id = ?`).run(OP_C_ID);
-    // Invalidate cache so the paused status is picked up
+    await testDb.pool.query(`UPDATE operators SET status = 'paused' WHERE operator_id = $1`, [OP_C_ID]);
+    // Refresh the registry cache + invalidate the client cache so the paused status is picked up
+    await registry.refresh();
     walletClientCache.invalidate(OP_C_ID);
 
     const res = await adminRequest(betId, { reason: 'operator paused, testing unavailable path' });
@@ -703,10 +728,15 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(res.body.error.code).toBe('OPERATOR_UNAVAILABLE');
 
     // Row stays WIN_FAILED
-    expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+    expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 
     // Audit row with result operator_unavailable
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await listAuditUntil((rows) =>
+      rows.some(
+        (r) => r.target === betId &&
+          (r.payload as Record<string, unknown>)['result'] === 'operator_unavailable',
+      ),
+    );
     const unavailableRow = auditRows.find(
       (r) => r.target === betId &&
         (r.payload as Record<string, unknown>)['result'] === 'operator_unavailable',
@@ -714,7 +744,8 @@ describe('POST /admin/v1/bet-log/:betId/force-credit', () => {
     expect(unavailableRow).toBeDefined();
 
     // Restore operator to active for other tests
-    db.prepare(`UPDATE operators SET status = 'active' WHERE operator_id = ?`).run(OP_C_ID);
+    await testDb.pool.query(`UPDATE operators SET status = 'active' WHERE operator_id = $1`, [OP_C_ID]);
+    await registry.refresh();
     walletClientCache.invalidate(OP_C_ID);
   });
 });

@@ -5,10 +5,10 @@
  * Uses an in-memory OperatorRegistry and injectable clock/NonceCache for determinism.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import type { Request, Response } from 'express';
-import Database from 'better-sqlite3';
-import { OperatorRegistry, NonceCache, sign } from '@crash/wallet';
+import { PgOperatorRegistry, NonceCache, sign } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import type { Operator } from '@crash/wallet';
 import {
   verifyOperatorSignature,
@@ -112,21 +112,30 @@ function buildSignedReq(opts: BuildSignedReqOpts): FakeRequest {
 // Test suite setup
 // ---------------------------------------------------------------------------
 
-let registry: OperatorRegistry;
+let registry: PgOperatorRegistry;
 let operator: Operator;
 let operatorApiKey: string;
 let operatorSigningKey: Buffer;
 
+// Track every TestDb created so afterEach can drop the isolated schemas.
+const testDbs: TestDb[] = [];
+
+afterEach(async () => {
+  for (const t of testDbs) await t.cleanup();
+  testDbs.length = 0;
+});
+
 /**
- * Creates a fresh in-memory registry + one operator before each test.
+ * Creates a fresh isolated Postgres registry + one operator per test.
  * Also returns a shared NonceCache with the injectable clock so tests
  * control time deterministically.
  */
-function freshSetup(): { sharedNonceCache: NonceCache } {
-  const db = new Database(':memory:');
-  registry = new OperatorRegistry(db);
+async function freshSetup(): Promise<{ sharedNonceCache: NonceCache }> {
+  const testDb = await makeTestDb();
+  testDbs.push(testDb);
+  registry = new PgOperatorRegistry(testDb.pool);
 
-  const { operator: op, credentials } = registry.create({
+  const { operator: op, credentials } = await registry.create({
     operatorId: 'op-test-001',
     name: 'Test Operator',
     walletBaseUrl: 'http://localhost:4000',
@@ -179,7 +188,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 1: happy path ──────────────────────────────────────────────────
 
   it('happy path: correctly signed request → next() called, req.operator populated', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     const req = buildSignedReq({
       apiKey: operatorApiKey,
@@ -201,7 +210,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 2: missing header ──────────────────────────────────────────────
 
   it('missing X-Signature → 401 INVALID_REQUEST, next not called', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     const req = buildSignedReq({
       apiKey: operatorApiKey,
@@ -223,7 +232,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 3: unknown API key ─────────────────────────────────────────────
 
   it('unknown apiKey → 401 INVALID_SIGNATURE, next not called', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     const req = buildSignedReq({
       apiKey: 'ak_live_doesnotexist',
@@ -243,7 +252,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 4: bad signature ───────────────────────────────────────────────
 
   it('bad signature (wrong key) → 401 INVALID_SIGNATURE, next not called', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     const wrongKey = Buffer.alloc(32, 0xde); // random wrong key
     const req = buildSignedReq({
@@ -264,7 +273,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 5: body tamper ─────────────────────────────────────────────────
 
   it('body tamper: signed over body A, delivered rawBody B → 401 INVALID_SIGNATURE', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     const originalBody = Buffer.from(JSON.stringify({ playerId: 'pid-1' }));
     const tamperedBody = Buffer.from(JSON.stringify({ playerId: 'pid-EVIL' }));
@@ -290,7 +299,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 6: stale timestamp ─────────────────────────────────────────────
 
   it('stale timestamp (>300s) → 401 STALE_REQUEST; timestamp at exactly 300s is accepted', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     // Stale: timestamp = now - 301
     const staleTs = FIXED_NOW_SECONDS - 301;
@@ -334,7 +343,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 7: replayed nonce ──────────────────────────────────────────────
 
   it('replayed nonce: first call succeeds, second → 401 NONCE_REUSED', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
     const fixedNonce = 'nonce-replay-test-fixed';
 
     // First request — should succeed
@@ -370,7 +379,7 @@ describe('verifyOperatorSignature', () => {
   });
 
   it('bad-sig request does NOT poison nonce: attacker sends bad-sig, real request with same nonce still succeeds', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
     const contestedNonce = 'nonce-contested-by-attacker';
 
     // Attacker sends invalid signature with the nonce
@@ -408,10 +417,10 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 8: paused operator ─────────────────────────────────────────────
 
   it('paused operator → 403 OPERATOR_PAUSED, next not called', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     // Pause the operator
-    registry.update(operator.operatorId, { status: 'paused' });
+    await registry.update(operator.operatorId, { status: 'paused' });
 
     const req = buildSignedReq({
       apiKey: operatorApiKey,
@@ -430,9 +439,10 @@ describe('verifyOperatorSignature', () => {
 
   it('sandbox operator → proceeds (next called)', async () => {
     // Create a sandbox operator specifically
-    const db = new Database(':memory:');
-    const sandboxRegistry = new OperatorRegistry(db);
-    const { operator: sandboxOp, credentials: sandboxCreds } = sandboxRegistry.create({
+    const testDb = await makeTestDb();
+    testDbs.push(testDb);
+    const sandboxRegistry = new PgOperatorRegistry(testDb.pool);
+    const { operator: sandboxOp, credentials: sandboxCreds } = await sandboxRegistry.create({
       operatorId: 'op-sandbox-001',
       name: 'Sandbox Operator',
       walletBaseUrl: 'http://localhost:4000',
@@ -475,7 +485,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 11: rawBody absent → fail closed ───────────────────────────────
 
   it('rawBody absent: falls back to empty body hash → 401 INVALID_SIGNATURE, next not called', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     // Build a correctly-signed request (with a real body)
     const req = buildSignedReq({
@@ -501,7 +511,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 12: array-typed header → INVALID_REQUEST ──────────────────────
 
   it('array-typed header (x-signature is string[]): 401 INVALID_REQUEST, next not called', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     const req = buildSignedReq({
       apiKey: operatorApiKey,
@@ -524,7 +534,7 @@ describe('verifyOperatorSignature', () => {
   // ─── Test 13: getSignedPath option is honored ────────────────────────────
 
   it('getSignedPath: injected extractor is used; default req.path fails the same request', async () => {
-    const { sharedNonceCache } = freshSetup();
+    const { sharedNonceCache } = await freshSetup();
 
     // Operator signs for the FULL external path /op/balance
     const fullPath = '/op/balance';

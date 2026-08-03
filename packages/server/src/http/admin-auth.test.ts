@@ -66,36 +66,44 @@ vi.mock('../game/history.js', () => ({
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import Database from 'better-sqlite3';
-import { OperatorRegistry } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
+import { PgOperatorRegistry } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 
-import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
+import { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
 import { createAdminRouter } from './admin.js';
 import { signAdminJwt } from './middleware/admin-auth.js';
 import { WalletClientCache } from '../wallet/client-cache.js';
-import { BetLog } from '@crash/wallet';
+import { PgBetLog } from '@crash/wallet';
 
 // ---------------------------------------------------------------------------
-// Test harness factory — creates a fresh in-memory env per test
+// Test harness factory — creates a fresh isolated Postgres schema per test
 // ---------------------------------------------------------------------------
+
+// Per-test Postgres schemas created via makeTestDb(); cleaned up in afterEach.
+const openDbs: TestDb[] = [];
+async function newTestDb(): Promise<TestDb> {
+  const db = await makeTestDb();
+  openDbs.push(db);
+  return db;
+}
 
 interface TestHarness {
   app: express.Application;
-  adminUsers: AdminUsers;
-  adminAudit: AdminAudit;
-  registry: OperatorRegistry;
+  adminUsers: PgAdminUsers;
+  adminAudit: PgAdminAudit;
+  registry: PgOperatorRegistry;
   revoked: Set<string>;
-  db: InstanceType<typeof Database>;
+  pool: TestDb['pool'];
   walletClientCache: WalletClientCache;
 }
 
-function makeHarness(): TestHarness {
-  const db = new Database(':memory:');
-  const betLog = new BetLog(db);
-  const registry = new OperatorRegistry(db);
-  const adminAudit = new AdminAudit(db);
-  const adminUsers = new AdminUsers(db);
+async function makeHarness(): Promise<TestHarness> {
+  const { pool } = await newTestDb();
+  const betLog = new PgBetLog(pool);
+  const registry = new PgOperatorRegistry(pool);
+  const adminAudit = new PgAdminAudit(pool);
+  const adminUsers = new PgAdminUsers(pool);
   const revoked = new Set<string>();
   const walletClientCache = new WalletClientCache(registry, betLog);
 
@@ -110,7 +118,27 @@ function makeHarness(): TestHarness {
     revoked,
   }));
 
-  return { app, adminUsers, adminAudit, registry, revoked, db, walletClientCache };
+  return { app, adminUsers, adminAudit, registry, revoked, pool, walletClientCache };
+}
+
+/**
+ * The admin router writes audit rows via fire-and-forget `record()` (returns
+ * void, does not await the INSERT). Poll the audit log until `pred` is satisfied
+ * so assertions don't race the in-flight write.
+ */
+type AuditRows = Awaited<ReturnType<PgAdminAudit['list']>>;
+async function waitForAudit(
+  adminAudit: PgAdminAudit,
+  pred: (rows: AuditRows) => boolean,
+  tries = 100,
+): Promise<AuditRows> {
+  let rows: AuditRows = [];
+  for (let i = 0; i < tries; i++) {
+    rows = await adminAudit.list({ limit: 100 });
+    if (pred(rows)) return rows;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,12 +153,13 @@ beforeEach(() => {
   process.env['JWT_SECRET'] = TEST_SECRET;
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (savedJwtSecret === undefined) {
     delete process.env['JWT_SECRET'];
   } else {
     process.env['JWT_SECRET'] = savedJwtSecret;
   }
+  await Promise.all(openDbs.splice(0).map((d) => d.cleanup()));
 });
 
 // ---------------------------------------------------------------------------
@@ -159,8 +188,8 @@ async function loginAs(
 
 describe('POST /admin/v1/auth/login', () => {
   it('happy path: returns token, expiresAt, roles (200)', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const res = await request(app)
       .post('/admin/v1/auth/login')
@@ -175,8 +204,8 @@ describe('POST /admin/v1/auth/login', () => {
   });
 
   it('wrong password → 401 INVALID_CREDENTIALS', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const res = await request(app)
       .post('/admin/v1/auth/login')
@@ -187,7 +216,7 @@ describe('POST /admin/v1/auth/login', () => {
   });
 
   it('unknown user → same 401 INVALID_CREDENTIALS (no enumeration)', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
 
     const unknownRes = await request(app)
       .post('/admin/v1/auth/login')
@@ -198,8 +227,8 @@ describe('POST /admin/v1/auth/login', () => {
   });
 
   it('wrong password and unknown user responses are identical (no enumeration)', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const wrongPassRes = await request(app)
       .post('/admin/v1/auth/login')
@@ -216,8 +245,8 @@ describe('POST /admin/v1/auth/login', () => {
 
   it('JWT_SECRET unset → 503 ADMIN_DISABLED', async () => {
     delete process.env['JWT_SECRET'];
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const res = await request(app)
       .post('/admin/v1/auth/login')
@@ -228,7 +257,7 @@ describe('POST /admin/v1/auth/login', () => {
   });
 
   it('missing username → 400 INVALID_REQUEST', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
     const res = await request(app)
       .post('/admin/v1/auth/login')
       .send({ password: 'pw' });
@@ -237,7 +266,7 @@ describe('POST /admin/v1/auth/login', () => {
   });
 
   it('missing password → 400 INVALID_REQUEST', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
     const res = await request(app)
       .post('/admin/v1/auth/login')
       .send({ username: 'alice' });
@@ -252,8 +281,8 @@ describe('POST /admin/v1/auth/login', () => {
 
 describe('requireAdminJwt', () => {
   it('no Authorization header → 401 INVALID_JWT', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const res = await request(app).get('/admin/v1/me');
     expect(res.status).toBe(401);
@@ -261,7 +290,7 @@ describe('requireAdminJwt', () => {
   });
 
   it('malformed bearer → 401 INVALID_JWT', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
     const res = await request(app)
       .get('/admin/v1/me')
       .set('Authorization', 'Bearer not-a-real-jwt');
@@ -300,7 +329,7 @@ describe('requireAdminJwt', () => {
   });
 
   it('expired token → 401 INVALID_JWT', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
 
     // Sign a token that expired 2 hours ago
     const nowSeconds = () => Math.floor(Date.now() / 1000) - 7200;
@@ -318,8 +347,8 @@ describe('requireAdminJwt', () => {
   });
 
   it('revoked token (login→logout→reuse) → 401 INVALID_JWT', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'secret');
 
@@ -338,8 +367,8 @@ describe('requireAdminJwt', () => {
   });
 
   it('JWT_SECRET changed after login → 401 INVALID_JWT (token signed with old secret)', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'secret');
 
@@ -361,8 +390,8 @@ describe('requireAdminJwt', () => {
 
 describe('requireRole', () => {
   it('viewer role → admin-only route (GET /admins) → 403 FORBIDDEN', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
 
     const { token } = await loginAs(app, 'viewer1', 'pw');
     const res = await request(app)
@@ -374,8 +403,8 @@ describe('requireRole', () => {
   });
 
   it('admin role → any route (superuser per spec §1.3) → passes', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('superadmin', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('superadmin', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'superadmin', 'pw');
     // GET /admins requires role 'admin' — should pass
@@ -387,8 +416,8 @@ describe('requireRole', () => {
   });
 
   it('finance role → admin-only route → 403 FORBIDDEN', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('financer', await bcrypt.hash('pw', 10), ['finance']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('financer', await bcrypt.hash('pw', 10), ['finance']);
 
     const { token } = await loginAs(app, 'financer', 'pw');
     const res = await request(app)
@@ -400,8 +429,8 @@ describe('requireRole', () => {
   });
 
   it('support role → GET /me (any role) → 200', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('support1', await bcrypt.hash('pw', 10), ['support']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('support1', await bcrypt.hash('pw', 10), ['support']);
 
     const { token } = await loginAs(app, 'support1', 'pw');
     const res = await request(app)
@@ -419,41 +448,41 @@ describe('requireRole', () => {
 
 describe('Bootstrap idempotency', () => {
   it('count()=0 + create → count becomes 1', async () => {
-    const db = new Database(':memory:');
-    const adminUsers = new AdminUsers(db);
+    const { pool } = await newTestDb();
+    const adminUsers = new PgAdminUsers(pool);
 
-    expect(adminUsers.count()).toBe(0);
-    adminUsers.create('root', 'hash', ['admin']);
-    expect(adminUsers.count()).toBe(1);
+    expect(await adminUsers.count()).toBe(0);
+    await adminUsers.create('root', 'hash', ['admin']);
+    expect(await adminUsers.count()).toBe(1);
   });
 
   it('second create with same username throws DuplicateAdminError (bootstrap skip if count>0)', async () => {
-    const db = new Database(':memory:');
-    const adminUsers = new AdminUsers(db);
+    const { pool } = await newTestDb();
+    const adminUsers = new PgAdminUsers(pool);
 
-    adminUsers.create('root', 'hash1', ['admin']);
+    await adminUsers.create('root', 'hash1', ['admin']);
     // Simulate bootstrap check: if count>0, skip
-    expect(adminUsers.count()).toBeGreaterThan(0);
+    expect(await adminUsers.count()).toBeGreaterThan(0);
 
     // If bootstrap blindly called create again, it would throw DuplicateAdminError
     const { DuplicateAdminError: DAE } = await import('../admin/admin-store.js');
-    expect(() => adminUsers.create('root', 'hash2', ['admin'])).toThrow(DAE);
+    await expect(adminUsers.create('root', 'hash2', ['admin'])).rejects.toThrow(DAE);
   });
 
   it('pre-existing admin: bootstrap skips, original not overwritten', async () => {
-    const db = new Database(':memory:');
-    const adminUsers = new AdminUsers(db);
+    const { pool } = await newTestDb();
+    const adminUsers = new PgAdminUsers(pool);
 
     // Pre-existing admin
-    adminUsers.create('root', 'original-hash', ['admin']);
-    const before = adminUsers.getByUsername('root')!;
+    await adminUsers.create('root', 'original-hash', ['admin']);
+    const before = (await adminUsers.getByUsername('root'))!;
 
     // Bootstrap simulation: count>0 → skip
-    if (adminUsers.count() === 0) {
-      adminUsers.create('root', 'new-hash', ['admin']);
+    if (await adminUsers.count() === 0) {
+      await adminUsers.create('root', 'new-hash', ['admin']);
     }
 
-    const after = adminUsers.getByUsername('root')!;
+    const after = (await adminUsers.getByUsername('root'))!;
     expect(after.passwordHash).toBe(before.passwordHash);
   });
 });
@@ -464,8 +493,8 @@ describe('Bootstrap idempotency', () => {
 
 describe('GET /admin/v1/me', () => {
   it('returns username, roles, lastLoginAt', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin', 'finance']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('secret', 10), ['admin', 'finance']);
 
     const { token } = await loginAs(app, 'alice', 'secret');
     const res = await request(app)
@@ -485,8 +514,8 @@ describe('GET /admin/v1/me', () => {
 
 describe('/admin/v1/admins CRUD', () => {
   it('create admin (POST /admins) → 201, list (GET /admins) includes it', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -510,9 +539,9 @@ describe('/admin/v1/admins CRUD', () => {
   });
 
   it('duplicate username → 409 DUPLICATE_ADMIN', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    adminUsers.create('bob', await bcrypt.hash('pw', 10), ['support']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await adminUsers.create('bob', await bcrypt.hash('pw', 10), ['support']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -526,9 +555,9 @@ describe('/admin/v1/admins CRUD', () => {
   });
 
   it('PATCH /admins/:username updates roles', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    adminUsers.create('bob', await bcrypt.hash('pw', 10), ['support']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await adminUsers.create('bob', await bcrypt.hash('pw', 10), ['support']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -542,8 +571,8 @@ describe('/admin/v1/admins CRUD', () => {
   });
 
   it('PATCH /admins/:username → 404 for unknown user', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -557,9 +586,9 @@ describe('/admin/v1/admins CRUD', () => {
   });
 
   it('DELETE /admins/:username deletes the user', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    adminUsers.create('bob', await bcrypt.hash('pw', 10), ['support']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await adminUsers.create('bob', await bcrypt.hash('pw', 10), ['support']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -568,12 +597,12 @@ describe('/admin/v1/admins CRUD', () => {
       .set('Authorization', `Bearer ${token}`);
 
     expect(delRes.status).toBe(204);
-    expect(adminUsers.getByUsername('bob')).toBeNull();
+    expect(await adminUsers.getByUsername('bob')).toBeNull();
   });
 
   it('cannot delete self → 409 CANNOT_DELETE_SELF', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -586,8 +615,8 @@ describe('/admin/v1/admins CRUD', () => {
   });
 
   it('DELETE non-existent → 404 ADMIN_NOT_FOUND', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -600,8 +629,8 @@ describe('/admin/v1/admins CRUD', () => {
   });
 
   it('POST /admins with invalid role → 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -623,8 +652,8 @@ describe('/admin/v1/admins CRUD', () => {
 
 describe('/admin/v1/operators CRUD', () => {
   it('create operator → 201 with credentials; GET /operators no apiKey/signingKey leak', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -660,9 +689,9 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('GET /operators/:id returns shape incl. games + limits', async () => {
-    const { app, adminUsers, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({
+    const { app, adminUsers, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({
       operatorId: 'betco',
       name: 'BetCo',
       walletBaseUrl: 'https://wallet.betco.com',
@@ -689,8 +718,8 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('GET /operators/:id → 404 for unknown operator', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
     const res = await request(app)
@@ -702,9 +731,9 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('PATCH /operators/:id updates name', async () => {
-    const { app, adminUsers, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({
+    const { app, adminUsers, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({
       operatorId: 'patch-op',
       name: 'Old Name',
       walletBaseUrl: 'https://wallet.old.com',
@@ -723,9 +752,9 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('PATCH /operators/:id with status → 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({
+    const { app, adminUsers, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({
       operatorId: 'status-op',
       name: 'Status Op',
       walletBaseUrl: 'https://wallet.test.com',
@@ -743,9 +772,9 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('regen-signing-key → new key returned; invalidate called; second GET /credentials → 404 CREDENTIALS_NOT_VISIBLE', async () => {
-    const { app, adminUsers, registry, walletClientCache } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({
+    const { app, adminUsers, registry, walletClientCache } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({
       operatorId: 'regen-op',
       name: 'Regen Op',
       walletBaseUrl: 'https://wallet.test.com',
@@ -780,9 +809,9 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('pause → status paused; resume → status active', async () => {
-    const { app, adminUsers, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({
+    const { app, adminUsers, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({
       operatorId: 'toggle-op',
       name: 'Toggle Op',
       walletBaseUrl: 'https://wallet.test.com',
@@ -811,8 +840,8 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('GET /operators/:id/credentials after create → returns once then 404 CREDENTIALS_NOT_VISIBLE', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -843,9 +872,9 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('duplicate operatorId → 409 DUPLICATE_OPERATOR', async () => {
-    const { app, adminUsers, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({
+    const { app, adminUsers, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({
       operatorId: 'dup-op',
       name: 'Dup Op',
       walletBaseUrl: 'https://wallet.dup.com',
@@ -869,10 +898,10 @@ describe('/admin/v1/operators CRUD', () => {
   });
 
   it('GET /operators ?q= filters by name substring (case-insensitive)', async () => {
-    const { app, adminUsers, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({ operatorId: 'alpha-op', name: 'Alpha Casino', walletBaseUrl: 'https://a.test', currencies: ['EUR'] });
-    registry.create({ operatorId: 'beta-op', name: 'Beta Slots', walletBaseUrl: 'https://b.test', currencies: ['EUR'] });
+    const { app, adminUsers, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({ operatorId: 'alpha-op', name: 'Alpha Casino', walletBaseUrl: 'https://a.test', currencies: ['EUR'] });
+    await registry.create({ operatorId: 'beta-op', name: 'Beta Slots', walletBaseUrl: 'https://b.test', currencies: ['EUR'] });
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -892,8 +921,8 @@ describe('/admin/v1/operators CRUD', () => {
 
 describe('Audit rows', () => {
   it('login success + failure audit rows have correct actor and action', async () => {
-    const { app, adminUsers, adminAudit } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers, adminAudit } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     // Failed login
     await request(app)
@@ -905,7 +934,10 @@ describe('Audit rows', () => {
       .post('/admin/v1/auth/login')
       .send({ username: 'alice', password: 'pw' });
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await waitForAudit(
+      adminAudit,
+      (rows) => rows.filter((r) => r.action === 'auth.login').length >= 2,
+    );
     const loginRows = auditRows.filter((r) => r.action === 'auth.login');
     expect(loginRows.length).toBeGreaterThanOrEqual(2);
 
@@ -919,8 +951,8 @@ describe('Audit rows', () => {
   });
 
   it('logout audit row written', async () => {
-    const { app, adminUsers, adminAudit } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers, adminAudit } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -928,15 +960,18 @@ describe('Audit rows', () => {
       .post('/admin/v1/auth/logout')
       .set('Authorization', `Bearer ${token}`);
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await waitForAudit(
+      adminAudit,
+      (rows) => rows.some((r) => r.action === 'auth.logout'),
+    );
     const logoutRow = auditRows.find((r) => r.action === 'auth.logout');
     expect(logoutRow).toBeDefined();
     expect(logoutRow!.actor).toBe('alice');
   });
 
   it('operator.create audit row written with actor', async () => {
-    const { app, adminUsers, adminAudit } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers, adminAudit } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -950,7 +985,10 @@ describe('Audit rows', () => {
         currencies: ['EUR'],
       });
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await waitForAudit(
+      adminAudit,
+      (rows) => rows.some((r) => r.action === 'operator.create'),
+    );
     const createRow = auditRows.find((r) => r.action === 'operator.create');
     expect(createRow).toBeDefined();
     expect(createRow!.actor).toBe('alice');
@@ -958,9 +996,9 @@ describe('Audit rows', () => {
   });
 
   it('operator.pause audit row includes reason', async () => {
-    const { app, adminUsers, adminAudit, registry } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
-    registry.create({ operatorId: 'pause-audit-op', name: 'Pause Audit', walletBaseUrl: 'https://test.com', currencies: ['EUR'] });
+    const { app, adminUsers, adminAudit, registry } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    await registry.create({ operatorId: 'pause-audit-op', name: 'Pause Audit', walletBaseUrl: 'https://test.com', currencies: ['EUR'] });
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -969,15 +1007,18 @@ describe('Audit rows', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ reason: 'fraud investigation' });
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await waitForAudit(
+      adminAudit,
+      (rows) => rows.some((r) => r.action === 'operator.pause'),
+    );
     const pauseRow = auditRows.find((r) => r.action === 'operator.pause');
     expect(pauseRow).toBeDefined();
     expect((pauseRow!.payload as Record<string, unknown>)?.['reason']).toBe('fraud investigation');
   });
 
   it('admin.create audit row written', async () => {
-    const { app, adminUsers, adminAudit } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers, adminAudit } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 
@@ -986,7 +1027,10 @@ describe('Audit rows', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ username: 'newbie', password: 'pw', roles: ['viewer'] });
 
-    const auditRows = adminAudit.list({ limit: 100 });
+    const auditRows = await waitForAudit(
+      adminAudit,
+      (rows) => rows.some((r) => r.action === 'admin.create'),
+    );
     const createRow = auditRows.find((r) => r.action === 'admin.create');
     expect(createRow).toBeDefined();
     expect(createRow!.actor).toBe('alice');
@@ -1000,8 +1044,8 @@ describe('Audit rows', () => {
 
 describe('POST /admin/v1/auth/logout', () => {
   it('logout → 204; subsequent use of same token → 401 INVALID_JWT', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('alice', await bcrypt.hash('pw', 10), ['admin']);
 
     const { token } = await loginAs(app, 'alice', 'pw');
 

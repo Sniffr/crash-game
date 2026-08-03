@@ -126,8 +126,8 @@ vi.mock('../game/round.js', () => ({
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, GamesRepo } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry, PgGamesRepo } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import type { Server } from 'node:http';
 
 import {
@@ -153,10 +153,10 @@ const SIGNING_KEY = Buffer.from(STUB_DEFAULT_KEY_B64, 'base64');
 let stubServer: Server;
 let stubPort: number;
 
-// In-memory SQLite db (no file I/O)
-let db: InstanceType<typeof Database>;
-let registry: OperatorRegistry;
-let betLog: BetLog;
+// Isolated Postgres schema per test file
+let testDb: TestDb;
+let registry: PgOperatorRegistry;
+let betLog: PgBetLog;
 let cache: WalletClientCache;
 let expressApp: express.Application;
 
@@ -172,13 +172,13 @@ beforeAll(async () => {
   stubPort = typeof addr === 'object' && addr !== null ? addr.port : 0;
   if (!stubPort) throw new Error('Could not determine stub port');
 
-  // 2. Create in-memory registry + register test operator pointing at stub
-  db = new Database(':memory:');
-  betLog = new BetLog(db);
-  registry = new OperatorRegistry(db);
-  const games = new GamesRepo(db);
+  // 2. Create isolated Postgres registry + register test operator pointing at stub
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
+  registry = new PgOperatorRegistry(testDb.pool);
+  const games = new PgGamesRepo(testDb.pool);
 
-  registry.create({
+  await registry.create({
     operatorId: 'op-test',
     name: 'Test Operator',
     walletBaseUrl: `http://localhost:${stubPort}`,
@@ -187,17 +187,17 @@ beforeAll(async () => {
   });
 
   // Catalogue: galaxy-crash exists and is enabled for op-test (default game).
-  games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: 'sprite', rtp: 0.97, theme: { gameType: 'sprite' } });
-  games.setOperatorGame('op-test', 'galaxy-crash', { enabled: true });
+  await games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: 'sprite', rtp: 0.97, theme: { gameType: 'sprite' } });
+  await games.setOperatorGame('op-test', 'galaxy-crash', { enabled: true });
 
-  // Override the auto-generated signing key with the stub's fixed key
-  // by using the regenSigningKey mechanism — but that generates a random key.
-  // Instead, we re-insert the operator with the correct signing key using
-  // the registry's underlying db directly.
-  db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-    STUB_DEFAULT_KEY_B64,
-    'op-test',
+  // Override the auto-generated signing key with the stub's fixed key via raw
+  // SQL, then refresh the registry cache so the signature middleware (sync
+  // getByApiKey read) sees the correct key.
+  await testDb.pool.query(
+    `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+    [STUB_DEFAULT_KEY_B64, 'op-test'],
   );
+  await registry.refresh();
 
   // 3. Build WalletClientCache + Express app
   cache = new WalletClientCache(registry, betLog);
@@ -211,7 +211,7 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) =>
     stubServer.close((err) => (err ? reject(err) : resolve())),
   );
-  db.close();
+  await testDb.cleanup();
 });
 
 beforeEach(() => {
@@ -310,17 +310,18 @@ describe('GET /launch', () => {
 
   it('paused operator → 404 error, stub never receives authenticate request', async () => {
     // Register a paused operator
-    registry.create({
+    await registry.create({
       operatorId: 'op-paused',
       name: 'Paused Operator',
       walletBaseUrl: `http://localhost:${stubPort}`,
       currencies: ['EUR'],
       status: 'paused',
     });
-    db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-      STUB_DEFAULT_KEY_B64,
-      'op-paused',
+    await testDb.pool.query(
+      `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+      [STUB_DEFAULT_KEY_B64, 'op-paused'],
     );
+    await registry.refresh();
 
     // Add a valid token for pid-1 — but the operator is paused so it shouldn't reach the stub
     // (The stub is shared; resetStubState() already ran in beforeEach so tok-pid-1 is valid)

@@ -88,8 +88,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
 import crypto from 'node:crypto';
-import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import type { Server } from 'node:http';
 
 import {
@@ -102,7 +102,7 @@ import { setOperatorWiringDeps } from '../game/operator-deps.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
 import { verifyOperatorSignature } from './middleware/verify-operator-signature.js';
 import { createOperatorRouter } from './operator.js';
-import { OperatorAudit } from './operator-audit.js';
+import { PgOperatorAudit } from './operator-audit-pg.js';
 import { enforceTenantScope } from './middleware/tenant-scope.js';
 import type { OperatorAuthedRequest } from './middleware/verify-operator-signature.js';
 
@@ -169,9 +169,9 @@ const CURRENCY_USD = 'USD';
 let stubServer: Server;
 let stubPort: number;
 
-let db: InstanceType<typeof Database>;
-let registry: OperatorRegistry;
-let betLog: BetLog;
+let testDb: TestDb;
+let registry: PgOperatorRegistry;
+let betLog: PgBetLog;
 let walletClientCache: WalletClientCache;
 
 let OP_A_KEY: Buffer;
@@ -195,29 +195,31 @@ beforeAll(async () => {
   stubPort = typeof addr === 'object' && addr !== null ? addr.port : 0;
   if (!stubPort) throw new Error('Could not determine stub port');
 
-  // 2. In-memory SQLite
-  db = new Database(':memory:');
-  betLog = new BetLog(db);
-  registry = new OperatorRegistry(db);
+  // 2. Isolated Postgres schema
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
+  registry = new PgOperatorRegistry(testDb.pool);
 
   // Register operator A with two currencies (EUR + USD) to test per-currency fanout
-  registry.create({
+  await registry.create({
     operatorId: OPERATOR_A_ID,
     name: 'Router Test Operator A',
     walletBaseUrl: `http://localhost:${stubPort}`,
     currencies: [CURRENCY_EUR, CURRENCY_USD],
     status: 'active',
   });
-  db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-    STUB_DEFAULT_KEY_B64,
-    OPERATOR_A_ID,
+  await testDb.pool.query(
+    `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+    [STUB_DEFAULT_KEY_B64, OPERATOR_A_ID],
   );
+  // Raw signing-key write bypassed the registry cache — refresh so getById/getByApiKey see it.
+  await registry.refresh();
   const opA = registry.getById(OPERATOR_A_ID)!;
   OP_A_API_KEY = opA.apiKey;
   OP_A_KEY = Buffer.from(STUB_DEFAULT_KEY_B64, 'base64');
 
   // Register operator B — different signing key, used for cross-tenant tests
-  registry.create({
+  await registry.create({
     operatorId: OPERATOR_B_ID,
     name: 'Router Test Operator B',
     walletBaseUrl: `http://localhost:${stubPort}`,
@@ -248,7 +250,7 @@ beforeAll(async () => {
   testApp.use(
     '/op/v1',
     verifyOperatorSignature(registry, { getSignedPath: (req) => req.originalUrl.split('?')[0] }),
-    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit: new OperatorAudit(db) }),
+    createOperatorRouter({ betLog, registry, walletClientCache, operatorAudit: new PgOperatorAudit(testDb.pool) }),
   );
 });
 
@@ -256,7 +258,7 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) =>
     stubServer.close((err) => (err ? reject(err) : resolve())),
   );
-  db.close();
+  await testDb.cleanup();
 });
 
 beforeEach(() => {

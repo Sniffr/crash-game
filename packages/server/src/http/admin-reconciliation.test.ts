@@ -65,11 +65,11 @@ vi.mock('../game/history.js', () => ({
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import Database from 'better-sqlite3';
 import * as bcrypt from 'bcryptjs';
-import { BetLog, OperatorRegistry, Reconciler } from '@crash/wallet';
-import type { OperatorLedgerSource, OperatorLedgerTxn, CreateBetInput } from '@crash/wallet';
-import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
+import { PgBetLog, PgOperatorRegistry, PgReconciler, PgGamesRepo } from '@crash/wallet';
+import type { Pool, OperatorLedgerSource, OperatorLedgerTxn, CreateBetInput } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
+import { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
 import { createAdminRouter } from './admin.js';
 import { WalletClientCache } from '../wallet/client-cache.js';
 
@@ -79,28 +79,35 @@ import { WalletClientCache } from '../wallet/client-cache.js';
 
 interface Harness {
   app: express.Application;
-  db: InstanceType<typeof Database>;
-  betLog: BetLog;
-  adminAudit: AdminAudit;
-  adminUsers: AdminUsers;
-  registry: OperatorRegistry;
-  reconciler: Reconciler;
+  pool: Pool;
+  betLog: PgBetLog;
+  adminAudit: PgAdminAudit;
+  adminUsers: PgAdminUsers;
+  registry: PgOperatorRegistry;
+  reconciler: PgReconciler;
   /** mutable per-test: change between calls to vary what the operator ledger returns */
   setSource: (fn: OperatorLedgerSource) => void;
 }
 
-function makeHarness(): Harness {
-  const db = new Database(':memory:');
-  const betLog = new BetLog(db);
-  const registry = new OperatorRegistry(db);
-  const adminAudit = new AdminAudit(db);
-  const adminUsers = new AdminUsers(db);
+// Each makeHarness() call builds an isolated Postgres schema; track them so
+// afterEach can drop every schema created during the test.
+const activeDbs: TestDb[] = [];
+
+async function makeHarness(): Promise<Harness> {
+  const testDb = await makeTestDb();
+  activeDbs.push(testDb);
+  const pool = testDb.pool;
+  const betLog = new PgBetLog(pool);
+  const registry = new PgOperatorRegistry(pool);
+  const adminAudit = new PgAdminAudit(pool);
+  const adminUsers = new PgAdminUsers(pool);
+  const games = new PgGamesRepo(pool);
   const revoked = new Set<string>();
   const walletClientCache = new WalletClientCache(registry, betLog);
 
   let currentSource: OperatorLedgerSource = async () => [];
   const source: OperatorLedgerSource = (op, s, e) => currentSource(op, s, e);
-  const reconciler = new Reconciler(db, { source, betLog });
+  const reconciler = new PgReconciler(pool, { source, betLog });
 
   const app = express();
   app.use(express.json());
@@ -110,12 +117,13 @@ function makeHarness(): Harness {
     adminAudit,
     adminUsers,
     registry,
+    games,
     revoked,
     reconciler,
   }));
 
   return {
-    app, db, betLog, adminAudit, adminUsers, registry, reconciler,
+    app, pool, betLog, adminAudit, adminUsers, registry, reconciler,
     setSource: (fn) => { currentSource = fn; },
   };
 }
@@ -132,12 +140,15 @@ beforeEach(() => {
   process.env['JWT_SECRET'] = TEST_SECRET;
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (savedJwtSecret === undefined) {
     delete process.env['JWT_SECRET'];
   } else {
     process.env['JWT_SECRET'] = savedJwtSecret;
   }
+  // Drop every isolated schema created by makeHarness() during this test.
+  for (const d of activeDbs) await d.cleanup();
+  activeDbs.length = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -151,8 +162,8 @@ async function loginAs(app: express.Application, username: string, password: str
   return (res.body as { token?: string }).token ?? '';
 }
 
-function createTestOperator(registry: OperatorRegistry, operatorId: string): void {
-  registry.create({
+async function createTestOperator(registry: PgOperatorRegistry, operatorId: string): Promise<void> {
+  await registry.create({
     operatorId,
     name: `Operator ${operatorId}`,
     walletBaseUrl: `https://wallet-${operatorId}.example.com`,
@@ -165,10 +176,10 @@ function createTestOperator(registry: OperatorRegistry, operatorId: string): voi
  * Seed one OUR-side bet+idempotency row so listIdempotencyFiltered surfaces it
  * inside the reconciliation window. Returns the txnId.
  */
-function seedBet(
-  betLog: BetLog,
+async function seedBet(
+  betLog: PgBetLog,
   opts: { operatorId: string; txnId: string; amountMinor: number; createdAt?: number },
-): string {
+): Promise<string> {
   const now = opts.createdAt ?? Math.floor(Date.now() / 1000);
   const input: CreateBetInput = {
     betId: `bet-${opts.txnId}`,
@@ -180,8 +191,8 @@ function seedBet(
     amountMinor: opts.amountMinor,
     betTxnId: opts.txnId,
   };
-  betLog.create(input);
-  betLog.putIdempotency({
+  await betLog.create(input);
+  await betLog.putIdempotency({
     txnId: opts.txnId,
     operatorId: opts.operatorId,
     kind: 'bet',
@@ -200,12 +211,12 @@ const aSourceReturning = (rows: OperatorLedgerTxn[]): OperatorLedgerSource => as
 
 describe('POST /admin/v1/reconciliation/runs', () => {
   it('admin → 202 with run id; audit row recorded; run visible via GET /:id with the seeded mismatch', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    createTestOperator(h.registry, 'op-1');
+    await createTestOperator(h.registry, 'op-1');
     const now = Math.floor(Date.now() / 1000);
     // Seed OUR txn — operator has nothing → missing_on_operator.
-    seedBet(h.betLog, { operatorId: 'op-1', txnId: 'tx-A', amountMinor: 1234, createdAt: now });
+    await seedBet(h.betLog, { operatorId: 'op-1', txnId: 'tx-A', amountMinor: 1234, createdAt: now });
     h.setSource(aSourceReturning([])); // operator empty ledger
 
     const token = await loginAs(h.app, 'admin1', 'pw');
@@ -221,7 +232,7 @@ describe('POST /admin/v1/reconciliation/runs', () => {
     expect(res.body.mismatchCount).toBe(1);
 
     // Audit row exists with the right action + target
-    const audit = h.adminAudit.listFiltered({ action: 'reconciliation.run' }, { limit: 50 });
+    const audit = await h.adminAudit.listFiltered({ action: 'reconciliation.run' }, { limit: 50 });
     expect(audit.rows.length).toBe(1);
     expect(audit.rows[0]!.target).toBe('op-1');
     expect(audit.rows[0]!.actor).toBe('admin1');
@@ -246,10 +257,10 @@ describe('POST /admin/v1/reconciliation/runs', () => {
   });
 
   it('finance role → 403; viewer → 403', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('finance1', await bcrypt.hash('pw', 10), ['finance']);
     await h.adminUsers.create('viewer1',  await bcrypt.hash('pw', 10), ['viewer']);
-    createTestOperator(h.registry, 'op-2');
+    await createTestOperator(h.registry, 'op-2');
 
     for (const u of ['finance1', 'viewer1']) {
       const token = await loginAs(h.app, u, 'pw');
@@ -262,7 +273,7 @@ describe('POST /admin/v1/reconciliation/runs', () => {
   });
 
   it('unknown operator → 404 OPERATOR_NOT_FOUND', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(h.app, 'admin1', 'pw');
 
@@ -276,9 +287,9 @@ describe('POST /admin/v1/reconciliation/runs', () => {
   });
 
   it('bad window — windowEnd <= windowStart → 400 INVALID_REQUEST', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    createTestOperator(h.registry, 'op-3');
+    await createTestOperator(h.registry, 'op-3');
     const token = await loginAs(h.app, 'admin1', 'pw');
 
     const res = await request(h.app)
@@ -291,9 +302,9 @@ describe('POST /admin/v1/reconciliation/runs', () => {
   });
 
   it('bad window — non-integer windowStart → 400 INVALID_REQUEST', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    createTestOperator(h.registry, 'op-4');
+    await createTestOperator(h.registry, 'op-4');
     const token = await loginAs(h.app, 'admin1', 'pw');
 
     const res = await request(h.app)
@@ -306,7 +317,7 @@ describe('POST /admin/v1/reconciliation/runs', () => {
   });
 
   it('missing operatorId → 400 INVALID_REQUEST', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(h.app, 'admin1', 'pw');
 
@@ -326,11 +337,11 @@ describe('POST /admin/v1/reconciliation/runs', () => {
 
 describe('GET /admin/v1/reconciliation/runs', () => {
   it('lists runs (any role; viewer ok); status filter narrows; bad status → 400', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     await h.adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
-    createTestOperator(h.registry, 'op-a');
-    createTestOperator(h.registry, 'op-b');
+    await createTestOperator(h.registry, 'op-a');
+    await createTestOperator(h.registry, 'op-b');
 
     const now = Math.floor(Date.now() / 1000);
 
@@ -339,7 +350,7 @@ describe('GET /admin/v1/reconciliation/runs', () => {
     await h.reconciler.run('op-a', now - 10, now + 10);  // OK (no our txns, no theirs)
 
     // op-b: 1 MISMATCHES run (seed one OUR txn, none on theirs).
-    seedBet(h.betLog, { operatorId: 'op-b', txnId: 'tx-B', amountMinor: 500, createdAt: now });
+    await seedBet(h.betLog, { operatorId: 'op-b', txnId: 'tx-B', amountMinor: 500, createdAt: now });
     h.setSource(aSourceReturning([]));
     await h.reconciler.run('op-b', now - 10, now + 10);
 
@@ -371,16 +382,17 @@ describe('GET /admin/v1/reconciliation/runs', () => {
   });
 
   it('keyset pagination traverses all pages with no dup/no gap', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     // Insert 5 completed runs directly for fast keyset coverage.
     const base = 1_800_000_000;
-    const insert = h.db.prepare(`
-      INSERT INTO reconciliation_runs
-        (operator_id, window_start, window_end, checked_count, mismatch_count, status, started_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
     for (let i = 0; i < 5; i++) {
-      insert.run('op-page', 0, 1, 0, 0, 'OK', base + i, base + i + 1);
+      await h.pool.query(
+        `INSERT INTO reconciliation_runs
+          (operator_id, window_start, window_end, checked_count, mismatch_count, status, started_at, finished_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        ['op-page', 0, 1, 0, 0, 'OK', base + i, base + i + 1],
+      );
     }
 
     const token = await loginAs(h.app, 'admin1', 'pw');
@@ -411,7 +423,7 @@ describe('GET /admin/v1/reconciliation/runs', () => {
 
 describe('GET /admin/v1/reconciliation/runs/:id', () => {
   it('unknown id → 404 RECONCILIATION_RUN_NOT_FOUND', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(h.app, 'admin1', 'pw');
 
@@ -423,7 +435,7 @@ describe('GET /admin/v1/reconciliation/runs/:id', () => {
   });
 
   it('non-integer id → 400 INVALID_REQUEST', async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(h.app, 'admin1', 'pw');
 

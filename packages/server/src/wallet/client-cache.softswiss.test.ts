@@ -20,13 +20,13 @@
 //     softswiss round-trip fired through the cache.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
-import Database from 'better-sqlite3';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 
-import { BetLog } from '@crash/wallet';
+import { PgBetLog } from '@crash/wallet';
 import type { Operator, OperatorRegistry } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 
 import { WalletClientCache } from './client-cache.js';
 
@@ -54,8 +54,15 @@ afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
 });
 
-beforeEach(() => {
+let testDb: TestDb;
+
+beforeEach(async () => {
   resetStubState();
+  testDb = await makeTestDb();
+});
+
+afterEach(async () => {
+  await testDb.cleanup();
 });
 
 /** Build a `softswiss` operator pointed at the in-process stub. */
@@ -90,7 +97,7 @@ function registryWith(op: Operator): OperatorRegistry {
 describe('WalletClientCache → softswiss adapter seam', () => {
   it('routes a softswiss operator bet through /callback and decodes a canonical BetResponse', async () => {
     const op = softswissOperator();
-    const betLog = new BetLog(new Database(':memory:'));
+    const betLog = new PgBetLog(testDb.pool);
     const cache = new WalletClientCache(registryWith(op), betLog);
 
     const client = cache.get('op-ss-seam');
@@ -126,7 +133,7 @@ describe('WalletClientCache → softswiss adapter seam', () => {
 
   it('the same cache returns the cached client on repeat get()', () => {
     const op = softswissOperator();
-    const betLog = new BetLog(new Database(':memory:'));
+    const betLog = new PgBetLog(testDb.pool);
     const cache = new WalletClientCache(registryWith(op), betLog);
     const a = cache.get('op-ss-seam');
     const b = cache.get('op-ss-seam');

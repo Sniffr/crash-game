@@ -37,8 +37,8 @@ vi.mock('../ws/hub.js', () => ({
 }));
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import type { Server } from 'node:http';
 import type { WebSocket } from 'ws';
 
@@ -78,7 +78,8 @@ const INITIAL_BALANCE = 100_000;
 
 let stubServer: Server;
 let port: number;
-let betLog: BetLog;
+let testDb: TestDb;
+let betLog: PgBetLog;
 let walletClientCache: WalletClientCache;
 
 // A minimal fake WebSocket object (we only need safeSend which is mocked)
@@ -96,12 +97,13 @@ beforeAll(async () => {
   port = typeof addr === 'object' && addr !== null ? addr.port : 0;
   if (!port) throw new Error('Could not determine stub server port');
 
-  // Build real operator registry + betLog (in-memory, same db so registry and betLog share schema)
-  const db = new Database(':memory:');
-  betLog = new BetLog(db);
-  const registry = new OperatorRegistry(db);
+  // Build real operator registry + betLog (isolated Postgres schema so registry
+  // and betLog share the same bootstrapped schema)
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
+  const registry = new PgOperatorRegistry(testDb.pool);
 
-  registry.create({
+  await registry.create({
     operatorId: OPERATOR_ID,
     name: 'Test Operator',
     walletBaseUrl: `http://localhost:${port}`,
@@ -109,11 +111,13 @@ beforeAll(async () => {
     status: 'active',
   });
 
-  // Override the auto-generated signing key with the stub's fixed key
-  db.prepare(`UPDATE operators SET signing_key_b64 = ? WHERE operator_id = ?`).run(
-    STUB_DEFAULT_KEY_B64,
-    OPERATOR_ID,
+  // Override the auto-generated signing key with the stub's fixed key, then
+  // refresh the registry cache so getByApiKey/getById see the fixed key.
+  await testDb.pool.query(
+    `UPDATE operators SET signing_key_b64 = $1 WHERE operator_id = $2`,
+    [STUB_DEFAULT_KEY_B64, OPERATOR_ID],
   );
+  await registry.refresh();
 
   walletClientCache = new WalletClientCache(registry, betLog);
 
@@ -125,6 +129,7 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) => {
     stubServer.close((err) => (err ? reject(err) : resolve()));
   });
+  await testDb.cleanup();
 });
 
 beforeEach(() => {
@@ -248,7 +253,7 @@ describe('WS handler operator discrimination', () => {
     expect(bet.isBot).toBe(false);
 
     // betLog row must be ARMED
-    const row = betLog.getById(bet.betId!);
+    const row = await betLog.getById(bet.betId!);
     expect(row?.state).toBe('ARMED');
     expect(row?.playerId).toBe(PLAYER_ID);
 
@@ -302,7 +307,7 @@ describe('WS handler operator discrimination', () => {
     expect(round.bets).toHaveLength(1);
     const bet = round.bets[0];
     expect(bet.betId).toBeTruthy();
-    expect(betLog.getById(bet.betId!)?.state).toBe('ARMED');
+    expect((await betLog.getById(bet.betId!))?.state).toBe('ARMED');
 
     // Now switch the round to FLYING and cashout
     const flyingRound = { ...round, phase: 'FLYING' as const, currentMultiplier: 2.0 };
@@ -322,7 +327,7 @@ describe('WS handler operator discrimination', () => {
     expect(bet.cashoutMultiplier).toBe(2.0);
 
     // betLog row must be SETTLED
-    const row = betLog.getById(bet.betId!);
+    const row = await betLog.getById(bet.betId!);
     expect(row?.state).toBe('SETTLED');
 
     // Stub balance: 100000 - 5000 + 10000 = 105000
@@ -389,7 +394,7 @@ describe('WS handler operator discrimination', () => {
 
     // betLog row must be VOIDED (placeOperatorBet transitions PENDING→VOIDED on confirmed rejection)
     const betId = `bet-${sessionId}-4`;
-    const betRow = betLog.getById(betId);
+    const betRow = await betLog.getById(betId);
     expect(betRow?.state).toBe('VOIDED');
     expect(betRow?.errorCode).toBeTruthy();
 
@@ -427,7 +432,7 @@ describe('WS handler operator discrimination', () => {
     );
     expect(round.bets).toHaveLength(1);
     const bet = round.bets[0];
-    expect(betLog.getById(bet.betId!)?.state).toBe('ARMED');
+    expect((await betLog.getById(bet.betId!))?.state).toBe('ARMED');
 
     // Call expireOperatorBetsOnCrash directly for the round
     const { expireOperatorBetsOnCrash } = await import('../game/bets.js');
@@ -435,7 +440,7 @@ describe('WS handler operator discrimination', () => {
     const count = await expireOperatorBetsOnCrash({ betLog }, roundId);
 
     expect(count).toBe(1);
-    expect(betLog.getById(bet.betId!)?.state).toBe('LOST');
+    expect((await betLog.getById(bet.betId!))?.state).toBe('LOST');
 
     // Balance should only reflect the bet debit (no win credit)
     const walletClient = walletClientCache.get(OPERATOR_ID)!;
@@ -472,7 +477,7 @@ describe('WS handler operator discrimination', () => {
     );
     expect(round.bets).toHaveLength(1);
     const bet = round.bets[0];
-    expect(betLog.getById(bet.betId!)?.state).toBe('ARMED');
+    expect((await betLog.getById(bet.betId!))?.state).toBe('ARMED');
 
     // Simulate operator paused: rewire deps so walletClientCache returns null for the operator
     const pausedCache = { get: (_id: string) => null } as unknown as WalletClientCache;

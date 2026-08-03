@@ -65,11 +65,11 @@ vi.mock('../game/history.js', () => ({
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import Database from 'better-sqlite3';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import * as bcrypt from 'bcryptjs';
-import { BetLog, OperatorRegistry, Reconciler, WalletError } from '@crash/wallet';
+import { PgBetLog, PgOperatorRegistry, PgReconciler, WalletError } from '@crash/wallet';
 import type { OperatorLedgerSource } from '@crash/wallet';
-import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
+import { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
 import { createAdminRouter } from './admin.js';
 import { WalletClientCache } from '../wallet/client-cache.js';
 import { observeWalletCall, resetMetrics } from '../observability/metrics.js';
@@ -80,19 +80,23 @@ import { observeWalletCall, resetMetrics } from '../observability/metrics.js';
 
 interface Harness {
   app: express.Application;
-  adminUsers: AdminUsers;
+  adminUsers: PgAdminUsers;
 }
 
-function makeHarness(): Harness {
-  const db = new Database(':memory:');
-  const betLog = new BetLog(db);
-  const registry = new OperatorRegistry(db);
-  const adminAudit = new AdminAudit(db);
-  const adminUsers = new AdminUsers(db);
+let currentDb: TestDb | undefined;
+
+async function makeHarness(): Promise<Harness> {
+  const testDb = await makeTestDb();
+  currentDb = testDb;
+  const pool = testDb.pool;
+  const betLog = new PgBetLog(pool);
+  const registry = new PgOperatorRegistry(pool);
+  const adminAudit = new PgAdminAudit(pool);
+  const adminUsers = new PgAdminUsers(pool);
   const revoked = new Set<string>();
   const walletClientCache = new WalletClientCache(registry, betLog);
   const emptySource: OperatorLedgerSource = async () => [];
-  const reconciler = new Reconciler(db, { source: emptySource, betLog });
+  const reconciler = new PgReconciler(pool, { source: emptySource, betLog });
 
   const app = express();
   app.use(express.json());
@@ -123,12 +127,13 @@ beforeEach(() => {
   resetMetrics();
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (savedJwtSecret === undefined) {
     delete process.env['JWT_SECRET'];
   } else {
     process.env['JWT_SECRET'] = savedJwtSecret;
   }
+  if (currentDb) { await currentDb.cleanup(); currentDb = undefined; }
 });
 
 async function loginAs(app: express.Application, username: string, password: string): Promise<string> {
@@ -144,14 +149,14 @@ async function loginAs(app: express.Application, username: string, password: str
 
 describe('GET /admin/v1/metrics', () => {
   it('returns 401 without Authorization header', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
     const res = await request(app).get('/admin/v1/metrics');
     expect(res.status).toBe(401);
   });
 
   it('returns 200 text/plain with the three metric names after observeWalletCall is invoked', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // Seed the registry: 2 oks + 1 WalletError for op-a / bet
@@ -193,14 +198,14 @@ describe('GET /admin/v1/metrics', () => {
 
 describe('GET /admin/v1/health/summary', () => {
   it('returns 401 without Authorization header', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
     const res = await request(app).get('/admin/v1/health/summary?window=1h');
     expect(res.status).toBe(401);
   });
 
   it('?window=foo returns 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -211,8 +216,8 @@ describe('GET /admin/v1/health/summary', () => {
   });
 
   it('returns per-operator walletCalls + errorRate after seeded calls', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // 3 oks + 1 error on op-a/bet
@@ -253,8 +258,8 @@ describe('GET /admin/v1/health/summary', () => {
   });
 
   it('default window is 1h when omitted; empty operator list when no calls recorded', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)
@@ -267,8 +272,8 @@ describe('GET /admin/v1/health/summary', () => {
   });
 
   it('?window=24h is accepted', async () => {
-    const { app, adminUsers } = makeHarness();
-    adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
+    const { app, adminUsers } = await makeHarness();
+    await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const res = await request(app)

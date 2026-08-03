@@ -66,10 +66,11 @@ vi.mock('../game/history.js', () => ({
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import Database from 'better-sqlite3';
 import * as bcrypt from 'bcryptjs';
-import { BetLog, OperatorRegistry } from '@crash/wallet';
-import { AdminAudit, AdminUsers } from '../admin/admin-store.js';
+import { PgBetLog, PgOperatorRegistry, PgGamesRepo, PgReconciler } from '@crash/wallet';
+import type { Pool } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
+import { PgAdminAudit, PgAdminUsers } from '../admin/admin-store-pg.js';
 import { createAdminRouter } from './admin.js';
 import { WalletClientCache } from '../wallet/client-cache.js';
 
@@ -79,21 +80,31 @@ import { WalletClientCache } from '../wallet/client-cache.js';
 
 interface Harness {
   app: express.Application;
-  db: InstanceType<typeof Database>;
-  betLog: BetLog;
-  adminAudit: AdminAudit;
-  adminUsers: AdminUsers;
-  registry: OperatorRegistry;
+  pool: Pool;
+  betLog: PgBetLog;
+  adminAudit: PgAdminAudit;
+  adminUsers: PgAdminUsers;
+  registry: PgOperatorRegistry;
 }
 
-function makeHarness(): Harness {
-  const db = new Database(':memory:');
-  const betLog = new BetLog(db);
-  const registry = new OperatorRegistry(db);
-  const adminAudit = new AdminAudit(db);
-  const adminUsers = new AdminUsers(db);
+// Each makeHarness() call builds an isolated Postgres schema; track them so
+// afterEach can drop every schema created during the test.
+const activeDbs: TestDb[] = [];
+
+async function makeHarness(): Promise<Harness> {
+  const testDb = await makeTestDb();
+  activeDbs.push(testDb);
+  const pool = testDb.pool;
+  const betLog = new PgBetLog(pool);
+  const registry = new PgOperatorRegistry(pool);
+  const adminAudit = new PgAdminAudit(pool);
+  const adminUsers = new PgAdminUsers(pool);
+  const games = new PgGamesRepo(pool);
   const revoked = new Set<string>();
   const walletClientCache = new WalletClientCache(registry, betLog);
+
+  // Reconciler is a required router dep but is not exercised by these tests.
+  const reconciler = new PgReconciler(pool, { source: async () => [], betLog });
 
   const app = express();
   app.use(express.json());
@@ -103,10 +114,12 @@ function makeHarness(): Harness {
     adminAudit,
     adminUsers,
     registry,
+    games,
     revoked,
+    reconciler,
   }));
 
-  return { app, db, betLog, adminAudit, adminUsers, registry };
+  return { app, pool, betLog, adminAudit, adminUsers, registry };
 }
 
 // ---------------------------------------------------------------------------
@@ -121,12 +134,15 @@ beforeEach(() => {
   process.env['JWT_SECRET'] = TEST_SECRET;
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (savedJwtSecret === undefined) {
     delete process.env['JWT_SECRET'];
   } else {
     process.env['JWT_SECRET'] = savedJwtSecret;
   }
+  // Drop every isolated schema created by makeHarness() during this test.
+  for (const d of activeDbs) await d.cleanup();
+  activeDbs.length = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -188,12 +204,12 @@ interface FixtureResult {
   aprilBtcOpBBetCount: number;
 }
 
-function seedFinancialFixture(
-  db: InstanceType<typeof Database>,
-  registry: OperatorRegistry,
-): FixtureResult {
+async function seedFinancialFixture(
+  pool: Pool,
+  registry: PgOperatorRegistry,
+): Promise<FixtureResult> {
   // Create operators
-  registry.create({
+  await registry.create({
     operatorId: 'op-a',
     name: 'Operator A',
     walletBaseUrl: 'https://wallet-a.example.com',
@@ -201,7 +217,7 @@ function seedFinancialFixture(
     shareBps: 1500,
     status: 'active',
   });
-  registry.create({
+  await registry.create({
     operatorId: 'op-b',
     name: 'Operator B',
     walletBaseUrl: 'https://wallet-b.example.com',
@@ -217,17 +233,18 @@ function seedFinancialFixture(
   const mar15 = Math.floor(Date.UTC(2026, 2, 15) / 1000); // 2026-03-15 (outside period)
   const may15 = Math.floor(Date.UTC(2026, 4, 15) / 1000); // 2026-05-15 (outside period)
 
-  function insertBet(opts: {
+  async function insertBet(opts: {
     operatorId: string;
     currency: string;
     state: string;
     amountMinor: number;
     winAmountMinor: number | null;
     createdAt: number;
-  }): void {
+  }): Promise<void> {
     const betId = `bet-${++_seq}`;
     const betTxnId = `btxn-${_seq}`;
-    db.prepare(`
+    await pool.query(
+      `
       INSERT INTO bet_log (
         bet_id, operator_id, player_id, session_id, round_id, currency,
         amount_minor, state, bet_txn_id,
@@ -235,60 +252,61 @@ function seedFinancialFixture(
         win_amount_minor, multiplier, error_code,
         created_at, updated_at
       ) VALUES (
-        ?, ?, 'player-1', 'sess-1', 'round-1', ?,
-        ?, ?, ?,
+        $1, $2, 'player-1', 'sess-1', 'round-1', $3,
+        $4, $5, $6,
         NULL, NULL, NULL, NULL,
-        ?, NULL, NULL,
-        ?, ?
+        $7, NULL, NULL,
+        $8, $8
       )
-    `).run(
-      betId,
-      opts.operatorId,
-      opts.currency,
-      opts.amountMinor,
-      opts.state,
-      betTxnId,
-      opts.winAmountMinor,
-      opts.createdAt,
-      opts.createdAt,
+    `,
+      [
+        betId,
+        opts.operatorId,
+        opts.currency,
+        opts.amountMinor,
+        opts.state,
+        betTxnId,
+        opts.winAmountMinor,
+        opts.createdAt,
+      ],
     );
   }
 
   // 10 SETTLED EUR op-a 2026-04-10: stake=100, win=250 each
   for (let i = 0; i < 10; i++) {
-    insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 250, createdAt: apr10 + i });
+    await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 250, createdAt: apr10 + i });
   }
 
   // 5 SETTLED EUR op-a 2026-04-15: stake=100, win=150 each
   for (let i = 0; i < 5; i++) {
-    insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 150, createdAt: apr15 + i });
+    await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 150, createdAt: apr15 + i });
   }
 
   // 8 LOST EUR op-a 2026-04-20: stake=100, win=null
   for (let i = 0; i < 8; i++) {
-    insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'LOST', amountMinor: 100, winAmountMinor: null, createdAt: apr20 + i });
+    await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'LOST', amountMinor: 100, winAmountMinor: null, createdAt: apr20 + i });
   }
 
   // 3 SETTLED USD op-a 2026-04-10: stake=200, win=300 each
   for (let i = 0; i < 3; i++) {
-    insertBet({ operatorId: 'op-a', currency: 'USD', state: 'SETTLED', amountMinor: 200, winAmountMinor: 300, createdAt: apr10 + 100 + i });
+    await insertBet({ operatorId: 'op-a', currency: 'USD', state: 'SETTLED', amountMinor: 200, winAmountMinor: 300, createdAt: apr10 + 100 + i });
   }
 
   // 5 LOST BTC op-b 2026-04-15: stake=100000, win=null
   for (let i = 0; i < 5; i++) {
-    insertBet({ operatorId: 'op-b', currency: 'BTC', state: 'LOST', amountMinor: 100000, winAmountMinor: null, createdAt: apr15 + i });
+    await insertBet({ operatorId: 'op-b', currency: 'BTC', state: 'LOST', amountMinor: 100000, winAmountMinor: null, createdAt: apr15 + i });
   }
 
   // 2 VOIDED EUR op-a — must be excluded
-  insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'VOIDED', amountMinor: 100, winAmountMinor: null, createdAt: apr10 });
-  insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'VOIDED', amountMinor: 100, winAmountMinor: null, createdAt: apr15 });
+  await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'VOIDED', amountMinor: 100, winAmountMinor: null, createdAt: apr10 });
+  await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'VOIDED', amountMinor: 100, winAmountMinor: null, createdAt: apr15 });
 
   // 1 WIN_FAILED EUR op-a — stake in STAKE, win NOT in WIN
-  insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'WIN_FAILED', amountMinor: 100, winAmountMinor: 999, createdAt: apr20 + 100 });
+  await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'WIN_FAILED', amountMinor: 100, winAmountMinor: 999, createdAt: apr20 + 100 });
 
   // Outside-period bets (must NOT appear in April reports)
-  insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 200, createdAt: mar15 });
-  insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 200, createdAt: may15 });
+  await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 200, createdAt: mar15 });
+  await insertBet({ operatorId: 'op-a', currency: 'EUR', state: 'SETTLED', amountMinor: 100, winAmountMinor: 200, createdAt: may15 });
 
   return {
     aprilEurOpAStake: 1000 + 500 + 800 + 100,   // 2400
@@ -308,11 +326,11 @@ function seedFinancialFixture(
 
 describe('GET /admin/v1/financial/ggr — auth and role', () => {
   it('viewer → 403; finance → 200; admin → 200', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     await adminUsers.create('finance1', await bcrypt.hash('pw', 10), ['finance']);
     await adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
 
     const adminToken = await loginAs(app, 'admin1', 'pw');
     const financeToken = await loginAs(app, 'finance1', 'pw');
@@ -333,7 +351,7 @@ describe('GET /admin/v1/financial/ggr — auth and role', () => {
   });
 
   it('no bearer → 401', async () => {
-    const { app } = makeHarness();
+    const { app } = await makeHarness();
     const r = await request(app).get('/admin/v1/financial/ggr?from=0&to=99999&groupBy=operator');
     expect(r.status).toBe(401);
   });
@@ -341,9 +359,9 @@ describe('GET /admin/v1/financial/ggr — auth and role', () => {
 
 describe('GET /admin/v1/financial/ggr — GGR values', () => {
   it('groupBy=operator,currency,day returns correct cells for EUR op-a 2026-04-10', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // April window: from=2026-04-01, to=2026-05-01 (exclusive)
@@ -395,9 +413,9 @@ describe('GET /admin/v1/financial/ggr — GGR values', () => {
   });
 
   it('VOIDED bets excluded; WIN_FAILED stake included, win excluded', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const expected = seedFinancialFixture(db, registry);
+    const expected = await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const from = Math.floor(Date.UTC(2026, 3, 1) / 1000);
@@ -429,9 +447,9 @@ describe('GET /admin/v1/financial/ggr — GGR values', () => {
   });
 
   it('window bounding: bets outside from/to not included', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // Only March window
@@ -455,9 +473,9 @@ describe('GET /admin/v1/financial/ggr — GGR values', () => {
   });
 
   it('groupBy=operator collapses across currency and day; op-a stake = sum of EUR+USD for April', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const from = Math.floor(Date.UTC(2026, 3, 1) / 1000);
@@ -490,7 +508,7 @@ describe('GET /admin/v1/financial/ggr — bad inputs', () => {
   let app: express.Application;
 
   beforeEach(async () => {
-    const h = makeHarness();
+    const h = await makeHarness();
     app = h.app;
     await h.adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     token = await loginAs(app, 'admin1', 'pw');
@@ -565,9 +583,9 @@ describe('GET /admin/v1/financial/ggr — bad inputs', () => {
 
 describe('GET /admin/v1/financial/settlement — spec §8.2', () => {
   it('returns nested shape with correct shareBps and ourShareMinor per operator', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const expected = seedFinancialFixture(db, registry);
+    const expected = await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const r = await request(app)
@@ -619,7 +637,7 @@ describe('GET /admin/v1/financial/settlement — spec §8.2', () => {
   });
 
   it('missing period param → 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers } = makeHarness();
+    const { app, adminUsers } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
@@ -631,7 +649,7 @@ describe('GET /admin/v1/financial/settlement — spec §8.2', () => {
   });
 
   it('viewer → 403 on settlement', async () => {
-    const { app, adminUsers } = makeHarness();
+    const { app, adminUsers } = await makeHarness();
     await adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
     const token = await loginAs(app, 'viewer1', 'pw');
 
@@ -644,9 +662,9 @@ describe('GET /admin/v1/financial/settlement — spec §8.2', () => {
 
 describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', () => {
   it('returns invoice JSON with correct shape; audit row written', async () => {
-    const { app, adminUsers, db, registry, adminAudit } = makeHarness();
+    const { app, adminUsers, pool, registry, adminAudit } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    const expected = seedFinancialFixture(db, registry);
+    const expected = await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const r = await request(app)
@@ -700,7 +718,7 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
     expect(body.totals['BTC']).toBeUndefined();
 
     // Audit row was written
-    const auditRows = adminAudit.listFiltered({ action: 'financial.invoice.generated' }, { limit: 10 });
+    const auditRows = await adminAudit.listFiltered({ action: 'financial.invoice.generated' }, { limit: 10 });
     const auditRow = auditRows.rows.find((row) => row.action === 'financial.invoice.generated');
     expect(auditRow).toBeDefined();
     expect(auditRow!.target).toBe('operator:op-a:period:2026-04');
@@ -711,9 +729,9 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
   });
 
   it('operator with no activity in period → 404 NO_SETTLEMENT_DATA', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // op-b has no activity in January 2026
@@ -727,9 +745,9 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
   });
 
   it('completely unknown operator → 404 NO_SETTLEMENT_DATA', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     const r = await request(app)
@@ -742,7 +760,7 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
   });
 
   it('bad period format in route → 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers } = makeHarness();
+    const { app, adminUsers } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
@@ -756,7 +774,7 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
   });
 
   it('missing operatorId in body → 400 INVALID_REQUEST', async () => {
-    const { app, adminUsers } = makeHarness();
+    const { app, adminUsers } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
     const token = await loginAs(app, 'admin1', 'pw');
 
@@ -770,7 +788,7 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
   });
 
   it('viewer → 403 on invoice', async () => {
-    const { app, adminUsers } = makeHarness();
+    const { app, adminUsers } = await makeHarness();
     await adminUsers.create('viewer1', await bcrypt.hash('pw', 10), ['viewer']);
     const token = await loginAs(app, 'viewer1', 'pw');
 
@@ -785,9 +803,9 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
 
 describe('shareBps PATCH round-trip → settlement reflects updated value', () => {
   it('PATCH /operators/:id with shareBps=3000; settlement ourShareMinor uses new value', async () => {
-    const { app, adminUsers, db, registry } = makeHarness();
+    const { app, adminUsers, pool, registry } = await makeHarness();
     await adminUsers.create('admin1', await bcrypt.hash('pw', 10), ['admin']);
-    seedFinancialFixture(db, registry);
+    await seedFinancialFixture(pool, registry);
     const token = await loginAs(app, 'admin1', 'pw');
 
     // Update op-b shareBps to 3000

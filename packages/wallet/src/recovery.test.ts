@@ -2,25 +2,24 @@
  * Integration tests for runRecovery (Task 1.7).
  *
  * TRUE end-to-end: real WalletClient → real HTTP → real operator-stub →
- * real BetLog (:memory: sqlite) + real OperatorRegistry (:memory: sqlite).
+ * real PgBetLog + real PgOperatorRegistry (isolated Postgres schema per test).
  *
  * Mirrors bets.test.ts setup: startServer(0) in beforeAll, resetStubState in
- * beforeEach, fresh BetLog+OperatorRegistry per test.
+ * beforeEach, fresh PgBetLog+PgOperatorRegistry per test.
  */
 
 import { it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import type { Server } from 'node:http';
+import { makeTestDb, type TestDb } from './pg-test-support.js';
 import {
   startServer,
   resetStubState,
 } from '../../../tools/operator-stub/src/index.js';
 
 import {
-  BetLog,
-  OperatorRegistry,
+  PgBetLog,
+  PgOperatorRegistry,
   WalletClient,
-  type BetRow,
   type Alerter,
   type AlertEvent,
 } from './index.js';
@@ -61,8 +60,9 @@ afterAll(async () => {
 // Per-test helpers
 // ---------------------------------------------------------------------------
 
-let betLog: BetLog;
-let registry: OperatorRegistry;
+let testDb: TestDb;
+let betLog: PgBetLog;
+let registry: PgOperatorRegistry;
 let operatorId: string;
 let operator: Operator;
 let deps: RecoveryDeps;
@@ -75,19 +75,19 @@ function makeFastClientFactory() {
   return (op: Operator) => new WalletClient(op, { sleep: makeNoop() });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   resetStubState();
 
   // Build registry with the stub's known signing key so HMAC verification passes
-  const db = new Database(':memory:');
+  testDb = await makeTestDb();
   operatorId = 'op-test';
-  betLog = new BetLog(db);
+  betLog = new PgBetLog(testDb.pool);
   let _akSeq = 0;
-  registry = new OperatorRegistry(db, {
+  registry = new PgOperatorRegistry(testDb.pool, {
     generateSigningKey: () => SIGNING_KEY,
     generateApiKey: () => `ak-test-${Date.now()}-${++_akSeq}`,
   });
-  const { operator: op } = registry.create({
+  const { operator: op } = await registry.create({
     operatorId,
     name: 'Test Operator',
     walletBaseUrl: `http://localhost:${port}`,
@@ -105,9 +105,10 @@ beforeEach(() => {
   };
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env['STUB_FAIL_NEXT_WIN'];
   resetStubState();
+  await testDb.cleanup();
 });
 
 // ---------------------------------------------------------------------------
@@ -149,7 +150,7 @@ it('PENDING → VOIDED via /rollback noop (stub never saw the bet)', async () =>
   const betTxnId = uid('btxn');
 
   // Seed a PENDING row (betLog.create defaults to PENDING)
-  betLog.create({
+  await betLog.create({
     betId,
     operatorId,
     playerId: 'pid-1',
@@ -160,7 +161,7 @@ it('PENDING → VOIDED via /rollback noop (stub never saw the bet)', async () =>
     betTxnId,
   });
 
-  expect(betLog.getById(betId)?.state).toBe('PENDING');
+  expect((await betLog.getById(betId))?.state).toBe('PENDING');
 
   const alertEmits: AlertEvent[] = [];
   const fakeAlerter: Alerter = { emit: (e) => alertEmits.push(e) };
@@ -170,7 +171,7 @@ it('PENDING → VOIDED via /rollback noop (stub never saw the bet)', async () =>
   });
 
   // Row must now be VOIDED
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   expect(row?.state).toBe('VOIDED');
   expect(row?.rollbackTxnId).toBeTruthy();
 
@@ -217,7 +218,7 @@ it('ROLLBACK_PENDING (post-debit) → VOIDED with actual refund', async () => {
   });
 
   // Manually seed the row: PENDING → ROLLBACK_PENDING
-  betLog.create({
+  await betLog.create({
     betId,
     operatorId,
     playerId: 'pid-1',
@@ -227,8 +228,8 @@ it('ROLLBACK_PENDING (post-debit) → VOIDED with actual refund', async () => {
     amountMinor: 10_000,
     betTxnId,
   });
-  betLog.transition(betId, 'rollback_started', { errorCode: 'crashed_mid_bet' });
-  expect(betLog.getById(betId)?.state).toBe('ROLLBACK_PENDING');
+  await betLog.transition(betId, 'rollback_started', { errorCode: 'crashed_mid_bet' });
+  expect((await betLog.getById(betId))?.state).toBe('ROLLBACK_PENDING');
 
   // pid-1 balance should be 90000 now (debited by /bet)
   const beforeBalance = await stubClient.balance({ playerId: 'pid-1', sessionId: 'sess-pid-1' });
@@ -237,7 +238,7 @@ it('ROLLBACK_PENDING (post-debit) → VOIDED with actual refund', async () => {
   const report = await runRecovery(deps);
 
   // Row must now be VOIDED
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   expect(row?.state).toBe('VOIDED');
   expect(row?.rollbackTxnId).toBeTruthy();
 
@@ -280,7 +281,7 @@ it('SETTLING → SETTLED via /win replay', async () => {
   });
 
   // Seed bet_log: PENDING → ARMED → SETTLING
-  betLog.create({
+  await betLog.create({
     betId,
     operatorId,
     playerId: 'pid-1',
@@ -290,17 +291,17 @@ it('SETTLING → SETTLED via /win replay', async () => {
     amountMinor: 10_000,
     betTxnId,
   });
-  betLog.transition(betId, 'bet_accepted', { betOpTxnId: betResp.operatorTxnId });
-  betLog.transition(betId, 'cashout_requested', {
+  await betLog.transition(betId, 'bet_accepted', { betOpTxnId: betResp.operatorTxnId });
+  await betLog.transition(betId, 'cashout_requested', {
     winTxnId,
     multiplier: 2.0,
     winAmountMinor: 20_000,
   });
-  expect(betLog.getById(betId)?.state).toBe('SETTLING');
+  expect((await betLog.getById(betId))?.state).toBe('SETTLING');
 
   const report = await runRecovery(deps);
 
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   expect(row?.state).toBe('SETTLED');
   expect(row?.winOpTxnId).toBeTruthy();
 
@@ -342,7 +343,7 @@ it('SETTLING → WIN_FAILED when /win exhausts retries', async () => {
   });
 
   // Seed row in SETTLING
-  betLog.create({
+  await betLog.create({
     betId,
     operatorId,
     playerId: 'pid-1',
@@ -352,13 +353,13 @@ it('SETTLING → WIN_FAILED when /win exhausts retries', async () => {
     amountMinor: 10_000,
     betTxnId,
   });
-  betLog.transition(betId, 'bet_accepted', { betOpTxnId: betResp.operatorTxnId });
-  betLog.transition(betId, 'cashout_requested', {
+  await betLog.transition(betId, 'bet_accepted', { betOpTxnId: betResp.operatorTxnId });
+  await betLog.transition(betId, 'cashout_requested', {
     winTxnId,
     multiplier: 2.0,
     winAmountMinor: 20_000,
   });
-  expect(betLog.getById(betId)?.state).toBe('SETTLING');
+  expect((await betLog.getById(betId))?.state).toBe('SETTLING');
 
   // clientFactory that always throws
   const alwaysThrowFetch: typeof fetch = async () => {
@@ -379,7 +380,7 @@ it('SETTLING → WIN_FAILED when /win exhausts retries', async () => {
     alerter: fakeAlerter,
   });
 
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   expect(row?.state).toBe('WIN_FAILED');
   expect(row?.errorCode).toBeTruthy();
 
@@ -405,38 +406,42 @@ it('operator-not-found → row unchanged, skipped counted, no throw', async () =
   const betTxnId = uid('btxn');
 
   // Create row with a bogus operatorId NOT in the registry
-  const db2 = new Database(':memory:');
-  const isolatedBetLog = new BetLog(db2);
-  const isolatedRegistry = new OperatorRegistry(db2); // empty — no operators
+  const isolated = await makeTestDb();
+  try {
+    const isolatedBetLog = new PgBetLog(isolated.pool);
+    const isolatedRegistry = new PgOperatorRegistry(isolated.pool); // empty — no operators
 
-  isolatedBetLog.create({
-    betId,
-    operatorId: 'op-missing',
-    playerId: 'pid-1',
-    sessionId: 'sess-pid-1',
-    roundId: uid('round'),
-    currency: 'EUR',
-    amountMinor: 10_000,
-    betTxnId,
-  });
+    await isolatedBetLog.create({
+      betId,
+      operatorId: 'op-missing',
+      playerId: 'pid-1',
+      sessionId: 'sess-pid-1',
+      roundId: uid('round'),
+      currency: 'EUR',
+      amountMinor: 10_000,
+      betTxnId,
+    });
 
-  // Transition to ROLLBACK_PENDING so it tries operator lookup
-  isolatedBetLog.transition(betId, 'rollback_started', { errorCode: 'crashed_mid_bet' });
+    // Transition to ROLLBACK_PENDING so it tries operator lookup
+    await isolatedBetLog.transition(betId, 'rollback_started', { errorCode: 'crashed_mid_bet' });
 
-  const report = await runRecovery({
-    betLog: isolatedBetLog,
-    registry: isolatedRegistry,
-    clientFactory: makeFastClientFactory(),
-    log: () => {},
-  });
+    const report = await runRecovery({
+      betLog: isolatedBetLog,
+      registry: isolatedRegistry,
+      clientFactory: makeFastClientFactory(),
+      log: () => {},
+    });
 
-  // Row state unchanged — still ROLLBACK_PENDING
-  const row = isolatedBetLog.getById(betId);
-  expect(row?.state).toBe('ROLLBACK_PENDING');
+    // Row state unchanged — still ROLLBACK_PENDING
+    const row = await isolatedBetLog.getById(betId);
+    expect(row?.state).toBe('ROLLBACK_PENDING');
 
-  expect(report.rollbackPending.skipped).toBe(1);
-  expect(report.rollbackPending.resolved).toBe(0);
-  expect(report.rollbackPending.failed).toBe(0);
+    expect(report.rollbackPending.skipped).toBe(1);
+    expect(report.rollbackPending.resolved).toBe(0);
+    expect(report.rollbackPending.failed).toBe(0);
+  } finally {
+    await isolated.cleanup();
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -449,7 +454,7 @@ it('idempotent re-run after resolution yields all-zero counts', async () => {
   const betId = uid('bet');
   const betTxnId = uid('btxn');
 
-  betLog.create({
+  await betLog.create({
     betId,
     operatorId,
     playerId: 'pid-1',
@@ -462,7 +467,7 @@ it('idempotent re-run after resolution yields all-zero counts', async () => {
 
   // First run resolves it
   const report1 = await runRecovery(deps);
-  expect(betLog.getById(betId)?.state).toBe('VOIDED');
+  expect((await betLog.getById(betId))?.state).toBe('VOIDED');
   expect(report1.pending.resolved).toBe(1);
 
   // Second run: no rows to process
@@ -480,7 +485,7 @@ it('idempotent re-run after resolution yields all-zero counts', async () => {
 it('throwing clientFactory caches null: row 1 skipped, row 2 resolved, factory called exactly twice', async () => {
   // Register a second operator (same stub URL, same key) for the second row
   const operatorId2 = 'op-test-2';
-  registry.create({
+  await registry.create({
     operatorId: operatorId2,
     name: 'Test Operator 2',
     walletBaseUrl: `http://localhost:${port}`,
@@ -495,7 +500,7 @@ it('throwing clientFactory caches null: row 1 skipped, row 2 resolved, factory c
   const betTxnId2 = uid('btxn');
 
   // Seed two ROLLBACK_PENDING rows for two different operators
-  betLog.create({
+  await betLog.create({
     betId: betId1,
     operatorId,       // op-test → factory throws on first call
     playerId: 'pid-1',
@@ -505,9 +510,9 @@ it('throwing clientFactory caches null: row 1 skipped, row 2 resolved, factory c
     amountMinor: 10_000,
     betTxnId: betTxnId1,
   });
-  betLog.transition(betId1, 'rollback_started', { errorCode: 'recovery_pending_at_startup' });
+  await betLog.transition(betId1, 'rollback_started', { errorCode: 'recovery_pending_at_startup' });
 
-  betLog.create({
+  await betLog.create({
     betId: betId2,
     operatorId: operatorId2, // op-test-2 → factory succeeds on second call
     playerId: 'pid-2',
@@ -517,7 +522,7 @@ it('throwing clientFactory caches null: row 1 skipped, row 2 resolved, factory c
     amountMinor: 10_000,
     betTxnId: betTxnId2,
   });
-  betLog.transition(betId2, 'rollback_started', { errorCode: 'recovery_pending_at_startup' });
+  await betLog.transition(betId2, 'rollback_started', { errorCode: 'recovery_pending_at_startup' });
 
   // clientFactory that throws synchronously the first time, works thereafter
   let callCount = 0;
@@ -536,10 +541,10 @@ it('throwing clientFactory caches null: row 1 skipped, row 2 resolved, factory c
   });
 
   // Row 1: still ROLLBACK_PENDING — factory threw → null cached → counted as skipped
-  expect(betLog.getById(betId1)?.state).toBe('ROLLBACK_PENDING');
+  expect((await betLog.getById(betId1))?.state).toBe('ROLLBACK_PENDING');
 
   // Row 2: reached VOIDED (sweep continued past the skipped operator)
-  expect(betLog.getById(betId2)?.state).toBe('VOIDED');
+  expect((await betLog.getById(betId2))?.state).toBe('VOIDED');
 
   // Report: skipped=1 (factory threw for op-test), resolved=1 (op-test-2 worked)
   expect(report!.rollbackPending.skipped).toBe(1);
