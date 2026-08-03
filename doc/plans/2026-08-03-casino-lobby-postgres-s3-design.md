@@ -89,8 +89,16 @@ Hot player session state stays in **RocksDB** (ephemeral cache, not money) for W
 
 ## 6. Phasing
 
-- **Wave A (this work):** `games`+`game_assets`+`players`+`wallet_ledger` on Postgres; Creator uploads assets to S3; lobby + demo/real launch; games catalogue migrated SQLite→PG (async + snapshot). B2B money ledger still on SQLite.
-- **Wave B (next):** port `bet_log`, `operators`, `admin`, `idempotency`, `reconciliation` SQLite→Postgres behind their existing interfaces, one repo at a time, tests green between each.
+- **Wave A (done, live):** `games`+`game_assets`+`players`+`wallet_ledger` on Postgres; Creator uploads assets to S3; lobby + demo/real launch; games catalogue migrated SQLite→PG (async + snapshot).
+- **Wave B (in progress):** port `bet_log`, `operators`, `admin`, `idempotency`, `reconciliation` SQLite→Postgres.
+
+### Wave B progress
+
+- **pt1 (done, wired, live):** `PgOperatorRegistry` — Postgres-backed with an in-memory read cache (sync reads on hot paths, async writes + refresh). Wired into prod (`index.ts`, admin, operator, signature middleware, `WalletClientCache` via the `OperatorReader` interface). Live-verified: create operator → Postgres → served from cache. Reusable PG test harness added (`pg-test-support.ts` → isolated schema per test file on a local `crash-test-pg` docker container).
+- **pt2 (done, tested — NOT yet wired to prod):** `PgBetLog` (full async port of the 1179-line ledger incl. FOR-UPDATE state-machine transition, idempotency, keyset lists, GGR/NGR report), `PgAdminAudit`/`PgAdminUsers`, `PgOperatorAudit`. 30 integration tests against real Postgres.
+- **pt3 (remaining):** the prod cut-over — swap `index.ts` to the pt2 repos, add `await` at the ~54 `betLog` call sites (bets.ts 26, admin.ts 11, operator.ts 10, recovery.ts 7) + admin-users auth sites, port the `Reconciler` to Postgres, and drop `better-sqlite3`.
+
+**Safety gate for pt3 (important):** the existing money-path unit tests inject the **SQLite** repos as doubles. Because `await` on a synchronous SQLite call still executes, those tests would *not* catch a missing `await` on the real async `PgBetLog` — a silent floating-promise money bug. So pt3 must first convert the money-path test harnesses (`bets.test.ts`, `handlers-operator.test.ts`, `admin-*`, `operator-*`, `recovery`, `reconciler`) to construct the **Pg** repos via `makeTestDb()`, so the async wiring is actually validated, before/with the prod swap. This is deliberately a focused, careful increment rather than a rushed tail-end change on money code.
 
 ## 7. Definition of done (Wave A)
 
