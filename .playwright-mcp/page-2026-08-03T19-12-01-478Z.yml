@@ -1,0 +1,77 @@
+- generic [ref=f1e3]:
+  - banner [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e13]:
+        - heading "StaleDefault" [level=1] [ref=f1e14]
+        - generic [ref=f1e15]: provably-fair multiplier
+      - generic "reconnecting" [ref=f1e16]
+    - generic [ref=f1e17]:
+      - button "Mute sounds" [ref=f1e18] [cursor=pointer]
+      - button "Load theme pack" [ref=f1e23] [cursor=pointer]:
+        - generic [ref=f1e30]: Theme
+      - button "Reset to default theme" [ref=f1e31] [cursor=pointer]
+      - button "Provably fair" [ref=f1e35] [cursor=pointer]:
+        - generic [ref=f1e39]: Fair
+      - generic [ref=f1e40]:
+        - generic [ref=f1e41]:
+          - generic [ref=f1e42]: Balance
+          - generic [ref=f1e43]: $1000.00
+        - button "Reset" [ref=f1e44] [cursor=pointer]
+  - generic [ref=f1e46]:
+    - generic [ref=f1e47]: History
+    - generic [ref=f1e48]: No rounds yet
+  - main [ref=f1e49]:
+    - generic [ref=f1e50]: Round · 0
+    - complementary [ref=f1e54]:
+      - generic [ref=f1e55]:
+        - generic [ref=f1e56]:
+          - heading "Place bet" [level=2] [ref=f1e57]
+          - generic [ref=f1e58] [cursor=pointer]:
+            - generic [ref=f1e59]: Auto
+            - button "Toggle auto cashout" [ref=f1e60]
+        - generic [ref=f1e62]:
+          - button "halve" [ref=f1e63] [cursor=pointer]: −
+          - spinbutton [ref=f1e64]: "10"
+          - button "double" [ref=f1e65] [cursor=pointer]: +
+        - generic [ref=f1e66]:
+          - button "$1" [ref=f1e67] [cursor=pointer]
+          - button "$5" [ref=f1e68] [cursor=pointer]
+          - button "$10" [ref=f1e69] [cursor=pointer]
+          - button "$25" [ref=f1e70] [cursor=pointer]
+          - button "$50" [ref=f1e71] [cursor=pointer]
+          - button "$100" [ref=f1e72] [cursor=pointer]
+          - button "$500" [ref=f1e73] [cursor=pointer]
+        - button "Place Bet · $10.00" [ref=f1e74] [cursor=pointer]
+      - generic [ref=f1e75]:
+        - generic [ref=f1e76]:
+          - heading "Pilots in this round" [level=2] [ref=f1e77]
+          - generic [ref=f1e78]: "0"
+        - generic: Awaiting pilots…
+      - generic [ref=f1e80]:
+        - heading "Your stats" [level=2] [ref=f1e82]
+        - generic [ref=f1e83]:
+          - generic [ref=f1e84]:
+            - generic [ref=f1e85]: Bets
+            - generic [ref=f1e86]: "0"
+          - generic [ref=f1e87]:
+            - generic [ref=f1e88]: Wins
+            - generic [ref=f1e89]: 0 / 0
+          - generic [ref=f1e90]:
+            - generic [ref=f1e91]: Wagered
+            - generic [ref=f1e92]: $0.00
+          - generic [ref=f1e93]:
+            - generic [ref=f1e94]: Won
+            - generic [ref=f1e95]: $0.00
+          - generic [ref=f1e96]:
+            - generic [ref=f1e97]: Net P/L
+            - generic [ref=f1e98]: +$0.00
+          - generic [ref=f1e99]:
+            - generic [ref=f1e100]: Streak
+            - generic [ref=f1e101]: —
+          - generic [ref=f1e102]:
+            - generic [ref=f1e103]: Biggest x
+            - generic [ref=f1e104]: —
+          - generic [ref=f1e105]:
+            - generic [ref=f1e106]: Best win
+            - generic [ref=f1e107]: —
+  - contentinfo [ref=f1e108]: Stale Default · simulation only · no real wagers, no real money.

@@ -174,24 +174,31 @@ export default function App() {
     window.setTimeout(() => setToast(null), 2400);
   }, []);
 
+  // Is this a launched catalogue game (lobby → /play?game=<id>)? If so the
+  // server theme for THAT game is authoritative — localStorage must not win, or
+  // switching games would keep showing a previously-cached theme.
+  const isLaunchedGame = new URLSearchParams(location.search).has('game');
+
   // Apply theme tokens (CSS vars + sounds) whenever the theme changes
   useEffect(() => {
     applyThemeCssVars(theme);
     applyThemeSounds(theme.sounds);
-    // Production: never persist the theme — the server is the source of truth
-    // each time the page loads. Dev: persist so refresh keeps your last edit.
-    if (!THEME_LOCKED) saveTheme(theme);
+    // Persist only for the standalone single-game dev flow. For a launched
+    // catalogue game we never persist — each game's theme comes fresh from the
+    // server, so localStorage can't leak one game's assets into another.
+    if (!THEME_LOCKED && !isLaunchedGame) saveTheme(theme);
     document.title = theme.brandName || 'Galaxy Crash';
-  }, [theme]);
+  }, [theme, isLaunchedGame]);
 
-  // On boot, fetch the operator-configured theme from /api/theme.
-  // Precedence: localStorage user override > server config > built-in default.
+  // On boot, fetch the theme from /api/theme (per-game via ?game=).
+  // For a launched catalogue game the server theme always wins; only the
+  // standalone single-game flow honours a manual localStorage override.
   useEffect(() => {
-    if (hasUserOverride()) return; // user-loaded theme already in localStorage wins
+    if (!isLaunchedGame && hasUserOverride()) return; // manual override wins in the standalone flow only
     fetchServerTheme().then((t) => {
       if (t) setTheme(t);
     });
-  }, []);
+  }, [isLaunchedGame]);
 
   // On boot, seed the history strip with THIS game's series (multi-game).
   useEffect(() => {
