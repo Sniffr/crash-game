@@ -19,7 +19,9 @@ import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 import { currentRound } from '../game/round';
 import { cashOutBet, tryCashoutBet, placeOperatorBet } from '../game/bets';
 import { getOperatorWiringDeps } from '../game/operator-deps';
+import { getLobbyWiringDeps } from '../game/lobby-deps';
 import { WalletError } from '@crash/wallet';
+import { InsufficientFundsError } from '@crash/wallet/wallet-ledger';
 
 /** Per-session metadata for real-player bets (display name lookup). */
 const sessionMeta = new Map<string, { displayName: string }>();
@@ -86,7 +88,10 @@ export async function handleMessage(
           safeSend(ws, { type: 'error', data: { message: 'You already have a bet this round' } }); return;
         }
 
-        // Discriminate: operator-backed vs legacy demo session
+        // Discriminate: lobby real-money vs operator-backed vs legacy demo session
+        if (session.lobbyPlayerId) {
+          return handlePlaceLobbyBet(ws, sessionId, session, data, attachSession);
+        }
         const isOperatorSession =
           !!session.operatorId && !!session.playerId && !!session.currency &&
           typeof session.balanceMinor === 'number';
@@ -310,6 +315,78 @@ export async function handlePlaceOperatorBet(
       });
     } else {
       console.error('[handlePlaceOperatorBet] unexpected error:', err);
+      safeSend(ws, { type: 'error', data: { message: 'Bet failed' } });
+    }
+  }
+}
+
+/**
+ * Place a bet for a personal-lobby REAL-money session. Debits the Postgres
+ * wallet_ledger atomically; the win (if any) is credited at cashout in
+ * bets.ts:tryCashoutBet. On crash the stake is already gone (debited here), so
+ * the round loop skips lobby bets in its loss handling.
+ */
+export async function handlePlaceLobbyBet(
+  ws: WebSocket,
+  sessionId: string,
+  session: Session,
+  data: Record<string, unknown>,
+  attachSession: (sessionId: string) => void,
+): Promise<void> {
+  if (!currentRound || currentRound.phase !== 'BETTING') {
+    safeSend(ws, { type: 'error', data: { message: 'Betting is closed for this round' } });
+    return;
+  }
+  const amountMinorRaw = data.amountMinor ?? Math.round(Number(data.amount) * 100);
+  const amountMinor = typeof amountMinorRaw === 'number' ? amountMinorRaw : Number(amountMinorRaw);
+  if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
+    safeSend(ws, { type: 'error', data: { message: 'amountMinor required (positive integer)' } });
+    return;
+  }
+  const autoCashoutRaw = data.autoCashout == null ? undefined : Number(data.autoCashout);
+  const autoCashout =
+    autoCashoutRaw != null && Number.isFinite(autoCashoutRaw) && autoCashoutRaw > 1
+      ? Math.round(autoCashoutRaw * 100) / 100
+      : undefined;
+
+  const deps = getLobbyWiringDeps();
+  if (!deps) {
+    safeSend(ws, { type: 'error', data: { message: 'Server configuration error' } });
+    return;
+  }
+
+  const ref = `rnd-${currentRound.roundNumber}`;
+  try {
+    const balanceMinor = await deps.wallet.bet(session.lobbyPlayerId!, amountMinor, ref, session.currency ?? 'USD');
+    const bet: Bet = {
+      playerId: sessionId,
+      amount: amountMinor,
+      autoCashout,
+      cashedOut: false,
+      isBot: false,
+      displayName: session.displayName,
+      currency: session.currency,
+      amountMinor,
+      gameId: session.gameId ?? DEFAULT_GAME_ID,
+      lobbyPlayerId: session.lobbyPlayerId,
+    };
+    currentRound.bets.push(bet);
+    attachSession(sessionId);
+
+    safeSend(ws, { type: 'bet_placed', data: { bet, isOperator: true, balanceMinor, currency: session.currency ?? 'USD' } });
+    broadcast({
+      type: 'new_bet',
+      data: {
+        playerId: sessionId, amount: amountMinor, amountMinor, currency: session.currency,
+        autoCashout, isBot: false, displayName: session.displayName,
+        roundNumber: currentRound.roundNumber, isOperator: true,
+      },
+    });
+  } catch (err) {
+    if (err instanceof InsufficientFundsError) {
+      safeSend(ws, { type: 'error', data: { message: 'Insufficient balance', code: 'INSUFFICIENT_FUNDS' } });
+    } else {
+      console.error('[handlePlaceLobbyBet] unexpected error:', err);
       safeSend(ws, { type: 'error', data: { message: 'Bet failed' } });
     }
   }

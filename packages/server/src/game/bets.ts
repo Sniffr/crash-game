@@ -21,6 +21,7 @@ import {
   consoleAlerter,
 } from '@crash/wallet';
 import { getOperatorWiringDeps } from './operator-deps';
+import { getLobbyWiringDeps } from './lobby-deps';
 import { observeWalletCall } from '../observability/metrics.js';
 
 /** Reference to the current round — set by game/round.ts at runtime. */
@@ -78,6 +79,38 @@ export async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual
 }
 
 /**
+ * Cash out a personal-lobby real-money bet: credit stake × multiplier to the
+ * Postgres wallet_ledger and notify the player. The bet was already debited at
+ * placement, so this is a pure credit.
+ */
+async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' | 'auto'): Promise<void> {
+  if (bet.cashedOut) return;
+  bet.cashedOut = true;
+  bet.cashoutMultiplier = atMultiplier;
+  const winAmountMinor = Math.round((bet.amountMinor as number) * atMultiplier);
+  bet.profit = winAmountMinor;
+
+  const deps = getLobbyWiringDeps();
+  const ref = `rnd-${currentRoundRef?.roundNumber ?? 'x'}`;
+  if (deps) {
+    try {
+      const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? 'USD');
+      sendToSession(bet.playerId, {
+        type: 'cashout_success',
+        data: { multiplier: atMultiplier, profit: winAmountMinor, balanceMinor, source },
+      });
+    } catch (err) {
+      console.error('[cashOutLobbyBet] wallet.win failed:', err);
+      sendToSession(bet.playerId, { type: 'error', data: { message: 'Cashout failed to credit — contact support' } });
+    }
+  }
+  broadcast({
+    type: 'cashout',
+    data: { playerId: bet.playerId, multiplier: atMultiplier, profit: winAmountMinor, isBot: false, displayName: bet.displayName, source },
+  });
+}
+
+/**
  * Discriminating cashout: if the bet is operator-backed (has operatorId+betId),
  * routes through cashOutOperatorBet; otherwise calls the legacy cashOutBet.
  *
@@ -102,6 +135,11 @@ export async function tryCashoutBet(
   // Bots always use the legacy path
   if (bet.isBot) {
     return cashOutBet(bet, atMultiplier, source);
+  }
+
+  // Personal-lobby real-money path — credit the Postgres wallet_ledger.
+  if (bet.lobbyPlayerId && typeof bet.amountMinor === 'number') {
+    return cashOutLobbyBet(bet, atMultiplier, source);
   }
 
   // Operator-backed path

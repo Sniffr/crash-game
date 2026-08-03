@@ -15,10 +15,14 @@
     "test": "cd packages/shared && npm test"
   },
   "devDependencies": {
+    "@types/pg": "^8.20.3",
     "concurrently": "^8.2.0",
     "yaml": "^2.9.0"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1101.0",
+    "dotenv": "^17.4.2",
+    "pg": "^8.22.0",
     "pino": "^10.3.1",
     "prom-client": "^15.1.3"
   }

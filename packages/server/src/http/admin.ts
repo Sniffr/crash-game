@@ -11,7 +11,7 @@
 
 import { Router } from 'express';
 import type { WalletClient, BetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, Reconciler, ReconStatus } from '@crash/wallet';
-import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, GamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
+import { WalletError, OperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, PgGamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminAudit, AdminRole } from '../admin/admin-store.js';
@@ -37,7 +37,7 @@ export interface AdminRouterDeps {
   adminAudit: AdminAudit;
   adminUsers: AdminUsers;
   registry: OperatorRegistry;
-  games: GamesRepo;
+  games: PgGamesRepo;
   revoked: Set<string>;
   reconciler: Reconciler;
   nowSeconds?: () => number;
@@ -644,20 +644,20 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   });
 
   // GET /games — list (admin sees archived too via ?includeArchived=1)
-  router.get('/games', requireRole('admin'), (req, res): void => {
+  router.get('/games', requireRole('admin'), async (req, res): Promise<void> => {
     const includeArchived = req.query['includeArchived'] === '1' || req.query['includeArchived'] === 'true';
-    res.json({ items: deps.games.list({ includeArchived }).map(gamePublicShape) });
+    res.json({ items: (await deps.games.list({ includeArchived })).map(gamePublicShape) });
   });
 
   // GET /games/:gameId
-  router.get('/games/:gameId', requireRole('admin'), (req, res): void => {
-    const g = deps.games.getById(req.params['gameId']!);
+  router.get('/games/:gameId', requireRole('admin'), async (req, res): Promise<void> => {
+    const g = await deps.games.getById(req.params['gameId']!);
     if (!g) { res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: `No game with id '${req.params['gameId']}'` } }); return; }
     res.json(gamePublicShape(g));
   });
 
   // POST /games — create
-  router.post('/games', requireRole('admin'), (req, res): void => {
+  router.post('/games', requireRole('admin'), async (req, res): Promise<void> => {
     const body = (req.body ?? {}) as { gameId?: unknown; name?: unknown; gameType?: unknown; rtp?: unknown; theme?: unknown; status?: unknown };
     if (typeof body.gameId !== 'string' || !body.gameId.trim() || typeof body.name !== 'string' || !body.name.trim()) {
       res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'gameId and name (non-empty strings) required' } });
@@ -668,7 +668,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       return;
     }
     try {
-      const g = deps.games.create({
+      const g = await deps.games.create({
         gameId: body.gameId,
         name: body.name,
         gameType: body.gameType as import('@crash/wallet').GameType,
@@ -686,7 +686,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   });
 
   // PATCH /games/:gameId — update
-  router.patch('/games/:gameId', requireRole('admin'), (req, res): void => {
+  router.patch('/games/:gameId', requireRole('admin'), async (req, res): Promise<void> => {
     const gameId = req.params['gameId']!;
     const body = (req.body ?? {}) as { name?: unknown; gameType?: unknown; rtp?: unknown; theme?: unknown; status?: unknown };
     const patch: import('@crash/wallet').GameUpdate = {};
@@ -702,7 +702,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       patch.rtp = body.rtp / 100;
     }
     try {
-      const g = deps.games.update(gameId, patch);
+      const g = await deps.games.update(gameId, patch);
       deps.adminAudit.record({ actor: req.admin!.username, action: 'game.update', target: `game:${gameId}`, payload: body });
       res.json(gamePublicShape(g));
     } catch (err) {
@@ -717,7 +717,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
   // Persists to operator_games (design §2). rtpVariant is a PERCENTAGE.
   // =========================================================================
 
-  router.patch('/operators/:id/games/:gameId', requireRole('admin'), (req, res): void => {
+  router.patch('/operators/:id/games/:gameId', requireRole('admin'), async (req, res): Promise<void> => {
     const { id, gameId } = req.params as { id: string; gameId: string };
     const body = (req.body ?? {}) as { enabled?: unknown; rtpVariant?: unknown };
 
@@ -725,7 +725,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
       res.status(404).json({ error: { code: 'OPERATOR_NOT_FOUND', message: `No operator with id '${id}'` } });
       return;
     }
-    if (!deps.games.getById(gameId)) {
+    if (!(await deps.games.getById(gameId))) {
       res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: `No game with id '${gameId}'` } });
       return;
     }
@@ -750,7 +750,7 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     }
 
     try {
-      const link = deps.games.setOperatorGame(id, gameId, patch);
+      const link = await deps.games.setOperatorGame(id, gameId, patch);
       deps.adminAudit.record({ actor: req.admin!.username, action: 'operator.game_config', target: `operator:${id}`, payload: { gameId, ...body } });
       res.status(200).json({
         gameId,

@@ -36,6 +36,8 @@ export interface Bet {
   amountMinor?: number;
   /** Catalogue game this bet belongs to (multi-game, 2026-07-24). Defaults to 'galaxy-crash'. */
   gameId?: string;
+  /** Personal-lobby real-money player (casino uuid). Set only for lobby real-money bets; settles against wallet_ledger. */
+  lobbyPlayerId?: string;
 }
 
 export interface RoundState {
@@ -117,6 +119,8 @@ export interface Session {
   rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
   /** Catalogue game this session is playing (multi-game, 2026-07-24). Defaults to 'galaxy-crash'. */
   gameId?: string;
+  /** Personal-lobby real-money player (casino DB uuid). Set only for lobby real-money sessions. */
+  lobbyPlayerId?: string;
 }
 
 /** Per-session lifetime stats. All counters are non-negative. */

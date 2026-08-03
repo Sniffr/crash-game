@@ -120,6 +120,28 @@ async function createNewSession(): Promise<SessionInfo | null> {
   } catch { return null; }
 }
 
+// real-money lobby session (server endpoint may not exist yet — fall back to demo)
+// When the lobby launches a game with ?mode=real and the player is logged in,
+// bind the game to a player session via Agent-B's endpoint. If it's missing
+// (404) or errors, we return null and the caller uses the anonymous demo flow.
+async function createRealSession(): Promise<SessionInfo | null> {
+  try {
+    const params = new URLSearchParams(location.search);
+    if (params.get('mode') !== 'real') return null;
+    const token = localStorage.getItem('casino_player_token');
+    if (!token) return null;
+    const res = await fetch('/api/lobby/play/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ gameId: readGameIdFromUrl() }),
+    });
+    if (!res.ok) return null; // endpoint not built yet / rejected → fall back to demo
+    const j = await res.json() as { sessionId?: string };
+    if (!j?.sessionId) return null;
+    return { sessionId: j.sessionId, displayName: '' };
+  } catch { return null; }
+}
+
 export default function App() {
   const [gameState, setGameState] = useState<GameState>({
     roundNumber: 0,
@@ -209,7 +231,8 @@ export default function App() {
     (async () => {
       let id = readSessionIdFromUrl();
       if (!id) {
-        const fresh = await createNewSession();
+        // real-money lobby session (server endpoint may not exist yet — fall back to demo)
+        const fresh = (await createRealSession()) ?? (await createNewSession());
         if (cancelled) return;
         if (!fresh) {
           setSessionError('Backend offline — start Dragonfly with `docker compose up -d dragonfly`');

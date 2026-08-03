@@ -41,20 +41,21 @@ export class InvalidGameError extends Error {
 
 const GAME_TYPES: readonly GameType[] = ['sprite', 'gif'];
 
-function assertRtp(rtp: unknown): asserts rtp is number {
+/** Shared game validators — reused by the SQLite and Postgres repos. */
+export function assertGameRtp(rtp: unknown): asserts rtp is number {
   if (typeof rtp !== 'number' || !Number.isFinite(rtp) || rtp <= 0 || rtp > 1) {
     throw new InvalidGameError('rtp must be a fraction in (0, 1] (e.g. 0.97)');
   }
 }
 
-function assertGameType(t: unknown): asserts t is GameType {
+export function assertGameType(t: unknown): asserts t is GameType {
   if (typeof t !== 'string' || !GAME_TYPES.includes(t as GameType)) {
     throw new InvalidGameError(`gameType must be one of ${GAME_TYPES.join(', ')}`);
   }
 }
 
 /** The Creator's `Theme` carries its own `gameType`; if present it MUST match. */
-function assertThemeMatchesType(theme: unknown, gameType: GameType): void {
+export function assertThemeMatchesType(theme: unknown, gameType: GameType): void {
   if (theme && typeof theme === 'object') {
     const themeType = (theme as { gameType?: unknown }).gameType;
     // Legacy sprite themes omit gameType entirely — treat as 'sprite'.
@@ -147,9 +148,14 @@ export class GamesRepo {
 
   // ── games ────────────────────────────────────────────────────────────────
 
+  /** Synchronous snapshot of active games — read by the hot round loop. */
+  snapshot(): Game[] {
+    return this.list();
+  }
+
   create(input: GameCreate): Game {
     assertGameType(input.gameType);
-    assertRtp(input.rtp);
+    assertGameRtp(input.rtp);
     assertThemeMatchesType(input.theme, input.gameType);
 
     const now = Math.floor(Date.now() / 1000);
@@ -199,7 +205,7 @@ export class GamesRepo {
 
     const nextType = patch.gameType ?? existing.gameType;
     if (patch.gameType !== undefined) assertGameType(patch.gameType);
-    if (patch.rtp !== undefined) assertRtp(patch.rtp);
+    if (patch.rtp !== undefined) assertGameRtp(patch.rtp);
     if (patch.theme !== undefined) assertThemeMatchesType(patch.theme, nextType);
     else if (patch.gameType !== undefined) assertThemeMatchesType(existing.theme, nextType);
 
@@ -225,7 +231,7 @@ export class GamesRepo {
     gameId: string,
     patch: { enabled?: boolean; rtpOverride?: number | null },
   ): OperatorGame {
-    if (patch.rtpOverride != null) assertRtp(patch.rtpOverride);
+    if (patch.rtpOverride != null) assertGameRtp(patch.rtpOverride);
     const existing = this.getOperatorGame(operatorId, gameId);
     const enabled = patch.enabled ?? existing?.enabled ?? true;
     const rtpOverride =

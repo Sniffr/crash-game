@@ -173,6 +173,38 @@ export async function createOperatorSession(opts: {
   return session;
 }
 
+/**
+ * Mint a personal-lobby REAL-money session bound to a casino player. Balance is
+ * mirrored from the Postgres wallet at start; the wallet_ledger stays the source
+ * of truth (bets/wins settle against it, the session balance is just the last
+ * value we pushed to the client).
+ */
+export async function createPlayerSession(opts: {
+  lobbyPlayerId: string;
+  username: string;
+  gameId: string;
+  balanceMinor: number;
+  currency?: string;
+}): Promise<Session> {
+  ensureOnline();
+  const sessionId = newId();
+  const now = Date.now();
+  const session: Session = {
+    sessionId,
+    displayName: opts.username,
+    balance: opts.balanceMinor,
+    createdAt: now,
+    expiresAt: now + OPERATOR_SESSION_TTL_MS,
+    currency: opts.currency ?? 'USD',
+    balanceMinor: opts.balanceMinor,
+    gameId: opts.gameId,
+    lobbyPlayerId: opts.lobbyPlayerId,
+  };
+  await jput(sessKey(sessionId), session);
+  await jput(statsKey(sessionId), { ...ZERO_STATS });
+  return session;
+}
+
 export async function createSession(opts: { displayName?: string; balance?: number } = {}): Promise<Session> {
   ensureOnline();
   const sessionId = newId();

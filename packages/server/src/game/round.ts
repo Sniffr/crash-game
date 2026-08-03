@@ -74,7 +74,7 @@ export function startBettingPhase() {
   let roundCrashPoint = crashPoint;
   if (games) {
     gameCrashPoints = { [DEFAULT_GAME_ID]: crashPoint };
-    for (const g of games.list()) {
+    for (const g of games.snapshot()) {
       if (g.gameId === DEFAULT_GAME_ID) continue;
       gameCrashPoints[g.gameId] = crashPointForMessage(
         serverSeed,
@@ -232,7 +232,7 @@ function crashOneGame(gameId: string, atCrashPoint: number): void {
     if ((bet.gameId ?? DEFAULT_GAME_ID) !== gameId) continue;
     if (bet.cashedOut) continue;
     bet.profit = -bet.amount;
-    if (bet.isBot || bet.operatorId) continue; // operator losses → bet_log below
+    if (bet.isBot || bet.operatorId || bet.lobbyPlayerId) continue; // operator → bet_log; lobby → wallet_ledger (already debited)
     const sessionId = bet.playerId;
     void recordLoss(sessionId).catch(() => {});
     void appendHistory(sessionId, {
@@ -310,6 +310,7 @@ function crashRound() {
   for (const bet of currentRound.bets) {
     if (bet.isBot || bet.cashedOut) continue;
     if (bet.operatorId) continue; // operator bets handled by expireOperatorBetsOnCrash
+    if (bet.lobbyPlayerId) continue; // lobby real-money: stake already debited in wallet_ledger at bet time
     const sessionId = bet.playerId;
     void recordLoss(sessionId).catch(() => {});
     void appendHistory(sessionId, {

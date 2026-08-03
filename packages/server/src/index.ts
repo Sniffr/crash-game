@@ -1,3 +1,8 @@
+import { config as loadEnv } from 'dotenv';
+import { fileURLToPath as _fileURLToPath } from 'node:url';
+import path$ from 'node:path';
+// Load the repo-root .env regardless of cwd (server runs from packages/server).
+loadEnv({ path: path$.join(path$.dirname(_fileURLToPath(import.meta.url)), '../../../.env') });
 import express from 'express';
 import http from 'http';
 import { WebSocketServer } from 'ws';
@@ -5,7 +10,13 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { BetLog, OperatorRegistry, GamesRepo, Reconciler, runRecovery, consoleAlerter } from '@crash/wallet';
+import { BetLog, OperatorRegistry, PgGamesRepo, Reconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
+import { PlayersRepo } from '@crash/wallet/players-repo';
+import { WalletLedger } from '@crash/wallet/wallet-ledger';
+import { createLobbyRouter } from './http/lobby';
+import { createLobbyPlayRouter } from './http/lobby-play';
+import { createAssetsRouter } from './http/assets';
+import { setLobbyWiringDeps } from './game/lobby-deps';
 import type { OperatorLedgerSource } from '@crash/wallet';
 import { scheduleDailyReconciliation } from './reconciliation/scheduler';
 import { initThemeLoader, getActiveTheme } from './theme/loader';
@@ -35,13 +46,19 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const db = new Database(dbPath);
 const betLog = new BetLog(db);
 const registry = new OperatorRegistry(db);
-const games = new GamesRepo(db);
 const adminAudit = new AdminAudit(db);
 const operatorAudit = new OperatorAudit(db);
 const adminUsers = new AdminUsers(db);
 const revoked = new Set<string>();
 const walletClientCache = new WalletClientCache(registry, betLog);
+
+// Postgres (casino DB): games catalogue + personal-lobby players/wallet (Wave A).
+const pool = getPool();
+const games = new PgGamesRepo(pool);
+const players = new PlayersRepo(pool);
+const wallet = new WalletLedger(pool);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
+setLobbyWiringDeps({ wallet });
 
 // Reconciliation (Task 8.1, spec §9).
 //
@@ -70,19 +87,22 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // Theme autoload + fs.watch
 initThemeLoader();
 
-// Seed the catalogue with the current product (galaxy-crash) from the active
-// theme, so existing single-tenant launches keep working. Idempotent: skipped
-// once the row exists. RTP comes from the round config (fraction). Runs AFTER
-// initThemeLoader so getActiveTheme() is populated.
+// Postgres bootstrap (Wave A): ensure schema, seed the default game, prime the
+// games snapshot the hot round loop reads. Runs AFTER initThemeLoader so the
+// seed can copy the active theme.
 try {
-  if (!games.getById('galaxy-crash')) {
+  await bootstrapCasinoSchema(pool);
+  if (!(await games.getById('galaxy-crash'))) {
     const seededTheme = getActiveTheme() ?? {};
     const gt = (seededTheme as { gameType?: string }).gameType === 'gif' ? 'gif' : 'sprite';
-    games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: gt, rtp: CONFIG.rtp, theme: seededTheme });
+    await games.create({ gameId: 'galaxy-crash', name: 'Galaxy Crash', gameType: gt, rtp: CONFIG.rtp, theme: seededTheme });
     console.log('[games] seeded galaxy-crash into the catalogue');
   }
+  await games.refreshSnapshot();
+  console.log(`[games] catalogue ready (${games.snapshot().length} active on Postgres)`);
 } catch (err) {
-  console.error('[games] seed failed (continuing):', err);
+  console.error('[games] Postgres bootstrap failed:', err);
+  throw err; // games catalogue is required — fail fast rather than run half-wired
 }
 
 // /api/health — PUBLIC liveness probe (Task 8.3 Dockerfile HEALTHCHECK target).
@@ -117,6 +137,13 @@ app.use(
 // Auth is internal to the router: /auth/login is public; router.use(requireAdminJwt)
 // gates everything else. No top-level auth middleware here.
 app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, games, revoked, reconciler }));
+
+// ─── Personal lobby: player accounts + wallet + asset uploads (Wave A) ──────────
+// Mounted BEFORE registerPublicRoutes (SPA * fallback). Player-facing auth is
+// internal to the lobby router; asset uploads are admin-JWT protected.
+app.use('/api/lobby', createLobbyRouter({ players, wallet }));
+app.use('/api/lobby', createLobbyPlayRouter({ games, players, wallet }));
+app.use('/api/assets', createAssetsRouter());
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache, games });

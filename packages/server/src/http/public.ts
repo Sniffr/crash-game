@@ -30,13 +30,13 @@ import { getActiveTheme } from '../theme/loader';
 import { getAllHistory } from '../game/history';
 import * as round from '../game/round';
 import type { WalletClientCache } from '../wallet/client-cache';
-import type { GamesRepo } from '@crash/wallet';
+import type { PgGamesRepo } from '@crash/wallet';
 import { observeWalletCall } from '../observability/metrics.js';
 
 /** RNG config for verifying a game: default → round CONFIG, else the game's own RTP. */
-function verifyConfigForGame(deps: PublicRouteDeps, gameId: string): RngConfig {
+async function verifyConfigForGame(deps: PublicRouteDeps, gameId: string): Promise<RngConfig> {
   if (gameId !== DEFAULT_GAME_ID) {
-    const g = deps.games.getById(gameId);
+    const g = await deps.games.getById(gameId);
     if (g) return { rtp: g.rtp, maxMultiplier: round.CONFIG.maxMultiplier };
   }
   return round.CONFIG;
@@ -110,7 +110,7 @@ function renderLaunchError(opts: { title: string; message: string; lobbyUrl?: st
 
 export interface PublicRouteDeps {
   walletClientCache: WalletClientCache;
-  games: GamesRepo;
+  games: PgGamesRepo;
 }
 
 // ─── Error helper ─────────────────────────────────────────────────────────────
@@ -132,19 +132,18 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // ─── Games catalogue (public) ────────────────────────────────────────────────
   // Lobbies + the Creator list active games. No theme_json here — the theme
   // ships at launch / via /api/theme?game=.
-  app.get('/api/games', (_req, res) => {
-    res.json({
-      items: deps.games.list().map((g) => ({ gameId: g.gameId, name: g.name, gameType: g.gameType })),
-    });
+  app.get('/api/games', async (_req, res) => {
+    const items = (await deps.games.list()).map((g) => ({ gameId: g.gameId, name: g.name, gameType: g.gameType }));
+    res.json({ items });
   });
 
   // ─── Theme ─────────────────────────────────────────────────────────────────
   // ?game=<id> returns that catalogue game's theme; falls back to the single
   // active-theme.json when no game is given or the game is unknown (back-compat).
-  app.get('/api/theme', (req, res) => {
+  app.get('/api/theme', async (req, res) => {
     const gameId = String(req.query.game ?? '').trim();
     if (gameId) {
-      const g = deps.games.getById(gameId);
+      const g = await deps.games.getById(gameId);
       if (g && g.status === 'active') { res.json(g.theme); return; }
     }
     const activeTheme = getActiveTheme();
@@ -171,7 +170,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // ─── Verify (GET) ──────────────────────────────────────────────────────────
   // ?game=<id> verifies a non-default game (domain-separated nonce + its RTP).
   // Omitting game verifies the default game exactly as before.
-  app.get('/api/verify', (req, res) => {
+  app.get('/api/verify', async (req, res) => {
     const seed = String(req.query.seed ?? '');
     const rn = String(req.query.roundNumber ?? '');
     const gameId = String(req.query.game ?? '').trim() || DEFAULT_GAME_ID;
@@ -179,7 +178,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
     const roundNum = parseInt(rn, 10);
     if (!Number.isFinite(roundNum)) return res.status(400).json({ error: 'roundNumber must be an integer' });
     try {
-      const cfg = verifyConfigForGame(deps, gameId);
+      const cfg = await verifyConfigForGame(deps, gameId);
       const crashPoint = crashPointForMessage(seed, crashMessage(roundNum, gameId), cfg);
       const hashCommit = commitSeed(seed);
       res.json({ roundNumber: roundNum, gameId, serverSeed: seed, crashPoint, hashCommit });
@@ -189,12 +188,12 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   });
 
   // ─── Verify (POST) ─────────────────────────────────────────────────────────
-  app.post('/api/verify', (req, res) => {
+  app.post('/api/verify', async (req, res) => {
     const { seed, roundNumber: rn, game } = (req.body ?? {}) as { seed?: string; roundNumber?: number; game?: string };
     if (!seed || rn == null) return res.status(400).json({ error: 'Missing seed or roundNumber' });
     const gameId = (game ?? '').trim() || DEFAULT_GAME_ID;
     try {
-      const cfg = verifyConfigForGame(deps, gameId);
+      const cfg = await verifyConfigForGame(deps, gameId);
       const commit: Commit = { roundNumber: rn, hashCommit: commitSeed(seed) };
       const reveal: Reveal = {
         roundNumber: rn,
@@ -293,7 +292,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
     //     effectiveRtp returns null when the game is unknown/archived OR not
     //     enabled for the operator (default-deny). Distinguish the two for a
     //     clearer error page.
-    const game = deps.games.getById(gameId);
+    const game = await deps.games.getById(gameId);
     if (!game || game.status !== 'active') {
       res.status(404).send(renderLaunchError({
         title: 'Unknown Game',
@@ -302,7 +301,7 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
       }));
       return;
     }
-    if (deps.games.effectiveRtp(operator, gameId) === null) {
+    if ((await deps.games.effectiveRtp(operator, gameId)) === null) {
       res.status(403).send(renderLaunchError({
         title: 'Game Unavailable',
         message: 'This game is not enabled for your operator.',

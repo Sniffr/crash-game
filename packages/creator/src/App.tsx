@@ -23,6 +23,19 @@ import {
 
 const STORAGE_KEY = 'crash-creator-theme';
 
+/** True for a base64 `data:` URL (an inline asset not yet uploaded to S3). */
+function isDataUrl(v: unknown): v is string {
+  return typeof v === 'string' && v.startsWith('data:');
+}
+
+// Theme binary-asset fields, grouped by their sub-object. Each data: URL is
+// uploaded to S3 at publish time and replaced with the returned public URL.
+const ASSET_FIELDS: Record<'assets' | 'gifs' | 'sounds', string[]> = {
+  assets: ['sprite', 'spriteGround', 'spriteFlying', 'spriteCrashed', 'background', 'logo'],
+  gifs: ['loading', 'flying', 'flyingThreshold', 'crashed'],
+  sounds: ['takeoff', 'cashout', 'crash', 'bet', 'tick', 'music'],
+};
+
 function loadTheme(): Theme {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -86,7 +99,35 @@ export default function App() {
       const { token } = (await login.json()) as { token: string };
       const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
-      const payload: Theme = { ...theme, version: THEME_VERSION };
+      // Upload any inline (base64 data:) assets to S3 first, so the stored theme
+      // carries only URLs. Clone the sub-objects so we never mutate React state.
+      const uploaded: Theme = {
+        ...theme,
+        assets: theme.assets ? { ...theme.assets } : theme.assets,
+        gifs: theme.gifs ? { ...theme.gifs } : theme.gifs,
+        sounds: theme.sounds ? { ...theme.sounds } : theme.sounds,
+      };
+      for (const group of ['assets', 'gifs', 'sounds'] as const) {
+        const obj = uploaded[group] as Record<string, string | null | undefined> | undefined;
+        if (!obj) continue;
+        for (const field of ASSET_FIELDS[group]) {
+          const val = obj[field];
+          if (!isDataUrl(val)) continue;
+          const up = await fetch('/api/assets/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ gameId, assetKey: `${group}.${field}`, dataUrl: val }),
+          });
+          if (!up.ok) {
+            const e = await up.json().catch(() => ({}));
+            throw new Error(e?.error?.message ?? `Asset upload failed for ${group}.${field} (${up.status})`);
+          }
+          const { url } = (await up.json()) as { url: string };
+          obj[field] = url;
+        }
+      }
+
+      const payload: Theme = { ...uploaded, version: THEME_VERSION };
       const body = JSON.stringify({
         gameId,
         name: theme.brandName,
