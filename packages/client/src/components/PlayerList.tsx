@@ -66,13 +66,13 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
               </div>
               <div className="text-right shrink-0 leading-tight">
                 <div className={`text-sm font-mono tabular-nums ${isYou ? 'text-slate-100' : 'text-slate-400'}`}>
-                  {bet.operatorId
+                  {bet.currency
                     ? fromMinor(bet.amountMinor ?? bet.amount, bet.currency)
                     : `$${bet.amount.toFixed(2)}`}
                 </div>
                 {bet.cashedOut ? (
                   <div className="text-[11px] text-aurora-400 font-mono tabular-nums">
-                    {bet.cashoutMultiplier?.toFixed(2)}x · +{bet.operatorId
+                    {bet.cashoutMultiplier?.toFixed(2)}x · +{bet.currency
                       ? fromMinor(bet.profit ?? 0, bet.currency)
                       : `$${(bet.profit ?? 0).toFixed(2)}`}
                   </div>
