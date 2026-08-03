@@ -27,10 +27,10 @@ vi.mock('../ws/hub.js', () => ({
 }));
 
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
-import { WalletClient, BetLog, WalletError, WalletNetworkError, type Alerter, type AlertEvent } from '@crash/wallet';
+import { WalletClient, PgBetLog, WalletError, WalletNetworkError, type Alerter, type AlertEvent } from '@crash/wallet';
 import type { Operator } from '@crash/wallet';
 import type { BetRow } from '@crash/wallet';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import type { Server } from 'node:http';
 
 // Import the operator stub — startServer returns an http.Server directly.
@@ -119,17 +119,19 @@ afterAll(async () => {
 // ---------------------------------------------------------------------------
 
 // Fresh BetLog per test (each gets its own :memory: database).
-let betLog: BetLog;
+let betLog: PgBetLog;
+let testDb: TestDb;
 let deps: OperatorBetDeps;
 
 // Track alert events per test.
 const alertEmits: AlertEvent[] = [];
 const fakeAlerter: Alerter = { emit: (e) => alertEmits.push(e) };
 
-beforeEach(() => {
+beforeEach(async () => {
   resetStubState();
   alertEmits.length = 0;
-  betLog = new BetLog(new Database(':memory:'));
+  testDb = await makeTestDb();
+  betLog = new PgBetLog(testDb.pool);
   deps = {
     walletClient,
     betLog,
@@ -137,10 +139,11 @@ beforeEach(() => {
   };
 });
 
-afterEach(() => {
+afterEach(async () => {
   // Ensure STUB_FAIL_NEXT_WIN is cleared even if a test failed mid-way.
   delete process.env['STUB_FAIL_NEXT_WIN'];
   resetStubState();
+  await testDb.cleanup();
 });
 
 // ---------------------------------------------------------------------------
@@ -208,7 +211,7 @@ it('happy path: placeOperatorBet → ARMED, cashOutOperatorBet → SETTLED, bala
   expect(cashoutResult.currency).toBe('EUR');
 
   // Step 3: assert bet log is SETTLED
-  const storedRow = betLog.getById(betId);
+  const storedRow = await betLog.getById(betId);
   expect(storedRow?.state).toBe('SETTLED');
 
   // Step 4: verify stub balance — started at 100000, -10000 bet, +20000 win = 110000
@@ -253,7 +256,7 @@ it('insufficient funds: placeOperatorBet rejects with WalletError, row VOIDED, b
   expect(thrownError!.retryable).toBe(false);
 
   // Bet row must be VOIDED with betTxnId recovery key retained
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   expect(row?.state).toBe('VOIDED');
   expect(row?.errorCode).toBe('INSUFFICIENT_FUNDS');
   expect(row?.betTxnId).toBe(betTxnId);
@@ -338,12 +341,12 @@ it('crash: expireOperatorBetsOnCrash marks ARMED bets as LOST, returns count, id
   });
 
   // Confirm ARMED
-  expect(betLog.getById(betId)?.state).toBe('ARMED');
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
 
   // Crash the round — should transition ARMED → LOST
   const count = await expireOperatorBetsOnCrash({ betLog }, roundId);
   expect(count).toBe(1);
-  expect(betLog.getById(betId)?.state).toBe('LOST');
+  expect((await betLog.getById(betId))?.state).toBe('LOST');
 
   // Second call: LOST is terminal, should be skipped silently → returns 0
   const count2 = await expireOperatorBetsOnCrash({ betLog }, roundId);
@@ -371,19 +374,19 @@ it('multi-game: expireOperatorBetsOnCrash(gameId) only expires that game, leaves
     gameId: 'cosmic-jet',
   });
 
-  expect(betLog.getById(betA)?.gameId).toBe('galaxy-crash');
-  expect(betLog.getById(betB)?.gameId).toBe('cosmic-jet');
+  expect((await betLog.getById(betA))?.gameId).toBe('galaxy-crash');
+  expect((await betLog.getById(betB))?.gameId).toBe('cosmic-jet');
 
   // galaxy-crash crashes; cosmic-jet is still flying.
   const n = await expireOperatorBetsOnCrash({ betLog }, roundId, 'galaxy-crash');
   expect(n).toBe(1);
-  expect(betLog.getById(betA)?.state).toBe('LOST');
-  expect(betLog.getById(betB)?.state).toBe('ARMED'); // sibling untouched
+  expect((await betLog.getById(betA))?.state).toBe('LOST');
+  expect((await betLog.getById(betB))?.state).toBe('ARMED'); // sibling untouched
 
   // Now cosmic-jet crashes.
   const m = await expireOperatorBetsOnCrash({ betLog }, roundId, 'cosmic-jet');
   expect(m).toBe(1);
-  expect(betLog.getById(betB)?.state).toBe('LOST');
+  expect((await betLog.getById(betB))?.state).toBe('LOST');
 });
 
 // ---------------------------------------------------------------------------
@@ -455,7 +458,7 @@ it('ambiguous /bet failure: WalletNetworkError → ROLLBACK_PENDING with betTxnI
   expect(thrown).toBeInstanceOf(WalletNetworkError);
 
   // Row must be ROLLBACK_PENDING (ambiguous — operator may have debited)
-  const row = betLog.getById(betId);
+  const row = await betLog.getById(betId);
   expect(row?.state).toBe('ROLLBACK_PENDING');
   expect(row?.betTxnId).toBe(betTxnId);
   expect(row?.errorCode).toBeTruthy();
@@ -484,7 +487,7 @@ it('SETTLING: winTxnId is persisted to betLog BEFORE the /win HTTP call complete
     betTxnId,
     gameId: 'galaxy-crash',
   });
-  expect(betLog.getById(betId)?.state).toBe('ARMED');
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
 
   // Build an intercepting WalletClient for the /win call.
   // It reads the betLog row BEFORE forwarding to the real stub, capturing the
@@ -495,7 +498,7 @@ it('SETTLING: winTxnId is persisted to betLog BEFORE the /win HTTP call complete
   const interceptingFetch: typeof fetch = async (input, init) => {
     const url = typeof input === 'string' ? input : (input as URL).toString();
     if (url.endsWith('/win')) {
-      const row = betLog.getById(betId);
+      const row = await betLog.getById(betId);
       preWinSnapshot = { state: row!.state, winTxnId: row!.winTxnId };
     }
     return globalThis.fetch(input as Parameters<typeof fetch>[0], init);
@@ -596,7 +599,7 @@ it('forgotten-wiring: cashOutOperatorBet with no alerter field surfaces win_fail
     betTxnId,
     gameId: 'galaxy-crash',
   });
-  expect(betLog.getById(betId)?.state).toBe('ARMED');
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
 
   // deps WITHOUT an alerter field — the ConsoleAlerter fallback must fire.
   const depsNoAlerter: OperatorBetDeps = {
@@ -619,7 +622,7 @@ it('forgotten-wiring: cashOutOperatorBet with no alerter field surfaces win_fail
   }
 
   // Bet must be WIN_FAILED in the log
-  expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+  expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 
   // ConsoleAlerter fallback must have written a [alert] win_failed line to stderr
   const alertLine = consoleSpy.mock.calls.find(
@@ -677,7 +680,7 @@ it('cashout-exhaustion alert: injected alerter receives exactly one win_failed c
     betTxnId,
     gameId: 'galaxy-crash',
   });
-  expect(betLog.getById(betId)?.state).toBe('ARMED');
+  expect((await betLog.getById(betId))?.state).toBe('ARMED');
 
   // Inject a fresh vi.fn() alerter to capture exactly what is emitted.
   const emitSpy = vi.fn();
@@ -712,5 +715,5 @@ it('cashout-exhaustion alert: injected alerter receives exactly one win_failed c
   });
 
   // Confirm the row also reached WIN_FAILED in the log
-  expect(betLog.getById(betId)?.state).toBe('WIN_FAILED');
+  expect((await betLog.getById(betId))?.state).toBe('WIN_FAILED');
 });
