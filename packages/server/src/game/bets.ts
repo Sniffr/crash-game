@@ -97,7 +97,9 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
       const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? 'USD');
       sendToSession(bet.playerId, {
         type: 'cashout_success',
-        data: { multiplier: atMultiplier, profit: winAmountMinor, balanceMinor, source },
+        // Carry the same money fields as operator cashouts so the client formats
+        // the win in minor units (currency), not as raw dollars.
+        data: { multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? 'USD', profit: winAmountMinor, balanceMinor, source },
       });
     } catch (err) {
       console.error('[cashOutLobbyBet] wallet.win failed:', err);

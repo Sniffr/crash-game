@@ -696,7 +696,7 @@ export default function App() {
             onCashout={cashout}
             maxBetMinor={session?.rgLimits?.maxBetMinor}
             currency={session?.currency}
-            isOperator={!!session?.operatorId}
+            isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
           />
           <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
           <StatsPanel stats={stats} displayName={session?.displayName} />
@@ -807,7 +807,7 @@ function Header({
             <div className="text-[9px] uppercase tracking-[0.22em] text-slate-500">Balance</div>
             <div className="text-base sm:text-lg font-mono font-semibold text-aurora-400">{formatBalance(balance, session ?? null)}</div>
           </div>
-          {!session?.operatorId && (
+          {!(typeof session?.balanceMinor === 'number' && session?.currency) && (
             <button
               onClick={onResetBalance}
               className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
