@@ -68,4 +68,21 @@ describe('uploadAsset (integration)', () => {
     // Surface the URL in test output for the report.
     console.log('[s3.test] uploaded to:', result.url);
   }, 30_000);
+
+  it.skipIf(!hasS3)('compresses an image over 1 MB to WebP', async () => {
+    const sharp = (await import('sharp')).default;
+    // 1400x1400 random-noise PNG → well over 1 MB, worst case for compression.
+    const w = 1400, h = 1400, raw = Buffer.alloc(w * h * 3);
+    for (let i = 0; i < raw.length; i++) raw[i] = Math.floor(Math.random() * 256);
+    const png = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    expect(png.length).toBeGreaterThan(1_000_000);
+    const dataUrl = `data:image/png;base64,${png.toString('base64')}`;
+
+    const assetKey = `bigimg-${Date.now()}.png`;
+    const result = await uploadAsset({ gameId: '_selftest', assetKey, dataUrl });
+    expect(result.contentType).toBe('image/webp');       // re-encoded
+    expect(result.bytes).toBeLessThan(png.length);        // and smaller
+    const res = await fetch(result.url);
+    expect(res.status).toBe(200);
+  }, 30_000);
 });

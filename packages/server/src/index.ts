@@ -78,7 +78,11 @@ const reconciler = new PgReconciler(pool, { source: defaultLedgerSource, betLog 
 const app = express();
 // Capture raw body bytes for HMAC signing (verifyOperatorSignature §4.2).
 // Behaviour-neutral for all other routes: JSON still parsed identically.
-app.use(express.json({ verify: (req, _res, buf) => { (req as unknown as { rawBody: Buffer }).rawBody = buf; } }));
+// 30mb limit: the Creator uploads base64 `data:` asset URLs (gifs/audio) to
+// /api/assets/upload, which blow past Express's 100kb default. The server
+// compresses large images before storing to S3 (see s3.ts), but the raw upload
+// still arrives at full size, so the parser must accept it.
+app.use(express.json({ limit: '30mb', verify: (req, _res, buf) => { (req as unknown as { rawBody: Buffer }).rawBody = buf; } }));
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
