@@ -23,10 +23,12 @@ export interface TestDb {
 
 export async function makeTestDb(): Promise<TestDb> {
   const schema = 't_' + randomBytes(6).toString('hex');
-  const admin = new pg.Pool({ connectionString: TEST_URL });
+  // Small pools: many parallel vitest workers share one Postgres — keep well
+  // under its connection limit to avoid transient "too many clients" flakes.
+  const admin = new pg.Pool({ connectionString: TEST_URL, max: 2 });
   await admin.query(`CREATE SCHEMA "${schema}"`);
   // search_path scopes all subsequent DDL/DML in this pool to the fresh schema.
-  const pool = new pg.Pool({ connectionString: TEST_URL, options: `-c search_path=${schema}` });
+  const pool = new pg.Pool({ connectionString: TEST_URL, options: `-c search_path=${schema}`, max: 3 });
   await bootstrapCasinoSchema(pool);
   return {
     pool,

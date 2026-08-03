@@ -7,6 +7,7 @@ export * from './pg.js';
 export * from './signing.js';
 export * from './state-machine.js';
 export * from './bet-log.js';
+export * from './bet-log-pg.js';
 export * from './cursor.js';
 export * from './errors.js';
 export * from './client-types.js';

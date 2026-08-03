@@ -34,9 +34,9 @@ export function setPoolForTesting(pool: pg.Pool | null): void {
  * (Wave B adds the ported B2B ledger tables here.)
  */
 export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<void> {
+  // gen_random_uuid() is built into Postgres 13+ (no pgcrypto extension needed —
+  // and CREATE EXTENSION IF NOT EXISTS races under concurrent schema bootstraps).
   await pool.query(`
-    CREATE EXTENSION IF NOT EXISTS pgcrypto;   -- gen_random_uuid()
-
     CREATE TABLE IF NOT EXISTS games (
       game_id     text PRIMARY KEY,
       name        text NOT NULL,
