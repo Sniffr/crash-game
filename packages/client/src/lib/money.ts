@@ -55,11 +55,13 @@ export function toMinor(amount: number, currency: string | undefined): number {
  */
 export function formatBalance(
   balance: number,
-  session: { operatorId?: string; balanceMinor?: number; currency?: string } | null,
+  session: { operatorId?: string; lobbyPlayerId?: string; balanceMinor?: number; currency?: string } | null,
 ): string {
-  if (session?.operatorId && typeof session.balanceMinor === 'number') {
+  // Any money session (operator OR personal-lobby real-money) is canonical in
+  // integer minor units — render via the session currency. Only the legacy
+  // anonymous demo session (no balanceMinor) uses decimal credits.
+  if (typeof session?.balanceMinor === 'number') {
     return fromMinor(session.balanceMinor, session.currency);
   }
-  // Legacy demo: balance is decimal credits already
   return `$${balance.toFixed(2)}`;
 }
