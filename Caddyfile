@@ -1,0 +1,7 @@
+# Reverse proxy + automatic HTTPS for the crash-game app.
+# DOMAIN is injected by docker-compose (default: localhost → internal cert).
+# Caddy forwards WebSocket upgrades (/ws) transparently — no extra config needed.
+{$DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app:3001
+}

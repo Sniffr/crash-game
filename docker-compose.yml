@@ -1,0 +1,51 @@
+# Production compose for the crash-game platform.
+#
+#   1. cp .env.example .env   and fill in DATABASE_URL, S3_*, JWT_SECRET,
+#      ADMIN_BOOTSTRAP_USER (Postgres + S3 are external — Contabo).
+#   2. export DOMAIN=game.yourdomain.com   (Caddy gets a free TLS cert for it;
+#      use DOMAIN=localhost for a local test — Caddy issues an internal cert).
+#   3. docker compose up -d --build
+#
+# One app instance only: RocksDB is single-writer and the operator/games caches
+# are in-memory per process. Scale vertically for now.
+
+services:
+  app:
+    build: .
+    image: crash-game
+    restart: unless-stopped
+    env_file: .env          # DATABASE_URL, S3_*, JWT_SECRET, ADMIN_BOOTSTRAP_USER
+    environment:
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      NODE_ENV: production
+    volumes:
+      - crash-data:/app/data   # RocksDB hot session cache (persistent)
+    expose:
+      - "3001"                 # reached by Caddy on the internal network only
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data       # persisted TLS certs
+      - caddy-config:/config
+
+volumes:
+  crash-data:
+  caddy-data:
+  caddy-config:
