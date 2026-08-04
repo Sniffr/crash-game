@@ -254,11 +254,8 @@ export default function Lobby() {
 function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
   return (
     <div className="relative overflow-hidden rounded-panel mb-8 border border-white/5 bg-space-800 shadow-panel">
-      {/* warm ambient wash */}
-      <div
-        className="absolute inset-0 opacity-90"
-        style={{ background: 'radial-gradient(120% 140% at 100% 0%, rgba(251,101,20,0.35), transparent 55%), radial-gradient(90% 120% at 0% 100%, rgba(12,112,219,0.25), transparent 60%)' }}
-      />
+      {/* thin brand accent along the top edge — flat, no glow */}
+      <div className="absolute inset-x-0 top-0 h-1 bg-brand-500" />
       <div className="relative flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 p-6 sm:p-8">
         <div className="max-w-lg">
           <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-500/15 text-brand-400 text-[10px] font-extrabold uppercase tracking-[0.16em] px-2.5 py-1 mb-3">
