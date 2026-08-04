@@ -25,7 +25,7 @@ export default {
         },
         // Fixed chrome accents, in HSL — consistent across every game (only the
         // canvas art below is per-game themed).
-        brand: { 300: 'hsl(26 100% 70%)', 400: 'hsl(24 100% 62%)', 500: 'hsl(21 97% 53%)', 600: 'hsl(21 92% 47%)' }, // orange: primary
+        brand: { 300: '#ffa866', 400: '#ff8a3d', 500: '#fb6514', 600: '#e5550a' }, // PRIMARY — exact #fb6514
         info:  { 300: 'hsl(210 83% 65%)', 400: 'hsl(209 80% 55%)', 500: 'hsl(211 90% 45%)', 600: 'hsl(212 90% 38%)' }, // blue: secondary
         bet:   { 400: 'hsl(138 61% 47%)', 500: 'hsl(139 65% 38%)', 600: 'hsl(139 67% 32%)' },                          // green: place bet
         cash:  { 400: 'hsl(38 100% 65%)', 500: 'hsl(37 91% 55%)', 600: 'hsl(37 85% 47%)' },                            // amber: cashout
