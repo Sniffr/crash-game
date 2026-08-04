@@ -33,12 +33,12 @@ export default function HistoryStrip({ history }: HistoryStripProps) {
           return (
             <div
               key={entry.roundNumber}
-              className={`px-2.5 py-1 rounded-lg text-xs font-mono font-extrabold shrink-0 tabular-nums ${isLatest ? 'animate-chip-in' : ''}`}
+              className={`px-2.5 py-1 rounded-lg text-xs font-extrabold shrink-0 tabular-nums ${isLatest ? 'animate-chip-in' : ''}`}
               style={{
                 backgroundColor: t.bg,
                 color: t.fg,
                 border: `1px solid ${t.border}`,
-                boxShadow: isLatest ? `0 0 14px ${t.glow}` : undefined,
+
               }}
               title={`Round #${entry.roundNumber}`}
             >

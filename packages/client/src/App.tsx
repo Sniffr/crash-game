@@ -609,14 +609,14 @@ export default function App() {
       <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
       {sessionError && (
-        <div className="px-4 py-2 bg-loss-500/15 border-b border-loss-500/40 text-loss-400 text-xs font-mono text-center">
+        <div className="px-4 py-2 bg-loss-500/15 border-b border-loss-500/40 text-loss-400 text-xs text-center">
           {sessionError}
         </div>
       )}
 
       <main className="flex flex-col lg:flex-row gap-4 p-4 lg:p-5 lg:h-[calc(100vh-148px)]">
         {/* Game Canvas */}
-        <section className="flex-1 relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 shadow-panel min-h-[340px] lg:min-h-0">
+        <section className="flex-1 relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 min-h-[340px] lg:min-h-0">
           {/* CSS starfield + drifting stripes, behind the transparent canvas */}
           <div className="game-bg absolute inset-0 pointer-events-none" aria-hidden="true" />
           <GameCanvas
@@ -631,7 +631,7 @@ export default function App() {
             theme={theme}
           />
 
-          <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-neutral-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40 font-mono">
+          <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-neutral-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40">
             Round · {gameState.roundNumber}
           </div>
 
@@ -639,10 +639,10 @@ export default function App() {
             <div
               className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-sm font-semibold backdrop-blur-md border animate-toast-in ${
                 toast.kind === 'win'
-                  ? 'bg-bet-500/15 text-bet-400 border-bet-500/40 shadow-aurora'
+                  ? 'bg-bet-500/15 text-bet-400 border-bet-500/40'
                   : toast.kind === 'loss'
-                  ? 'bg-loss-500/15 text-loss-400 border-loss-500/40 shadow-nebula'
-                  : 'bg-brand-500/15 text-brand-400 border-brand-500/40 shadow-plasma'
+                  ? 'bg-loss-500/15 text-loss-400 border-loss-500/40'
+                  : 'bg-brand-500/15 text-brand-400 border-brand-500/40'
               }`}
             >
               {toast.text}
@@ -759,7 +759,7 @@ function Header({
         <div className="flex items-center gap-2 sm:gap-3 bg-space-800/80 border border-space-500/50 rounded-control px-3 py-1.5">
           <div className="leading-tight">
             <div className="text-[9px] uppercase tracking-[0.22em] text-neutral-500">Balance</div>
-            <div className="text-base sm:text-lg font-mono font-semibold text-bet-400">{formatBalance(balance, session ?? null)}</div>
+            <div className="text-base sm:text-lg font-semibold text-bet-400">{formatBalance(balance, session ?? null)}</div>
           </div>
           {!(typeof session?.balanceMinor === 'number' && session?.currency) && (
             <button
@@ -791,7 +791,7 @@ function IconButton({ onClick, label, children }: { onClick: () => void; label: 
 
 function Logo() {
   return (
-    <div className="w-9 h-9 rounded-control bg-gradient-to-br from-info-600 via-space-700 to-brand-600 border border-space-500/60 flex items-center justify-center shadow-plasma/50">
+    <div className="w-9 h-9 rounded-control bg-gradient-to-br from-info-600 via-space-700 to-brand-600 border border-space-500/60 flex items-center justify-center">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M12 2 L15 8 L15 16 Q12 22 9 16 L9 8 Z" fill="#f8fafc" stroke="#0f172a" strokeWidth="0.5"/>
         <circle cx="12" cy="9" r="1.6" fill="#22d3ee"/>
@@ -842,11 +842,11 @@ function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?:
     ? `${Math.abs(stats.currentStreak)} losses`
     : '—';
   return (
-    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 shadow-panel">
+    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4">
       <div className="flex items-baseline justify-between mb-3">
         <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em]">Your stats</h2>
         {displayName && (
-          <span className="text-[10px] font-mono text-info-400 truncate ml-2" title={displayName}>
+          <span className="text-[10px] text-info-400 truncate ml-2" title={displayName}>
             {displayName}
           </span>
         )}
@@ -874,7 +874,7 @@ function StatTile({ label, value, tone = 'neutral' }: { label: string; value: st
   return (
     <div className="bg-space-800/50 border border-space-500/30 rounded-control px-2.5 py-1.5 leading-tight">
       <div className="text-[9px] uppercase tracking-[0.18em] text-neutral-500">{label}</div>
-      <div className={`font-mono font-semibold tabular-nums ${color}`}>{value}</div>
+      <div className={`font-semibold tabular-nums ${color}`}>{value}</div>
     </div>
   );
 }
