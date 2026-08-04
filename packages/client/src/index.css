@@ -22,6 +22,9 @@ html, body {
   background: hsl(0 0% 5%);
   color: hsl(0 0% 96%);
   font-family: 'Poppins', system-ui, sans-serif;
+  /* Tabular figures app-wide (inherited) so numbers align and don't jitter as
+     they change — Poppins supports it; replaces the old monospace figures. */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
