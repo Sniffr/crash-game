@@ -83,9 +83,11 @@ export async function handleMessage(
           return;
         }
 
-        // One-bet-per-session-per-round guard (applies to both paths)
-        if (currentRound.bets.some((b) => b.playerId === sessionId)) {
-          safeSend(ws, { type: 'error', data: { message: 'You already have a bet this round' } }); return;
+        // Dual-bet: one bet per (session, slot) per round. slot 0 = first panel,
+        // 1 = second panel. Defaults to 0 for legacy single-bet clients.
+        const slot = data.slot === 1 ? 1 : 0;
+        if (currentRound.bets.some((b) => b.playerId === sessionId && (b.slot ?? 0) === slot)) {
+          safeSend(ws, { type: 'error', data: { message: 'You already have a bet in this slot' } }); return;
         }
 
         // Discriminate: lobby real-money vs operator-backed vs legacy demo session
@@ -137,6 +139,7 @@ export async function handleMessage(
           isBot: false,
           displayName: session.displayName,
           gameId: session.gameId ?? DEFAULT_GAME_ID,
+          slot,
         };
         currentRound.bets.push(bet);
 
@@ -166,7 +169,8 @@ export async function handleMessage(
     case 'cashout': {
       if (!currentRound || currentRound.phase !== 'FLYING') return;
       if (!sessionId) return;
-      const bet = currentRound.bets.find((b) => b.playerId === sessionId);
+      const slot = data.slot === 1 ? 1 : 0;
+      const bet = currentRound.bets.find((b) => b.playerId === sessionId && (b.slot ?? 0) === slot);
       if (!bet || bet.cashedOut) return;
       // Multi-game: refuse if this bet's game already crashed, even though the
       // round is still FLYING for other games.
@@ -238,8 +242,9 @@ export async function handlePlaceOperatorBet(
     return;
   }
 
-  // Generate stable bet IDs
-  const betId = `bet-${sessionId}-${currentRound.roundNumber}`;
+  // Generate stable bet IDs (slot-scoped so the two dual-bet slots don't collide)
+  const slot = data.slot === 1 ? 1 : 0;
+  const betId = `bet-${sessionId}-${currentRound.roundNumber}-s${slot}`;
   const betTxnId = randomUUID();
   const roundId = `rnd-${currentRound.roundNumber}`;
   const gameId = session.gameId ?? DEFAULT_GAME_ID;
@@ -276,6 +281,7 @@ export async function handlePlaceOperatorBet(
       currency: session.currency,
       amountMinor,
       gameId,
+      slot,
     };
     currentRound.bets.push(bet);
 
@@ -355,7 +361,8 @@ export async function handlePlaceLobbyBet(
     return;
   }
 
-  const ref = `rnd-${currentRound.roundNumber}`;
+  const slot = data.slot === 1 ? 1 : 0;
+  const ref = `rnd-${currentRound.roundNumber}-s${slot}`;
   try {
     const balanceMinor = await deps.wallet.bet(session.lobbyPlayerId!, amountMinor, ref, session.currency ?? 'USD');
     const bet: Bet = {
@@ -369,6 +376,7 @@ export async function handlePlaceLobbyBet(
       amountMinor,
       gameId: session.gameId ?? DEFAULT_GAME_ID,
       lobbyPlayerId: session.lobbyPlayerId,
+      slot,
     };
     currentRound.bets.push(bet);
     attachSession(sessionId);

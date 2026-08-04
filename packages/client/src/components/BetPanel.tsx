@@ -10,6 +10,8 @@ interface BetPanelProps {
   setAutoCashoutEnabled: (v: boolean) => void;
   autoCashout: number;
   setAutoCashout: (v: number) => void;
+  autoBetEnabled: boolean;
+  setAutoBetEnabled: (v: boolean) => void;
   currentMultiplier: number;
   /** Quick-stake chip values; first 4 are shown (e.g. 10 / 100 / 1K / 10K). */
   betAmounts: number[];
@@ -35,6 +37,8 @@ export default function BetPanel({
   setAutoCashoutEnabled,
   autoCashout,
   setAutoCashout,
+  autoBetEnabled,
+  setAutoBetEnabled,
   currentMultiplier,
   betAmounts,
   onPlaceBet,
@@ -69,12 +73,16 @@ export default function BetPanel({
       {/* Tabs + Bonus */}
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-4">
-          <span className="text-sm font-bold text-neutral-600 cursor-default" title="Auto-rebet — coming soon">
+          <button
+            onClick={() => setAutoBetEnabled(!autoBetEnabled)}
+            className={`text-sm font-bold transition ${autoBetEnabled ? 'text-brand-400' : 'text-neutral-500 hover:text-neutral-300'}`}
+            title="Auto-rebet each round"
+          >
             Auto Bet
-          </span>
+          </button>
           <button
             onClick={() => setAutoCashoutEnabled(!autoCashoutEnabled)}
-            className={`text-sm font-bold transition ${autoCashoutEnabled ? 'text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
+            className={`text-sm font-bold transition ${autoCashoutEnabled ? 'text-brand-400' : 'text-neutral-500 hover:text-neutral-300'}`}
           >
             Auto Cashout
           </button>
