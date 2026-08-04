@@ -78,6 +78,36 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  // Catalogue of published games (for "Open game" → edit an existing one).
+  const [games, setGames] = useState<{ gameId: string; name: string }[]>([]);
+  const refreshGames = useCallback(async () => {
+    try {
+      const r = await fetch('/api/games');
+      if (r.ok) { const j = (await r.json()) as { items?: { gameId: string; name: string }[] }; setGames(j.items ?? []); }
+    } catch { /* server may be offline — Open list stays empty */ }
+  }, []);
+  useEffect(() => { void refreshGames(); }, [refreshGames]);
+
+  // New game: reset to a clean default with an empty name (→ a fresh Game ID).
+  const handleNew = useCallback(() => {
+    if (theme.brandName && !window.confirm('Start a new game? Unsaved changes to the current design will be lost.')) return;
+    setTheme({ ...PRESETS.galaxy, brandName: '' });
+  }, [theme.brandName]);
+
+  // Open an existing game's published theme into the editor (Publish then updates it).
+  const handleOpen = useCallback(async (gameId: string) => {
+    if (!gameId) return;
+    if (theme.brandName && slug(theme.brandName) !== gameId
+        && !window.confirm(`Open "${gameId}"? Unsaved changes to the current design will be lost.`)) return;
+    try {
+      const r = await fetch(`/api/theme?game=${encodeURIComponent(gameId)}`);
+      if (!r.ok) { alert(`Could not load game "${gameId}" (${r.status}).`); return; }
+      const loaded = (await r.json()) as Partial<Theme>;
+      // Merge over a preset so any missing field still yields a complete Theme.
+      setTheme({ ...PRESETS.galaxy, ...loaded, colors: { ...PRESETS.galaxy.colors, ...(loaded.colors ?? {}) } });
+    } catch (e) { alert('Load failed: ' + (e as Error).message); }
+  }, [theme.brandName]);
+
   const [publishing, setPublishing] = useState(false);
   const handlePublish = useCallback(async () => {
     // Publish this theme to the game server's catalogue as a first-class game.
@@ -150,6 +180,7 @@ export default function App() {
         throw new Error(err?.error?.message ?? `Publish failed (${res.status})`);
       }
       alert(`Published "${theme.brandName}" as game "${gameId}" (${exists.ok ? 'updated' : 'created'}).\nLaunch with ?game=${gameId}`);
+      void refreshGames(); // a newly-created game now appears in "Open game"
     } catch (e) {
       alert('Publish failed: ' + (e as Error).message);
     } finally {
@@ -172,7 +203,15 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col text-slate-100">
-      <TopBar onExport={handleExport} onImportClick={() => fileInputRef.current?.click()} onPublish={handlePublish} publishing={publishing} />
+      <TopBar
+        onExport={handleExport}
+        onImportClick={() => fileInputRef.current?.click()}
+        onPublish={handlePublish}
+        publishing={publishing}
+        onNew={handleNew}
+        games={games}
+        onOpen={handleOpen}
+      />
 
       <input
         ref={fileInputRef}
@@ -214,7 +253,10 @@ export default function App() {
 }
 
 // ─── Top bar ────────────────────────────────────────────────────────────────
-function TopBar({ onExport, onImportClick, onPublish, publishing }: { onExport: () => void; onImportClick: () => void; onPublish: () => void; publishing: boolean }) {
+function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen }: {
+  onExport: () => void; onImportClick: () => void; onPublish: () => void; publishing: boolean;
+  onNew: () => void; games: { gameId: string; name: string }[]; onOpen: (gameId: string) => void;
+}) {
   return (
     <header className="flex items-center justify-between px-5 py-3 border-b border-ink-500/40 bg-ink-950/80 backdrop-blur-xl">
       <div className="flex items-center gap-3">
@@ -234,6 +276,24 @@ function TopBar({ onExport, onImportClick, onPublish, publishing }: { onExport: 
       </div>
 
       <div className="flex items-center gap-2">
+        <button
+          onClick={onNew}
+          className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
+          title="Start a fresh game"
+        >
+          + New
+        </button>
+        <select
+          value=""
+          onChange={(e) => { const v = e.target.value; e.target.value = ''; onOpen(v); }}
+          className="text-xs px-2 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 focus:outline-none focus:border-cyan-500/60 uppercase tracking-wider font-semibold max-w-[10rem]"
+          title="Open a published game to edit"
+        >
+          <option value="" disabled>{games.length ? 'Open game…' : 'No games yet'}</option>
+          {games.map((g) => (
+            <option key={g.gameId} value={g.gameId}>{g.name} ({g.gameId})</option>
+          ))}
+        </select>
         <button
           onClick={onImportClick}
           className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
