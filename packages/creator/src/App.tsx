@@ -84,6 +84,10 @@ export default function App() {
     // The catalogue API is admin-only, so we log in for a short-lived JWT.
     // (Dev tool: creds are prompted, never stored. Server reached via vite proxy.)
     const gameId = slug(theme.brandName);
+    if (!theme.brandName?.trim() || gameId === 'theme') {
+      alert('Give your game a name first (the "Game name" field under Brand).');
+      return;
+    }
     const user = window.prompt(`Publish "${theme.brandName}" as game "${gameId}".\n\nAdmin username:`);
     if (!user) return;
     const pass = window.prompt('Admin password:');
@@ -394,9 +398,14 @@ function EditorForm({
             type="text"
             value={theme.brandName}
             onChange={(e) => update('brandName', e.target.value)}
+            placeholder="e.g. Skyline Cruise"
             className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-9 text-sm font-display font-semibold focus:outline-none focus:border-cyan-500/60"
             maxLength={32}
           />
+          <p className="text-[10px] text-slate-500 mt-1">
+            Published as game ID <span className="font-mono text-cyan-400">{slug(theme.brandName) || '—'}</span>
+            {' '}· launch at <span className="font-mono">?game={slug(theme.brandName) || '…'}</span>
+          </p>
         </Field>
         <Field label="Tagline">
           <input
