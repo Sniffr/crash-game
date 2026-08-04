@@ -469,6 +469,9 @@ function GifVideo({ src, mode, remainingMs }: { src: string; mode: FitMode; rema
       loop={mode === 'loop'}
       muted
       playsInline
+      preload="auto"
+      disablePictureInPicture
+      disableRemotePlayback
       className="absolute inset-0 w-full h-full object-cover"
     />
   );
