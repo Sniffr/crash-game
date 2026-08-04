@@ -53,7 +53,7 @@ export async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual
       } satisfies HistoryEntry);
       sendToSession(sessionId, {
         type: 'cashout_success',
-        data: { multiplier: atMultiplier, profit: bet.profit, balance: newBal, source, stats },
+        data: { multiplier: atMultiplier, profit: bet.profit, balance: newBal, source, stats, slot: bet.slot ?? 0 },
       });
     } catch (err) {
       if (err instanceof StoreOfflineError) {
@@ -91,7 +91,7 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
   bet.profit = winAmountMinor;
 
   const deps = getLobbyWiringDeps();
-  const ref = `rnd-${currentRoundRef?.roundNumber ?? 'x'}`;
+  const ref = `rnd-${currentRoundRef?.roundNumber ?? 'x'}-s${bet.slot ?? 0}`;
   if (deps) {
     try {
       const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? 'USD');
@@ -99,7 +99,7 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
         type: 'cashout_success',
         // Carry the same money fields as operator cashouts so the client formats
         // the win in minor units (currency), not as raw dollars.
-        data: { multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? 'USD', profit: winAmountMinor, balanceMinor, source },
+        data: { multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? 'USD', profit: winAmountMinor, balanceMinor, source, slot: bet.slot ?? 0 },
       });
     } catch (err) {
       console.error('[cashOutLobbyBet] wallet.win failed:', err);
@@ -254,6 +254,7 @@ export async function tryCashoutBet(
           currency: cashoutResult.currency,
           source,
           balanceMinor: cashoutResult.balanceMinor,
+          slot: bet.slot ?? 0,
         },
       });
     } catch (err) {

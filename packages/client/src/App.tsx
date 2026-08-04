@@ -163,7 +163,18 @@ export default function App() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [lobbyUrl, setLobbyUrl] = useState<string | null>(null);
   const [stats, setStats] = useState<SessionStats>(ZERO_STATS);
-  const [hasBet, setHasBet] = useState(false);
+  // Per-slot active-bet flags for the dual-bet UI ([slot0, slot1]).
+  const [hasBet, setHasBet] = useState<[boolean, boolean]>([false, false]);
+  const setSlotBet = useCallback((slot: number, val: boolean) => {
+    setHasBet((prev) => {
+      const next = [prev[0], prev[1]] as [boolean, boolean];
+      next[slot === 1 ? 1 : 0] = val;
+      return next;
+    });
+  }, []);
+  // Auto Bet (auto-rebet) per slot.
+  const [autoBet1, setAutoBet1] = useState(false);
+  const [autoBet2, setAutoBet2] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [toast, setToast] = useState<{ kind: 'win' | 'loss' | 'info'; text: string } | null>(null);
   const [, setConnected] = useState(false);
@@ -343,7 +354,7 @@ export default function App() {
           history: isDefault ? (message.data.history ?? prev.history) : prev.history,
           flightStartTime: message.data.phase === 'FLYING' ? message.data.startTime : null,
         }));
-        setHasBet(false);
+        setHasBet([false, false]);
         break;
       }
 
@@ -366,7 +377,7 @@ export default function App() {
           prevServerSeed: message.data.prevServerSeed ?? prev.prevServerSeed,
           prevRoundNumber: message.data.prevRoundNumber ?? prev.prevRoundNumber,
         }));
-        if (message.data.phase === 'BETTING') setHasBet(false);
+        if (message.data.phase === 'BETTING') setHasBet([false, false]);
         break;
 
       case 'countdown_update':
@@ -402,9 +413,9 @@ export default function App() {
             history,
           };
         });
-        setHasBet((had) => {
-          if (had) flashToast('loss', `Crashed @ ${message.data.crashPoint.toFixed(2)}x`);
-          return false;
+        setHasBet((prev) => {
+          if (prev[0] || prev[1]) flashToast('loss', `Crashed @ ${message.data.crashPoint.toFixed(2)}x`);
+          return [false, false];
         });
         break;
       }
@@ -419,7 +430,7 @@ export default function App() {
         } else if (message.data.balance != null) {
           setBalance(message.data.balance);
         }
-        setHasBet(true);
+        setSlotBet(message.data.bet?.slot ?? 0, true);
         if (message.data.stats) setStats(message.data.stats);
         if (message.data.isOperator === true) {
           // Operator frame: bet.amount is integer minor units; currency is top-level.
@@ -438,7 +449,7 @@ export default function App() {
         } else if (message.data.balance != null) {
           setBalance(message.data.balance);
         }
-        setHasBet(false);
+        setSlotBet(message.data.slot ?? 0, false);
         if (message.data.stats) setStats(message.data.stats);
         if (message.data.winAmountMinor != null) {
           // Operator frame: no `profit` field; use winAmountMinor + currency.
@@ -544,8 +555,8 @@ export default function App() {
     }
   }, [flashToast]);
 
-  // Place a bet with an explicit stake + auto-cashout (each bet section passes its own).
-  const placeBetWith = (amount: number, autoEnabled: boolean, autoVal: number) => {
+  // Place a bet for a given slot with an explicit stake + auto-cashout.
+  const placeBetWith = (amount: number, autoEnabled: boolean, autoVal: number, slot: 0 | 1 = 0) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
     const autoTarget = autoEnabled ? autoVal : undefined;
@@ -556,21 +567,33 @@ export default function App() {
       const amountMinor = toMinor(amount, session.currency);
       ws.send(JSON.stringify({
         type: 'place_bet',
-        data: { sessionId: session.sessionId, amountMinor, autoCashout: autoTarget },
+        data: { sessionId: session.sessionId, amountMinor, autoCashout: autoTarget, slot },
       }));
     } else {
       ws.send(JSON.stringify({
         type: 'place_bet',
-        data: { sessionId: session.sessionId, amount, autoCashout: autoTarget },
+        data: { sessionId: session.sessionId, amount, autoCashout: autoTarget, slot },
       }));
     }
   };
-  const placeBet = () => placeBetWith(betAmount, autoCashoutEnabled, autoCashout);
-  const cashout = () => {
+  const placeBet = () => placeBetWith(betAmount, autoCashoutEnabled, autoCashout, 0);
+  const cashout = (slot: 0 | 1 = 0) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
-    ws.send(JSON.stringify({ type: 'cashout', data: { sessionId: session.sessionId } }));
+    ws.send(JSON.stringify({ type: 'cashout', data: { sessionId: session.sessionId, slot } }));
   };
+
+  // Auto Bet: at the start of each betting window, re-place any enabled slot.
+  const prevPhaseRef = useRef(gameState.phase);
+  useEffect(() => {
+    const phase = gameState.phase;
+    const prev = prevPhaseRef.current;
+    prevPhaseRef.current = phase;
+    if (phase !== 'BETTING' || prev === 'BETTING' || !session) return;
+    if (autoBet1 && !hasBet[0]) placeBetWith(betAmount, autoCashoutEnabled, autoCashout, 0);
+    if (autoBet2 && !hasBet[1]) placeBetWith(bet2Amount, auto2Enabled, auto2, 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gameState.phase]);
   const resetBalance = () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
@@ -670,25 +693,27 @@ export default function App() {
             {/* Dual bet sections — side-by-side on desktop, stacked on mobile */}
             <div className="grid gap-3 sm:grid-cols-2">
               <BetPanel
-                phase={gameState.phase} hasBet={hasBet} balance={balance}
+                phase={gameState.phase} hasBet={hasBet[0]} balance={balance}
                 betAmount={betAmount} setBetAmount={setBetAmount}
                 autoCashoutEnabled={autoCashoutEnabled} setAutoCashoutEnabled={setAutoCashoutEnabled}
                 autoCashout={autoCashout} setAutoCashout={setAutoCashout}
+                autoBetEnabled={autoBet1} setAutoBetEnabled={setAutoBet1}
                 currentMultiplier={gameState.currentMultiplier}
                 betAmounts={[10, 100, 1000, 10000]}
-                onPlaceBet={placeBet} onCashout={cashout}
+                onPlaceBet={placeBet} onCashout={() => cashout(0)}
                 maxBetMinor={session?.rgLimits?.maxBetMinor}
                 currency={session?.currency}
                 isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
               />
               <BetPanel
-                phase={gameState.phase} hasBet={hasBet} balance={balance}
+                phase={gameState.phase} hasBet={hasBet[1]} balance={balance}
                 betAmount={bet2Amount} setBetAmount={setBet2Amount}
                 autoCashoutEnabled={auto2Enabled} setAutoCashoutEnabled={setAuto2Enabled}
                 autoCashout={auto2} setAutoCashout={setAuto2}
+                autoBetEnabled={autoBet2} setAutoBetEnabled={setAutoBet2}
                 currentMultiplier={gameState.currentMultiplier}
                 betAmounts={[10, 100, 1000, 10000]}
-                onPlaceBet={() => placeBetWith(bet2Amount, auto2Enabled, auto2)} onCashout={cashout}
+                onPlaceBet={() => placeBetWith(bet2Amount, auto2Enabled, auto2, 1)} onCashout={() => cashout(1)}
                 maxBetMinor={session?.rgLimits?.maxBetMinor}
                 currency={session?.currency}
                 isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}

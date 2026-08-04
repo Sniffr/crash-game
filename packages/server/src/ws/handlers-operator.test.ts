@@ -214,6 +214,50 @@ describe('WS handler operator discrimination', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Dual-bet (demo path): two slots coexist, same slot rejected, independent cashout
+  // ---------------------------------------------------------------------------
+
+  it('demo dual-bet: slots 0 and 1 coexist; duplicate slot rejected; independent cashout', async () => {
+    const sessionId = 'demo-dual-1';
+    const round = makeBettingRound(7);
+    _internal__setCurrentRoundForTesting(round);
+    const demoSession = {
+      sessionId, displayName: 'Dual Tester', balance: 1000,
+      createdAt: Date.now(), expiresAt: Date.now() + 3_600_000,
+    };
+    // One-shot per place_bet call (3) — never a persistent default, so this test
+    // can't leak a demo session into the operator tests that follow.
+    mockGetSession
+      .mockResolvedValueOnce(demoSession)
+      .mockResolvedValueOnce(demoSession)
+      .mockResolvedValueOnce(demoSession);
+
+    // Two independent bets in the same round from the same session.
+    await handleMessage(fakeWs, { type: 'place_bet', data: { sessionId, amount: 10, slot: 0 } }, noop);
+    await handleMessage(fakeWs, { type: 'place_bet', data: { sessionId, amount: 20, slot: 1 } }, noop);
+
+    expect(round.bets).toHaveLength(2);
+    expect(round.bets.find((b) => b.slot === 0)!.amount).toBe(10);
+    expect(round.bets.find((b) => b.slot === 1)!.amount).toBe(20);
+
+    // A second bet in an already-occupied slot is rejected.
+    mockSafeSend.mockClear();
+    await handleMessage(fakeWs, { type: 'place_bet', data: { sessionId, amount: 10, slot: 0 } }, noop);
+    expect(round.bets).toHaveLength(2);
+    expect(mockSafeSend).toHaveBeenCalledWith(
+      fakeWs,
+      expect.objectContaining({ type: 'error', data: expect.objectContaining({ message: expect.stringMatching(/already have a bet in this slot/i) }) }),
+    );
+
+    // Cash out slot 0 only — slot 1 stays live.
+    const flying = { ...round, phase: 'FLYING' as const, currentMultiplier: 2.0 };
+    _internal__setCurrentRoundForTesting(flying);
+    await handleMessage(fakeWs, { type: 'cashout', data: { sessionId, slot: 0 } }, noop);
+    expect(flying.bets.find((b) => b.slot === 0)!.cashedOut).toBe(true);
+    expect(flying.bets.find((b) => b.slot === 1)!.cashedOut).toBe(false);
+  });
+
+  // ---------------------------------------------------------------------------
   // Test 2: operator session place_bet → wallet debit + betLog ARMED + Bet pushed
   // ---------------------------------------------------------------------------
 
@@ -246,7 +290,7 @@ describe('WS handler operator discrimination', () => {
     const bet = round.bets[0];
     expect(bet.playerId).toBe(sessionId);
     expect(bet.operatorId).toBe(OPERATOR_ID);
-    expect(bet.betId).toBe(`bet-${sessionId}-2`);
+    expect(bet.betId).toBe(`bet-${sessionId}-2-s0`);
     expect(bet.betTxnId).toBeTruthy();
     expect(bet.amountMinor).toBe(10_000);
     expect(bet.currency).toBe(CURRENCY);
@@ -393,7 +437,7 @@ describe('WS handler operator discrimination', () => {
     );
 
     // betLog row must be VOIDED (placeOperatorBet transitions PENDING→VOIDED on confirmed rejection)
-    const betId = `bet-${sessionId}-4`;
+    const betId = `bet-${sessionId}-4-s0`;
     const betRow = await betLog.getById(betId);
     expect(betRow?.state).toBe('VOIDED');
     expect(betRow?.errorCode).toBeTruthy();

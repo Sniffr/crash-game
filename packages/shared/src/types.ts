@@ -38,6 +38,9 @@ export interface Bet {
   gameId?: string;
   /** Personal-lobby real-money player (casino uuid). Set only for lobby real-money bets; settles against wallet_ledger. */
   lobbyPlayerId?: string;
+  /** Bet slot for the dual-bet UI (0 or 1). A human session may hold one bet per
+   *  slot per round. Absent/0 for bots and the legacy single-bet flow. */
+  slot?: number;
 }
 
 export interface RoundState {
