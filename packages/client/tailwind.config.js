@@ -4,11 +4,11 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        // iMoon uses Nunito Sans — a rounded humanist sans. Heavy weights read
-        // as the display face; JetBrains Mono keeps the climbing multiplier and
-        // history figures tabular (no width jitter) — a deliberate deviation.
-        display: ['"Nunito Sans"', 'system-ui', 'sans-serif'],
-        sans: ['"Nunito Sans"', 'system-ui', 'sans-serif'],
+        // Poppins — a geometric sans; heavy weights carry the display role.
+        // JetBrains Mono keeps the climbing multiplier and history figures
+        // tabular (no width jitter) — a deliberate deviation.
+        display: ['Poppins', 'system-ui', 'sans-serif'],
+        sans: ['Poppins', 'system-ui', 'sans-serif'],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {

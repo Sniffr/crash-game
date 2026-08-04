@@ -68,7 +68,6 @@ export default function BetPanel({
 
   const canBet = phase === 'BETTING' && !hasBet && hasEnoughBalance && !exceedsMaxBet;
   const canCashout = phase === 'FLYING' && hasBet;
-  const isCashedOut = hasBet && phase !== 'FLYING' && phase !== 'BETTING';
 
   const seconds =
     phase === 'BETTING' && countdownMs != null
@@ -191,54 +190,38 @@ export default function BetPanel({
         </div>
       )}
 
-      {/* Primary action */}
-      {canBet && (
-        <button
-          onClick={onPlaceBet}
-          className="w-full h-12 rounded-control bg-bet-500 hover:bg-bet-400 text-white font-display font-extrabold text-base transition active:scale-[0.99]"
-        >
-          Bet {symbol}{betAmount.toFixed(Math.min(decimals, 8))}
-          {seconds != null && <span className="ml-2 opacity-70 font-bold">· {seconds}s</span>}
-        </button>
-      )}
-
-      {canCashout && (
+      {/* Primary action — Cashout while flying with a live bet; otherwise the
+          Place Bet button is ALWAYS shown (disabled with a reason when you can't
+          bet yet), so it never disappears between rounds. */}
+      {canCashout ? (
         <button
           onClick={onCashout}
-          className="w-full h-12 rounded-control bg-cash-500 hover:bg-cash-400 text-space-950 font-display font-extrabold text-base transition active:scale-[0.99] btn-pulse-cashout"
+          className="w-full h-12 rounded-control bg-cash-500 hover:bg-cash-400 text-space-950 font-display font-extrabold text-base transition active:scale-[0.99]"
         >
           Cash out {symbol}{(betAmount * currentMultiplier).toFixed(Math.min(decimals, 8))}
         </button>
-      )}
-
-      {isCashedOut && (
-        <div className="w-full h-12 rounded-control bg-space-900/50 border border-white/5 text-slate-400 font-bold text-sm flex items-center justify-center">
-          Round complete
+      ) : hasBet ? (
+        <div className={`w-full h-12 rounded-control border font-bold text-sm flex items-center justify-center ${
+          phase === 'BETTING'
+            ? 'bg-bet-500/12 border-bet-500/40 text-bet-400'
+            : 'bg-space-900/50 border-white/5 text-slate-400'
+        }`}>
+          {phase === 'BETTING' ? 'Bet locked in' : 'Round complete'}
         </div>
-      )}
-
-      {hasBet && phase === 'BETTING' && (
-        <div className="w-full h-12 rounded-control bg-bet-500/12 border border-bet-500/40 text-bet-400 font-bold text-sm flex items-center justify-center">
-          Bet locked in
-        </div>
-      )}
-
-      {exceedsMaxBet && !hasBet && phase === 'BETTING' && (
-        <div className="w-full h-12 rounded-control bg-space-900/50 border border-loss-500/30 text-loss-500 font-bold text-sm flex items-center justify-center">
-          Above operator limit
-        </div>
-      )}
-
-      {!canBet && !canCashout && !isCashedOut && !hasBet && !exceedsMaxBet && phase === 'BETTING' && !hasEnoughBalance && (
-        <div className="w-full h-12 rounded-control bg-space-900/50 border border-loss-500/30 text-loss-500 font-bold text-sm flex items-center justify-center">
-          Insufficient balance
-        </div>
-      )}
-
-      {phase !== 'BETTING' && phase !== 'FLYING' && !hasBet && (
-        <div className="w-full h-12 rounded-control bg-space-900/40 border border-white/5 text-slate-500 font-bold text-sm flex items-center justify-center">
-          Waiting for next launch…
-        </div>
+      ) : (
+        <button
+          onClick={onPlaceBet}
+          disabled={!canBet}
+          className="w-full h-12 rounded-control bg-bet-500 hover:bg-bet-400 text-white font-display font-extrabold text-base transition active:scale-[0.99] disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-bet-500"
+        >
+          {canBet
+            ? `Bet ${symbol}${betAmount.toFixed(Math.min(decimals, 8))}${seconds != null ? ` · ${seconds}s` : ''}`
+            : exceedsMaxBet
+            ? 'Above operator limit'
+            : !hasEnoughBalance
+            ? 'Insufficient balance'
+            : 'Bet · waiting for next round'}
+        </button>
       )}
     </div>
   );

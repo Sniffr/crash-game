@@ -162,7 +162,7 @@ export default function App() {
   const [hasBet, setHasBet] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [toast, setToast] = useState<{ kind: 'win' | 'loss' | 'info'; text: string } | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [, setConnected] = useState(false);
   const [soundOn, setSoundOn] = useState(!isMuted());
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const wsRef = useRef<WebSocket | null>(null);
@@ -614,7 +614,6 @@ export default function App() {
   return (
     <div className="min-h-screen text-slate-100 relative">
       <Header
-        connected={connected}
         soundOn={soundOn}
         onToggleSound={() => {
           uiTick();
@@ -730,10 +729,9 @@ export default function App() {
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 function Header({
-  connected, soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
+  soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
   theme, themeLocked, onLoadThemeClick, onResetTheme, session, lobbyUrl,
 }: {
-  connected: boolean;
   soundOn: boolean;
   onToggleSound: () => void;
   onOpenDrawer: () => void;
@@ -774,10 +772,6 @@ function Header({
             {tagline}
           </span>
         </div>
-        <span
-          className={`hidden sm:inline-block w-1.5 h-1.5 rounded-full ml-3 ${connected ? 'bg-bet-500' : 'bg-loss-500 animate-pulse'}`}
-          title={connected ? 'live' : 'reconnecting'}
-        />
       </div>
 
       <div className="flex items-center gap-2 sm:gap-3">
