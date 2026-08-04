@@ -51,10 +51,37 @@ jobs:
       - name: Build client
         run: npm run --workspace=packages/client build
 
-  docker:
+  # PRs: build the image to validate the Dockerfile (no push).
+  docker-build:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Validates the production Dockerfile builds end to end (no push).
-      - name: Build image
-        run: docker build -t crash-game:ci .
+      - run: docker build -t crash-game:ci .
+
+  # main: build + push ghcr.io/stdiox-labs/crash-game:latest → keel rolls it out.
+  # Needs a repo secret GHCR_TOKEN = a PAT with `write:packages` for stdiox-labs
+  # (the cluster's existing `ghcr-pull` secret pulls it). Falls back to a no-op
+  # with a clear message if the secret is absent.
+  publish:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for GHCR_TOKEN
+        id: guard
+        run: |
+          if [ -n "${{ secrets.GHCR_TOKEN }}" ]; then echo "ready=true" >> "$GITHUB_OUTPUT";
+          else echo "::warning::GHCR_TOKEN not set — skipping image publish. Add a PAT with write:packages for stdiox-labs to enable it."; echo "ready=false" >> "$GITHUB_OUTPUT"; fi
+      - if: steps.guard.outputs.ready == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN }}
+      - if: steps.guard.outputs.ready == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/stdiox-labs/crash-game:latest
