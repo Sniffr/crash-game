@@ -1,36 +1,31 @@
-import { config } from 'dotenv';
-config({ path: '../../.env' });
-
 import { randomUUID } from 'node:crypto';
-import { describe, it, expect, afterAll } from 'vitest';
-import { getPool, bootstrapCasinoSchema } from './pg.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { makeTestDb, type TestDb } from './pg-test-support.js';
+import { bootstrapCasinoSchema } from './pg.js';
 import { PlayersRepo } from './players-repo.js';
 import { WalletLedger, InsufficientFundsError } from './wallet-ledger.js';
 
-const pool = getPool();
-const players = new PlayersRepo(pool);
-const ledger = new WalletLedger(pool);
+// Isolated throwaway Postgres schema per file — never touches the real casino DB.
+let db: TestDb;
+let players: PlayersRepo;
+let ledger: WalletLedger;
 
-const createdPlayerIds: string[] = [];
+beforeAll(async () => {
+  db = await makeTestDb();
+  players = new PlayersRepo(db.pool);
+  ledger = new WalletLedger(db.pool);
+});
+afterAll(async () => { await db.cleanup(); }); // drops the whole schema
 
 async function makePlayer(): Promise<string> {
   const p = await players.create(`t_${randomUUID()}`, 'hash');
-  createdPlayerIds.push(p.playerId);
   return p.playerId;
 }
-
-afterAll(async () => {
-  for (const id of createdPlayerIds) {
-    await pool.query('DELETE FROM wallet_ledger WHERE player_id = $1', [id]);
-    await pool.query('DELETE FROM players WHERE player_id = $1', [id]);
-  }
-  await pool.end();
-});
 
 describe('WalletLedger', () => {
   it('starts at zero and credits deposits', async () => {
     const pid = await makePlayer();
-    await bootstrapCasinoSchema(pool);
+    await bootstrapCasinoSchema(db.pool);
     expect(await ledger.balance(pid)).toBe(0);
 
     expect(await ledger.deposit(pid, 5000)).toBe(5000);
