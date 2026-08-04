@@ -356,18 +356,14 @@ export default function GameCanvas({
   return (
     <div className="relative w-full h-full">
       {gifSrc &&
-        // key={src} forces a fresh mount whenever the source changes, which
-        // restarts the animation from frame 0. MP4/WebM (converted from heavy
-        // GIFs) play as an autoplay-loop <video>; anything else stays an <img>.
+        // key={src} forces a fresh mount whenever the source changes (i.e. on
+        // every phase change), which restarts the clip and re-applies the fit.
         (isVideoSrc(gifSrc) ? (
-          <video
+          <GifVideo
             key={gifSrc}
             src={gifSrc}
-            autoPlay
-            loop
-            muted
-            playsInline
-            className="absolute inset-0 w-full h-full object-cover"
+            mode={fitModeForPhase(phase)}
+            remainingMs={countdownMs ?? DEFAULT_BETTING_MS}
           />
         ) : (
           <img
@@ -385,6 +381,72 @@ export default function GameCanvas({
 /** A stored asset URL that should render as <video> rather than <img>. */
 function isVideoSrc(src: string): boolean {
   return /^data:video\//i.test(src) || /\.(mp4|webm|mov)(\?|#|$)/i.test(src);
+}
+
+type FitMode = 'stretch' | 'loop' | 'once';
+
+// Fallback betting window when the server countdown isn't known yet (matches
+// GAME_CONFIG.bettingPhaseMs). Not imported from @crash/shared because that
+// barrel pulls in node crypto and breaks the browser build.
+const DEFAULT_BETTING_MS = 5000;
+
+/**
+ * playbackRate that makes a clip of `durationSec` play exactly once over the
+ * time left in betting (`remainingMs`), clamped to the browser-supported range.
+ */
+export function stretchPlaybackRate(durationSec: number, remainingMs: number): number {
+  const remSec = Math.max(0.25, remainingMs / 1000);
+  return Math.max(0.0625, Math.min(16, durationSec / remSec));
+}
+
+/** How a phase clip is time-fitted — derived from the phase, no per-game config. */
+function fitModeForPhase(phase: GameCanvasProps['phase']): FitMode {
+  if (phase === 'BETTING') return 'stretch'; // fill the betting window, once
+  if (phase === 'FLYING') return 'loop'; // seamless loop for the unbounded flight
+  return 'once'; // crash clip is authored to fit the ~1.5s crash window
+}
+
+/**
+ * A phase clip rendered as <video>, auto-fitted to its phase:
+ *   - stretch: playbackRate so a clip of any length plays exactly once across
+ *     the remaining betting window and ends as it closes.
+ *   - loop: native seamless loop.
+ *   - once: play through at native speed (cut off by the next phase).
+ */
+function GifVideo({ src, mode, remainingMs }: { src: string; mode: FitMode; remainingMs: number }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  // Capture the countdown once at mount; later per-tick updates must not re-fit.
+  const remainingAtMount = useRef(remainingMs);
+
+  useEffect(() => {
+    const v = ref.current;
+    if (!v) return;
+    const configure = () => {
+      if (mode === 'stretch' && v.duration > 0) {
+        // Play the whole clip over the time left in betting, so it ends as the
+        // window closes.
+        v.currentTime = 0;
+        v.playbackRate = stretchPlaybackRate(v.duration, remainingAtMount.current);
+      } else {
+        v.playbackRate = 1;
+      }
+      void v.play().catch(() => {});
+    };
+    if (v.readyState >= 1 /* HAVE_METADATA */) configure();
+    else v.addEventListener('loadedmetadata', configure, { once: true });
+  }, [mode]);
+
+  return (
+    <video
+      ref={ref}
+      src={src}
+      autoPlay
+      loop={mode === 'loop'}
+      muted
+      playsInline
+      className="absolute inset-0 w-full h-full object-cover"
+    />
+  );
 }
 
 /** Choose which GIF (if any) to display in GIF mode for the current phase. */
