@@ -195,7 +195,7 @@ export default function BetPanel({
       {canBet && (
         <button
           onClick={onPlaceBet}
-          className="w-full h-12 rounded-control bg-bet-500 hover:bg-bet-400 text-white font-display font-extrabold text-base transition active:scale-[0.99] shadow-aurora"
+          className="w-full h-12 rounded-control bg-bet-500 hover:bg-bet-400 text-white font-display font-extrabold text-base transition active:scale-[0.99]"
         >
           Bet {symbol}{betAmount.toFixed(Math.min(decimals, 8))}
           {seconds != null && <span className="ml-2 opacity-70 font-bold">· {seconds}s</span>}
