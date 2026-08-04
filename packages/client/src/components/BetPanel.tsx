@@ -113,15 +113,15 @@ export default function BetPanel({
           <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-neutral-400">Auto</span>
           <button
             onClick={() => setAutoCashoutEnabled(!autoCashoutEnabled)}
-            className={`w-9 h-5 rounded-full transition-colors relative ${
-              autoCashoutEnabled ? 'bg-brand-500' : 'bg-space-600'
+            className={`relative w-11 h-6 rounded-full border transition-colors ${
+              autoCashoutEnabled ? 'bg-brand-500 border-brand-400' : 'bg-space-600 border-white/10'
             }`}
             aria-pressed={autoCashoutEnabled}
             aria-label="Toggle auto cashout"
           >
             <span
-              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-                autoCashoutEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
+              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform duration-200 ${
+                autoCashoutEnabled ? 'translate-x-5' : 'translate-x-0'
               }`}
             />
           </button>

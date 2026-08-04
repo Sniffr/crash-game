@@ -59,38 +59,107 @@ html, body {
   100% { opacity: 1; transform: scale(1); }
 }
 
-/* ─── Game background: CSS starfield + drifting stripes (replaces the canvas
-   galaxy render). Sits behind the transparent game canvas. ───────────────── */
-.game-bg { background-color: hsl(0 0% 4%); }
+/* ─── Game background: a CSS parallax starfield (replaces the canvas galaxy).
+   Two star layers drift + twinkle at different speeds over a subtle deep-space
+   vignette. Sits behind the transparent game canvas. ───────────────────────── */
+.game-bg {
+  background-color: #000;
+  /* faint grey vignette for depth (no colour — stays pure greyscale) */
+  background-image: radial-gradient(130% 90% at 50% 0%, hsl(0 0% 9%), hsl(0 0% 4%) 55%, #000 100%);
+}
+/* Far layer — small, dense, brightness-varied; slow drift, gentle twinkle. */
 .game-bg::before {
   content: '';
   position: absolute;
-  inset: -60%;
+  inset: 0;
+  background-repeat: repeat;
+  background-size: 260px 220px;
   background-image:
-    radial-gradient(1.5px 1.5px at 20% 30%, hsl(0 0% 100% / 0.8), transparent 60%),
-    radial-gradient(1px 1px at 60% 70%, hsl(0 0% 100% / 0.55), transparent 60%),
-    radial-gradient(1.5px 1.5px at 82% 22%, hsl(0 0% 100% / 0.65), transparent 60%),
-    radial-gradient(1px 1px at 40% 82%, hsl(0 0% 100% / 0.45), transparent 60%),
-    radial-gradient(1px 1px at 90% 55%, hsl(0 0% 100% / 0.5), transparent 60%),
-    radial-gradient(1.5px 1.5px at 12% 88%, hsl(0 0% 100% / 0.55), transparent 60%),
-    radial-gradient(1px 1px at 50% 12%, hsl(0 0% 100% / 0.4), transparent 60%);
-  background-size: 320px 320px;
-  animation: bgStarDrift 90s linear infinite, bgTwinkle 5s ease-in-out infinite;
-  will-change: transform, opacity;
+    radial-gradient(1px 1px at 14px 22px,   hsl(0 0% 100% / 0.95), transparent),
+    radial-gradient(1px 1px at 60px 150px,  hsl(0 0% 100% / 0.45), transparent),
+    radial-gradient(1px 1px at 100px 44px,  hsl(0 0% 100% / 0.8),  transparent),
+    radial-gradient(1px 1px at 38px 96px,   hsl(0 0% 100% / 0.35), transparent),
+    radial-gradient(1px 1px at 132px 180px, hsl(0 0% 100% / 0.7),  transparent),
+    radial-gradient(1px 1px at 170px 70px,  hsl(0 0% 100% / 0.55), transparent),
+    radial-gradient(1px 1px at 200px 140px, hsl(210 60% 90% / 0.8), transparent),
+    radial-gradient(1px 1px at 84px 200px,  hsl(0 0% 100% / 0.5),  transparent),
+    radial-gradient(1px 1px at 226px 30px,  hsl(0 0% 100% / 0.9),  transparent),
+    radial-gradient(1px 1px at 244px 100px, hsl(0 0% 100% / 0.4),  transparent),
+    radial-gradient(1px 1px at 150px 118px, hsl(38 80% 88% / 0.7), transparent),
+    radial-gradient(1px 1px at 20px 175px,  hsl(0 0% 100% / 0.6),  transparent);
+  animation: starDriftFar 150s linear infinite, starTwinkleFar 5.5s ease-in-out infinite;
+  will-change: background-position, opacity;
 }
+/* Near layer — larger, brighter, sparser; faster drift for parallax. */
 .game-bg::after {
   content: '';
   position: absolute;
   inset: 0;
-  background: repeating-linear-gradient(115deg, hsl(0 0% 100% / 0.035) 0 1px, transparent 1px 20px);
-  animation: bgStripes 9s linear infinite;
-  will-change: background-position;
+  background-repeat: repeat;
+  background-size: 420px 320px;
+  background-image:
+    radial-gradient(2px 2px   at 60px 80px,   #fff, transparent),
+    radial-gradient(2.4px 2.4px at 300px 40px, #fff, transparent),
+    radial-gradient(1.6px 1.6px at 150px 250px, hsl(0 0% 100% / 0.85), transparent),
+    radial-gradient(2px 2px   at 380px 180px, #fff, transparent),
+    radial-gradient(1.8px 1.8px at 230px 130px, hsl(210 70% 92%), transparent),
+    radial-gradient(1.6px 1.6px at 40px 210px, hsl(0 0% 100% / 0.8), transparent),
+    radial-gradient(2.2px 2.2px at 340px 280px, hsl(40 80% 90%), transparent);
+  animation: starDriftNear 90s linear infinite, starTwinkleNear 3.4s ease-in-out infinite;
+  will-change: background-position, opacity;
 }
-@keyframes bgStarDrift { from { transform: translate3d(0,0,0); } to { transform: translate3d(-320px,-320px,0); } }
-@keyframes bgTwinkle   { 0%,100% { opacity: 0.9; } 50% { opacity: 0.55; } }
-@keyframes bgStripes   { from { background-position: 0 0; } to { background-position: 460px 0; } }
+@keyframes starDriftFar  { from { background-position: 0 0; } to { background-position: -260px 220px; } }
+@keyframes starDriftNear { from { background-position: 0 0; } to { background-position: 420px -320px; } }
+@keyframes starTwinkleFar  { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.45; } }
+@keyframes starTwinkleNear { 0%, 100% { opacity: 1; }   50% { opacity: 0.55; } }
+
+/* Supernova — a distant pulsing burst (white-hot core → warm/violet halo). */
+.sn-supernova {
+  position: absolute;
+  top: 15%; left: 73%;
+  width: 210px; height: 210px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    hsl(0 0% 100% / 0.95) 0%,
+    hsl(45 100% 78% / 0.55) 9%,
+    hsl(285 85% 66% / 0.28) 26%,
+    hsl(210 90% 62% / 0.14) 46%,
+    transparent 70%);
+  animation: snPulse 7s ease-in-out infinite;
+}
+@keyframes snPulse {
+  0%, 100% { transform: translate(-50%, -50%) scale(0.85); opacity: 0.65; }
+  50%      { transform: translate(-50%, -50%) scale(1.12); opacity: 1; }
+}
+
+/* Planet Earth — a large sphere low in the corner (partly off-screen). Ocean +
+   day/night terminator with continents and clouds layered as radial-gradients. */
+.sn-earth-glow {   /* atmospheric rim, sits just outside the sphere */
+  position: absolute;
+  left: -160px; bottom: -180px;
+  width: 440px; height: 440px;
+  border-radius: 50%;
+  background: radial-gradient(circle,
+    transparent 61%, hsl(205 90% 60% / 0.35) 68%, hsl(205 90% 60% / 0.08) 78%, transparent 88%);
+}
+.sn-earth {
+  position: absolute;
+  left: -130px; bottom: -150px;
+  width: 380px; height: 380px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 40% 28%, hsl(0 0% 100% / 0.22) 0 5%, transparent 8%),   /* cloud */
+    radial-gradient(circle at 66% 52%, hsl(0 0% 100% / 0.16) 0 4%, transparent 7%),   /* cloud */
+    radial-gradient(circle at 54% 40%, hsl(95 45% 42%) 0 9%, transparent 13%),        /* land */
+    radial-gradient(circle at 71% 60%, hsl(35 42% 44%) 0 7%, transparent 11%),        /* land */
+    radial-gradient(circle at 38% 62%, hsl(120 40% 38%) 0 8%, transparent 12%),       /* land */
+    radial-gradient(circle at 48% 74%, hsl(90 40% 40%) 0 6%, transparent 10%),        /* land */
+    radial-gradient(circle at 60% 34%, hsl(205 85% 56%) 0%, hsl(212 82% 40%) 44%, hsl(221 85% 18%) 76%, hsl(226 82% 8%) 100%); /* ocean + shading */
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .game-bg::before, .game-bg::after { animation: none; }
+  .game-bg::before, .game-bg::after, .sn-supernova { animation: none; }
 }
 
 /* Thin scrollbars */
