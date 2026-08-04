@@ -617,8 +617,12 @@ export default function App() {
       <main className="flex flex-col lg:flex-row gap-4 p-4 lg:p-5 lg:h-[calc(100vh-148px)]">
         {/* Game Canvas */}
         <section className="flex-1 relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 min-h-[340px] lg:min-h-0">
-          {/* CSS starfield + drifting stripes, behind the transparent canvas */}
-          <div className="game-bg absolute inset-0 pointer-events-none" aria-hidden="true" />
+          {/* CSS galaxy (starfield + supernova + planet Earth), behind the canvas */}
+          <div className="game-bg absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
+            <div className="sn-earth-glow" />
+            <div className="sn-earth" />
+            <div className="sn-supernova" />
+          </div>
           <GameCanvas
             phase={gameState.phase}
             flightStartTime={gameState.flightStartTime ?? null}
