@@ -219,10 +219,7 @@ export default function GameCanvas({
 }: GameCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
-  const starsRef = useRef<Array<{ x: number; y: number; r: number; speed: number; depth: number; tw: number }>>([]);
-  const nebulaRef = useRef<Array<{ x: number; y: number; r: number; hue: number; drift: number }>>([]);
   const flameParticlesRef = useRef<Array<{ x: number; y: number; vx: number; vy: number; life: number; max: number; hue: number }>>([]);
-  const orbitOffsetRef = useRef(0);
   const crashAnimRef = useRef<{ startTime: number; finalMultiplier: number } | null>(null);
   const bgScrollRef = useRef({ offset: 0, lastFrameMs: 0 });
 
@@ -236,35 +233,6 @@ export default function GameCanvas({
     crashed: theme?.assets?.spriteCrashed ?? null,
     bg:      theme?.assets?.background ?? null,
   });
-
-  // Stable starfield + nebula
-  useEffect(() => {
-    const stars: typeof starsRef.current = [];
-    for (let i = 0; i < 220; i++) {
-      const depth = Math.random();
-      stars.push({
-        x: Math.random(),
-        y: Math.random(),
-        r: 0.4 + depth * 1.8,
-        speed: 4 + depth * 18,
-        depth,
-        tw: Math.random() * Math.PI * 2,
-      });
-    }
-    starsRef.current = stars;
-
-    const nebula: typeof nebulaRef.current = [];
-    for (let i = 0; i < 4; i++) {
-      nebula.push({
-        x: Math.random(),
-        y: Math.random(),
-        r: 0.25 + Math.random() * 0.25,
-        hue: [275, 250, 195, 320][i % 4], // violet, indigo, cyan, magenta
-        drift: 0.01 + Math.random() * 0.02,
-      });
-    }
-    nebulaRef.current = nebula;
-  }, []);
 
   useEffect(() => {
     if (phase === 'CRASHED') {
@@ -299,7 +267,6 @@ export default function GameCanvas({
       }
       const W = canvas.width;
       const H = canvas.height;
-      const tSec = Date.now() / 1000;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
 
       // ── GIF mode: clear and overlay text only — the <img> renders the GIF
@@ -336,7 +303,9 @@ export default function GameCanvas({
         ctx.fillStyle = 'rgba(0, 0, 0, 0.30)';
         ctx.fillRect(0, 0, W, H);
       } else {
-        drawGalaxyBackground(ctx, W, H, dpr, tSec, starsRef.current, nebulaRef.current, orbitOffsetRef);
+        // No custom background image → leave the canvas transparent so the CSS
+        // starfield/stripes behind it (the .game-bg layer) shows through.
+        ctx.clearRect(0, 0, W, H);
       }
 
       // Pick the right sprite for the current phase + multiplier
@@ -489,72 +458,6 @@ function pickGif(theme: Theme | undefined, phase: GameCanvasProps['phase'], mult
   }
   // CRASHED + RESULT: show crashed gif if present, otherwise hold last flying frame
   return g.crashed ?? g.flying ?? null;
-}
-
-// ─── Background: nebula + parallax stars + orbital arcs ──────────────────────
-function drawGalaxyBackground(
-  ctx: CanvasRenderingContext2D,
-  W: number, H: number, dpr: number, tSec: number,
-  stars: Array<{ x: number; y: number; r: number; speed: number; depth: number; tw: number }>,
-  nebula: Array<{ x: number; y: number; r: number; hue: number; drift: number }>,
-  orbitRef: { current: number },
-) {
-  // Deep-space gradient
-  const bg = ctx.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, '#0a0820');
-  bg.addColorStop(0.5, '#070617');
-  bg.addColorStop(1, '#04030d');
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
-
-  // Nebula clouds (drifting soft blobs)
-  for (const n of nebula) {
-    const cx = (n.x + tSec * n.drift) % 1 * W;
-    const cy = (n.y * 0.6 + 0.2) * H;
-    const rad = n.r * Math.min(W, H);
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
-    grad.addColorStop(0, `hsla(${n.hue}, 70%, 55%, 0.16)`);
-    grad.addColorStop(0.5, `hsla(${n.hue}, 70%, 40%, 0.06)`);
-    grad.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, rad, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Subtle horizontal aurora band across the lower third
-  const aurora = ctx.createLinearGradient(0, H * 0.7, 0, H);
-  aurora.addColorStop(0, 'rgba(34, 211, 238, 0)');
-  aurora.addColorStop(0.5, 'rgba(124, 58, 237, 0.08)');
-  aurora.addColorStop(1, 'rgba(34, 211, 238, 0.05)');
-  ctx.fillStyle = aurora;
-  ctx.fillRect(0, H * 0.7, W, H * 0.3);
-
-  // Parallax stars
-  for (const s of stars) {
-    const sx = (s.x * W + tSec * s.speed * dpr) % W;
-    const sy = s.y * H;
-    const tw = 0.5 + 0.5 * Math.sin(tSec * 2 + s.tw);
-    const a = (0.25 + 0.75 * s.depth) * (0.6 + 0.4 * tw);
-    ctx.fillStyle = `rgba(${220 - s.depth * 40}, ${230 - s.depth * 20}, 255, ${a})`;
-    ctx.beginPath();
-    ctx.arc(sx, sy, s.r * dpr, 0, Math.PI * 2);
-    ctx.fill();
-  }
-
-  // Orbital arcs (curved guides — much nicer than a square grid)
-  orbitRef.current = (orbitRef.current + 0.3) % (140 * dpr);
-  ctx.save();
-  ctx.strokeStyle = 'rgba(124, 58, 237, 0.08)';
-  ctx.lineWidth = 1;
-  const cx = W * 0.5;
-  const cy = H * 1.4;
-  for (let r = 200 * dpr - orbitRef.current; r < Math.hypot(W, H) * 1.4; r += 140 * dpr) {
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, Math.PI * 1.2, Math.PI * 1.8);
-    ctx.stroke();
-  }
-  ctx.restore();
 }
 
 // ─── GIF-mode overlays (drawn on transparent canvas above the <img>) ────────

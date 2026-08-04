@@ -12,24 +12,24 @@ export default {
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
-        // Chrome — iMoon indigo-black ramp (sampled from imoon.com: body #110c20,
-        // header #1f1933). Stays consistent across per-game themes.
+        // Chrome — PURE NEUTRAL greyscale, hsl(0 0% L): black page, lighter panels.
+        // Only lightness varies; no hue, no saturation.
         space: {
-          950: '#0b0717', // deepest wells / insets
-          900: '#110c20', // page background
-          850: '#161027', // sunken rows
-          800: '#1a1430', // panels
-          700: '#1f1933', // raised / header
-          600: '#2a2440', // borders / hover
-          500: '#3b3457', // subtle dividers
+          950: 'hsl(0 0% 3%)',  // deepest wells / insets
+          900: 'hsl(0 0% 5%)',  // page background (near-black)
+          850: 'hsl(0 0% 7%)',  // sunken rows
+          800: 'hsl(0 0% 10%)', // panels
+          700: 'hsl(0 0% 14%)', // raised / header
+          600: 'hsl(0 0% 20%)', // borders / hover
+          500: 'hsl(0 0% 30%)', // subtle dividers
         },
-        // Fixed iMoon chrome palette — consistent across every game (only the
-        // canvas art below is per-game themed). Sampled from imoon.com.
-        brand: { 300: '#ffa866', 400: '#ff8a3d', 500: '#fb6514', 600: '#e5550a' }, // orange: primary / brand
-        info:  { 300: '#5aa6f0', 400: '#2f8ee8', 500: '#0c70db', 600: '#0a5cb8' }, // blue: secondary
-        bet:   { 400: '#2fbf5a', 500: '#22a04a', 600: '#1b8a3f' },                 // green: place bet
-        cash:  { 400: '#ffbc4a', 500: '#f5a623', 600: '#dc8f12' },                 // amber: cashout
-        loss:  { 400: '#f0666b', 500: '#e5484d', 600: '#c93b40' },                 // red: crash / loss
+        // Fixed chrome accents, in HSL — consistent across every game (only the
+        // canvas art below is per-game themed).
+        brand: { 300: 'hsl(26 100% 70%)', 400: 'hsl(24 100% 62%)', 500: 'hsl(21 97% 53%)', 600: 'hsl(21 92% 47%)' }, // orange: primary
+        info:  { 300: 'hsl(210 83% 65%)', 400: 'hsl(209 80% 55%)', 500: 'hsl(211 90% 45%)', 600: 'hsl(212 90% 38%)' }, // blue: secondary
+        bet:   { 400: 'hsl(138 61% 47%)', 500: 'hsl(139 65% 38%)', 600: 'hsl(139 67% 32%)' },                          // green: place bet
+        cash:  { 400: 'hsl(38 100% 65%)', 500: 'hsl(37 91% 55%)', 600: 'hsl(37 85% 47%)' },                            // amber: cashout
+        loss:  { 400: 'hsl(358 82% 67%)', 500: 'hsl(358 75% 59%)', 600: 'hsl(358 57% 51%)' },                          // red: crash
         // Themed accents — CSS-var backed so the per-game theme loader overrides
         // them at runtime. Defaults (set in index.css) follow iMoon:
         //   accent  = orange #fb6514 (primary / brand)
@@ -67,12 +67,12 @@ export default {
       boxShadow: {
         // Fixed chrome glows (iMoon palette) — consistent across games. `plasma`
         // now means the brand orange glow; names kept so existing refs resolve.
-        'panel': '0 8px 24px -12px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.05)',
-        'raised': '0 12px 32px -14px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.06)',
-        'plasma': '0 8px 22px -8px rgba(251,101,20,0.55)',  // orange (brand)
-        'aurora': '0 8px 22px -8px rgba(34,160,74,0.5)',    // green (bet)
-        'solar':  '0 8px 22px -8px rgba(245,166,35,0.5)',   // amber (cashout)
-        'nebula': '0 8px 26px -8px rgba(229,72,77,0.5)',    // red (crash)
+        'panel': '0 8px 24px -12px hsl(0 0% 0% / 0.7), 0 0 0 1px hsl(0 0% 100% / 0.05)',
+        'raised': '0 12px 32px -14px hsl(0 0% 0% / 0.8), inset 0 1px 0 hsl(0 0% 100% / 0.06)',
+        'plasma': '0 8px 22px -8px hsl(21 97% 53% / 0.55)', // orange (brand)
+        'aurora': '0 8px 22px -8px hsl(139 65% 38% / 0.5)', // green (bet)
+        'solar':  '0 8px 22px -8px hsl(37 91% 55% / 0.5)',  // amber (cashout)
+        'nebula': '0 8px 26px -8px hsl(358 75% 59% / 0.5)', // red (crash)
       },
       borderRadius: {
         'panel': '16px',

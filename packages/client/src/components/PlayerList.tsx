@@ -32,15 +32,15 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
   return (
     <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 flex-1 min-h-0 flex flex-col shadow-panel">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.22em]">
+        <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em]">
           Pilots in this round
         </h2>
-        <span className="text-xs text-slate-500 font-mono tabular-nums">{bets.length}</span>
+        <span className="text-xs text-neutral-500 font-mono tabular-nums">{bets.length}</span>
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-h-[420px] lg:max-h-none">
         {bets.length === 0 && (
-          <div className="text-center py-10 text-slate-600 text-xs">
+          <div className="text-center py-10 text-neutral-600 text-xs">
             Awaiting pilots…
           </div>
         )}
@@ -60,12 +60,12 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
             >
               <div className="flex items-center gap-2 min-w-0">
                 <Avatar isYou={isYou} />
-                <span className={`text-sm truncate ${isYou ? 'text-info-300 font-semibold' : 'text-slate-300'}`}>
+                <span className={`text-sm truncate ${isYou ? 'text-info-300 font-semibold' : 'text-neutral-300'}`}>
                   {isYou ? 'You' : bet.botName ?? bet.playerId.slice(0, 6)}
                 </span>
               </div>
               <div className="text-right shrink-0 leading-tight">
-                <div className={`text-sm font-mono tabular-nums ${isYou ? 'text-slate-100' : 'text-slate-400'}`}>
+                <div className={`text-sm font-mono tabular-nums ${isYou ? 'text-neutral-100' : 'text-neutral-400'}`}>
                   {bet.currency
                     ? fromMinor(bet.amountMinor ?? bet.amount, bet.currency)
                     : `$${bet.amount.toFixed(2)}`}
@@ -81,7 +81,7 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
                     auto {bet.autoCashout.toFixed(2)}x
                   </div>
                 ) : (
-                  <div className="text-[11px] text-slate-600 font-mono">
+                  <div className="text-[11px] text-neutral-600 font-mono">
                     manual
                   </div>
                 )}

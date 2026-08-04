@@ -98,13 +98,13 @@ export default function AuthModal({
     >
       <div className="w-full max-w-sm rounded-panel border border-space-500/50 bg-space-900/90 shadow-panel p-6 animate-toast-in">
         <div className="flex items-center justify-between mb-5">
-          <h2 className="font-display font-bold text-lg tracking-[0.14em] uppercase text-slate-100">
+          <h2 className="font-display font-bold text-lg tracking-[0.14em] uppercase text-neutral-100">
             {mode === 'login' ? 'Log in' : 'Create account'}
           </h2>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="text-slate-500 hover:text-slate-200 transition text-xl leading-none px-1"
+            className="text-neutral-500 hover:text-neutral-200 transition text-xl leading-none px-1"
           >
             ×
           </button>
@@ -112,24 +112,24 @@ export default function AuthModal({
 
         <form onSubmit={submit} className="flex flex-col gap-3">
           <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Username</span>
+            <span className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">Username</span>
             <input
               ref={firstFieldRef}
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
-              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-slate-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
+              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-neutral-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
             />
           </label>
 
           <label className="flex flex-col gap-1">
-            <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500">Password</span>
+            <span className="text-[10px] uppercase tracking-[0.2em] text-neutral-500">Password</span>
             <input
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-slate-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
+              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-neutral-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
             />
           </label>
 
@@ -148,7 +148,7 @@ export default function AuthModal({
           </button>
         </form>
 
-        <div className="mt-4 text-center text-xs text-slate-500">
+        <div className="mt-4 text-center text-xs text-neutral-500">
           {mode === 'login' ? "Don't have an account? " : 'Already have an account? '}
           <button
             onClick={() => {
