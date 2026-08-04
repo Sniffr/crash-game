@@ -4,24 +4,39 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        display: ['"Space Grotesk"', 'Sora', 'system-ui', 'sans-serif'],
-        sans: ['Sora', 'system-ui', 'sans-serif'],
+        // iMoon uses Nunito Sans — a rounded humanist sans. Heavy weights read
+        // as the display face; JetBrains Mono keeps the climbing multiplier and
+        // history figures tabular (no width jitter) — a deliberate deviation.
+        display: ['"Nunito Sans"', 'system-ui', 'sans-serif'],
+        sans: ['"Nunito Sans"', 'system-ui', 'sans-serif'],
         mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
       },
       colors: {
-        // Chrome / panel colors (intentionally NOT themed — these are the
-        // dark UI shell that stays consistent across themes)
+        // Chrome — iMoon indigo-black ramp (sampled from imoon.com: body #110c20,
+        // header #1f1933). Stays consistent across per-game themes.
         space: {
-          950: '#05030f',
-          900: '#0a0820',
-          800: '#11102e',
-          700: '#1a1840',
-          600: '#26224f',
-          500: '#3a3370',
+          950: '#0b0717', // deepest wells / insets
+          900: '#110c20', // page background
+          850: '#161027', // sunken rows
+          800: '#1a1430', // panels
+          700: '#1f1933', // raised / header
+          600: '#2a2440', // borders / hover
+          500: '#3b3457', // subtle dividers
         },
-        // Themed accent colors — backed by CSS variables that the theme
-        // loader updates at runtime. Multiple shade names all collapse to
-        // a single theme color (themes don't need full shade ramps).
+        // Fixed iMoon chrome palette — consistent across every game (only the
+        // canvas art below is per-game themed). Sampled from imoon.com.
+        brand: { 300: '#ffa866', 400: '#ff8a3d', 500: '#fb6514', 600: '#e5550a' }, // orange: primary / brand
+        info:  { 300: '#5aa6f0', 400: '#2f8ee8', 500: '#0c70db', 600: '#0a5cb8' }, // blue: secondary
+        bet:   { 400: '#2fbf5a', 500: '#22a04a', 600: '#1b8a3f' },                 // green: place bet
+        cash:  { 400: '#ffbc4a', 500: '#f5a623', 600: '#dc8f12' },                 // amber: cashout
+        loss:  { 400: '#f0666b', 500: '#e5484d', 600: '#c93b40' },                 // red: crash / loss
+        // Themed accents — CSS-var backed so the per-game theme loader overrides
+        // them at runtime. Defaults (set in index.css) follow iMoon:
+        //   accent  = orange #fb6514 (primary / brand)
+        //   accent2 = blue   #0c70db (secondary / info)
+        //   win     = green  #22a04a (place bet / positive)
+        //   crash   = red    #e5484d
+        //   gold    = amber  #f5a623 (cashout)
         plasma: {
           400: 'rgb(var(--rgb-accent) / <alpha-value>)',
           500: 'rgb(var(--rgb-accent) / <alpha-value>)',
@@ -50,14 +65,18 @@ export default {
         },
       },
       boxShadow: {
-        'panel': '0 1px 0 rgba(255,255,255,0.04) inset, 0 0 0 1px rgba(255,255,255,0.04)',
-        'plasma': '0 0 24px rgb(var(--rgb-accent) / 0.35)',
-        'aurora': '0 0 24px rgb(var(--rgb-win) / 0.35)',
-        'nebula': '0 0 28px rgb(var(--rgb-crash) / 0.4)',
+        // Fixed chrome glows (iMoon palette) — consistent across games. `plasma`
+        // now means the brand orange glow; names kept so existing refs resolve.
+        'panel': '0 8px 24px -12px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.05)',
+        'raised': '0 12px 32px -14px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.06)',
+        'plasma': '0 8px 22px -8px rgba(251,101,20,0.55)',  // orange (brand)
+        'aurora': '0 8px 22px -8px rgba(34,160,74,0.5)',    // green (bet)
+        'solar':  '0 8px 22px -8px rgba(245,166,35,0.5)',   // amber (cashout)
+        'nebula': '0 8px 26px -8px rgba(229,72,77,0.5)',    // red (crash)
       },
       borderRadius: {
-        'panel': '12px',
-        'control': '8px',
+        'panel': '16px',
+        'control': '10px',
       },
     },
   },
