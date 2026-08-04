@@ -132,8 +132,16 @@ function sanitizeSegment(label: string, value: string): string {
   return value;
 }
 
+/** File extension (incl. dot) for a MIME type; falls back to the subtype. */
+export function extForContentType(contentType: string): string {
+  const subtype = contentType.split(';')[0]?.split('/')[1]?.toLowerCase() ?? '';
+  if (!subtype) return '';
+  const alias: Record<string, string> = { jpeg: 'jpg', mpeg: 'mp3', 'svg+xml': 'svg' };
+  return `.${alias[subtype] ?? subtype}`;
+}
+
 /**
- * Parse a data URL and PutObject it to `games/<gameId>/<assetKey>` in the
+ * Parse a data URL and PutObject it to `games/<gameId>/<assetKey>.<ext>` in the
  * configured bucket, returning the public URL plus size + content type.
  */
 export async function uploadAsset(opts: {
@@ -150,7 +158,9 @@ export async function uploadAsset(opts: {
 
   const bucket = requireEnv('S3_BUCKET');
   const publicBase = requireEnv('S3_PUBLIC_BASE').replace(/\/+$/, '');
-  const key = `games/${gameId}/${assetKey}`;
+  // Append the content-type extension so the public URL is self-describing:
+  // the client picks <video> vs <img> from it (e.g. gifs.flying.mp4).
+  const key = `games/${gameId}/${assetKey}${extForContentType(contentType)}`;
 
   await getClient().send(
     new PutObjectCommand({

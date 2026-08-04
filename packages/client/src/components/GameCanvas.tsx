@@ -355,19 +355,36 @@ export default function GameCanvas({
 
   return (
     <div className="relative w-full h-full">
-      {gifSrc && (
-        // key={src} forces a fresh <img> mount whenever the GIF changes,
-        // which restarts the animation from frame 0.
-        <img
-          key={gifSrc}
-          src={gifSrc}
-          alt=""
-          className="absolute inset-0 w-full h-full object-cover"
-        />
-      )}
+      {gifSrc &&
+        // key={src} forces a fresh mount whenever the source changes, which
+        // restarts the animation from frame 0. MP4/WebM (converted from heavy
+        // GIFs) play as an autoplay-loop <video>; anything else stays an <img>.
+        (isVideoSrc(gifSrc) ? (
+          <video
+            key={gifSrc}
+            src={gifSrc}
+            autoPlay
+            loop
+            muted
+            playsInline
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        ) : (
+          <img
+            key={gifSrc}
+            src={gifSrc}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        ))}
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full block" />
     </div>
   );
+}
+
+/** A stored asset URL that should render as <video> rather than <img>. */
+function isVideoSrc(src: string): boolean {
+  return /^data:video\//i.test(src) || /\.(mp4|webm|mov)(\?|#|$)/i.test(src);
 }
 
 /** Choose which GIF (if any) to display in GIF mode for the current phase. */

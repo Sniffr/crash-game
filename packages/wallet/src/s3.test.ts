@@ -3,7 +3,7 @@ import { config } from 'dotenv';
 config({ path: '../../.env' });
 
 import { describe, it, expect } from 'vitest';
-import { parseDataUrl, isDataUrl, uploadAsset } from './s3.js';
+import { parseDataUrl, isDataUrl, uploadAsset, extForContentType } from './s3.js';
 
 // A tiny 1x1 transparent PNG as a base64 data URL.
 const TINY_PNG =
@@ -42,6 +42,20 @@ describe('parseDataUrl', () => {
     expect(() => parseDataUrl('data:image/png')).toThrow(); // no comma
     expect(() => parseDataUrl('data:image/png,rawtext')).toThrow(); // not base64
     expect(() => parseDataUrl('data:;base64,')).toThrow(); // empty payload
+  });
+});
+
+describe('extForContentType', () => {
+  it('maps common types and aliases, falling back to the subtype', () => {
+    expect(extForContentType('video/mp4')).toBe('.mp4');
+    expect(extForContentType('video/webm')).toBe('.webm');
+    expect(extForContentType('image/webp')).toBe('.webp');
+    expect(extForContentType('image/png')).toBe('.png');
+    expect(extForContentType('image/jpeg')).toBe('.jpg'); // alias
+    expect(extForContentType('image/gif;charset=x')).toBe('.gif'); // strips params
+    expect(extForContentType('audio/mpeg')).toBe('.mp3'); // alias
+    expect(extForContentType('application/octet-stream')).toBe('.octet-stream');
+    expect(extForContentType('garbage')).toBe(''); // no subtype
   });
 });
 
