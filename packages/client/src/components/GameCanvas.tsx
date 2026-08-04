@@ -23,6 +23,26 @@ function multiplierAt(elapsedMs: number): number {
   return Math.exp((GROWTH_RATE * Math.max(0, elapsedMs)) / 1000);
 }
 
+/**
+ * Smooth per-frame FLYING multiplier: interpolate locally from the server
+ * flight-start clock every animation frame (~60fps) instead of rendering the
+ * 50ms WS ticks, which stutter with network jitter. The server value is a floor
+ * (never show less than the server has confirmed); crashPoint is the cap.
+ */
+export function liveMultiplier(
+  flightStartTime: number | null,
+  serverClockOffsetMs: number,
+  serverMultiplier: number,
+  crashPoint?: number,
+): number {
+  if (!flightStartTime) return serverMultiplier;
+  const elapsedMs = Math.max(0, Date.now() + serverClockOffsetMs - flightStartTime);
+  let m = multiplierAt(elapsedMs);
+  if (m < serverMultiplier) m = serverMultiplier;
+  if (crashPoint && m > crashPoint) m = crashPoint;
+  return m;
+}
+
 // ─── Pre-rendered rocket sprite ────────────────────────────────────────────
 // Drawing the rocket once into an offscreen canvas means we get layered
 // gradients and detail without paying for them every animation frame.
@@ -285,9 +305,14 @@ export default function GameCanvas({
       // ── GIF mode: clear and overlay text only — the <img> renders the GIF
       if (theme?.gameType === 'gif') {
         ctx.clearRect(0, 0, W, H);
-        const tier = getMultiplierColor(currentMultiplier);
+        // Interpolate locally so the number is smooth (see liveMultiplier);
+        // rendering the raw 50ms WS value here made GIF games look laggy.
+        const m = phase === 'FLYING'
+          ? liveMultiplier(flightStartTime, serverClockOffsetMs, currentMultiplier, crashPoint)
+          : currentMultiplier;
+        const tier = getMultiplierColor(m);
         if (phase === 'BETTING') drawGifOverlayBetting(ctx, W, H, dpr, countdownMs);
-        else if (phase === 'FLYING') drawGifOverlayFlying(ctx, W, H, dpr, currentMultiplier, tier);
+        else if (phase === 'FLYING') drawGifOverlayFlying(ctx, W, H, dpr, m, tier);
         else drawGifOverlayCrashed(ctx, W, H, dpr, crashPoint ?? currentMultiplier, theme.colors.crash);
         animFrameRef.current = requestAnimationFrame(draw);
         return;
