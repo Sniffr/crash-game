@@ -10,6 +10,7 @@
  * so an object at that key is fetchable at `${S3_PUBLIC_BASE}/games/<gameId>/<assetKey>`.
  */
 
+import { createHash } from 'node:crypto';
 import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import sharp from 'sharp';
 
@@ -158,9 +159,13 @@ export async function uploadAsset(opts: {
 
   const bucket = requireEnv('S3_BUCKET');
   const publicBase = requireEnv('S3_PUBLIC_BASE').replace(/\/+$/, '');
-  // Append the content-type extension so the public URL is self-describing:
-  // the client picks <video> vs <img> from it (e.g. gifs.flying.mp4).
-  const key = `games/${gameId}/${assetKey}${extForContentType(contentType)}`;
+  // Content-addressed key: `<assetKey>.<hash><ext>`. The hash makes each distinct
+  // upload a NEW immutable URL, so the Contabo CDN + browser can cache it forever
+  // (Cache-Control below) with zero stale risk — re-publishing changed media yields
+  // a new hash → new URL → fresh fetch. The extension keeps the URL self-describing
+  // (the client picks <video> vs <img> from it, e.g. gifs.flying.<hash>.mp4).
+  const hash = createHash('sha256').update(body).digest('hex').slice(0, 12);
+  const key = `games/${gameId}/${assetKey}.${hash}${extForContentType(contentType)}`;
 
   await getClient().send(
     new PutObjectCommand({
@@ -168,6 +173,7 @@ export async function uploadAsset(opts: {
       Key: key,
       Body: body,
       ContentType: contentType,
+      CacheControl: 'public, max-age=31536000, immutable',
     }),
   );
 
