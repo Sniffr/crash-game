@@ -532,7 +532,7 @@ function EditorForm({
           </p>
           <AssetUpload
             label="Loading GIF (BETTING phase)"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
+            accept="image/gif,image/webp,image/png"
             kind="image"
             value={theme.gifs?.loading}
             onChange={(v) => updateGif('loading', v)}
@@ -541,7 +541,7 @@ function EditorForm({
           />
           <AssetUpload
             label="Started GIF (FLYING phase)"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
+            accept="image/gif,image/webp,image/png"
             kind="image"
             value={theme.gifs?.flying}
             onChange={(v) => updateGif('flying', v)}
@@ -550,7 +550,7 @@ function EditorForm({
           />
           <AssetUpload
             label="Threshold GIF (optional)"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
+            accept="image/gif,image/webp,image/png"
             kind="image"
             value={theme.gifs?.flyingThreshold}
             onChange={(v) => updateGif('flyingThreshold', v)}
@@ -569,7 +569,7 @@ function EditorForm({
           )}
           <AssetUpload
             label="Crashed GIF"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
+            accept="image/gif,image/webp,image/png"
             kind="image"
             value={theme.gifs?.crashed}
             onChange={(v) => updateGif('crashed', v)}

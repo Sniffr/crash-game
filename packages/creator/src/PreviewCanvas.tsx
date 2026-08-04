@@ -217,33 +217,17 @@ export default function PreviewCanvas({ theme }: Props) {
 
   return (
     <div className="relative w-full h-full">
-      {gifSrc &&
-        (isVideoSrc(gifSrc) ? (
-          <video
-            key={gifSrc}
-            src={gifSrc}
-            autoPlay
-            loop
-            muted
-            playsInline
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        ) : (
-          <img
-            key={gifSrc}
-            src={gifSrc}
-            alt=""
-            className="absolute inset-0 w-full h-full object-cover"
-          />
-        ))}
+      {gifSrc && (
+        <img
+          key={gifSrc}
+          src={gifSrc}
+          alt=""
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      )}
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full block" />
     </div>
   );
-}
-
-/** A stored/inlined asset that should render as <video> rather than <img>. */
-function isVideoSrc(src: string): boolean {
-  return /^data:video\//i.test(src) || /\.(mp4|webm|mov)(\?|#|$)/i.test(src);
 }
 
 function pickGifPreview(theme: Theme, phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT', multiplier: number): string | null {
