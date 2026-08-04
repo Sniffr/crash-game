@@ -149,7 +149,7 @@ export default function ProvablyFairDrawer({
               <button
                 onClick={handleVerify}
                 disabled={loading || !verifySeed || !verifyRoundN}
-                className="w-full h-10 rounded-control bg-gradient-to-r from-plasma-500 to-cosmos-500 text-space-950 font-display font-bold text-xs uppercase tracking-[0.18em] hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                className="w-full h-10 rounded-control bg-plasma-500 text-space-950 font-display font-bold text-xs uppercase tracking-[0.18em] hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {loading ? 'Verifying…' : 'Verify'}
               </button>

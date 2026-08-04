@@ -98,7 +98,7 @@ export default function BetPanel({
           </div>
           <div className="h-[3px] bg-space-700/80">
             <div
-              className="h-full bg-gradient-to-r from-plasma-500 to-cosmos-400 transition-all duration-100 ease-linear"
+              className="h-full bg-plasma-500 transition-all duration-100 ease-linear"
               style={{ width: `${progress * 100}%` }}
             />
           </div>
@@ -190,7 +190,7 @@ export default function BetPanel({
       {canBet && (
         <button
           onClick={onPlaceBet}
-          className="w-full h-12 rounded-control bg-gradient-to-r from-aurora-500 to-plasma-500 text-space-950 font-display font-bold text-sm uppercase tracking-[0.18em] hover:brightness-110 transition active:scale-[0.99] shadow-lg shadow-aurora-500/20"
+          className="w-full h-12 rounded-control bg-aurora-500 text-space-950 font-display font-bold text-sm uppercase tracking-[0.18em] hover:brightness-110 transition active:scale-[0.99] shadow-lg shadow-aurora-500/20"
         >
           Place Bet · {symbol}{betAmount.toFixed(Math.min(decimals, 8))}
           {seconds != null && (
@@ -202,7 +202,7 @@ export default function BetPanel({
       {canCashout && (
         <button
           onClick={onCashout}
-          className="w-full h-12 rounded-control bg-gradient-to-r from-solar-500 to-nebula-500 text-space-950 font-display font-bold text-sm uppercase tracking-[0.18em] hover:brightness-110 transition active:scale-[0.99] btn-pulse-cashout"
+          className="w-full h-12 rounded-control bg-solar-500 text-space-950 font-display font-bold text-sm uppercase tracking-[0.18em] hover:brightness-110 transition active:scale-[0.99] btn-pulse-cashout"
         >
           Cash Out · {symbol}{(betAmount * currentMultiplier).toFixed(Math.min(decimals, 8))}
         </button>
