@@ -81,6 +81,24 @@ describe('GamesRepo — games', () => {
     await expect(repo.update('nope', { name: 'x' })).rejects.toThrow(GameNotFoundError);
   });
 
+  // Regression: a game created by ANOTHER process (a Creator on a different
+  // backend, a second replica, a direct DB insert) is invisible to this repo's
+  // in-memory snapshot until refreshSnapshot() re-reads Postgres. The server
+  // polls refreshSnapshot() so the round loop picks such games up without a restart.
+  it('snapshot only sees out-of-band games after refreshSnapshot', async () => {
+    const other = new PgGamesRepo(testDb.pool); // simulates a second process
+    await repo.create(makeGame()); // created via `repo`, refreshes only repo's snapshot
+
+    // `other` never handled the mutation → its snapshot is still empty.
+    await other.refreshSnapshot(); // prime once (as at boot)
+    // Insert a second game via `repo`; `other` doesn't know yet.
+    await repo.create(makeGame({ gameId: 'cosmic-jet', gameType: 'gif', theme: { gameType: 'gif' } }));
+    expect(other.snapshot().map((g) => g.gameId)).toEqual(['galaxy-crash']); // stale
+
+    await other.refreshSnapshot(); // the periodic poll
+    expect(other.snapshot().map((g) => g.gameId).sort()).toEqual(['cosmic-jet', 'galaxy-crash']);
+  });
+
   it('update revalidates rtp and type↔theme', async () => {
     await repo.create(makeGame());
     await expect(repo.update('galaxy-crash', { rtp: 2 })).rejects.toThrow(InvalidGameError);

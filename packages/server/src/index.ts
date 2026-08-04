@@ -53,6 +53,9 @@ const revoked = new Set<string>();
 const registry = new PgOperatorRegistry(pool);
 const walletClientCache = new WalletClientCache(registry, betLog);
 const games = new PgGamesRepo(pool);
+// How often the round loop re-reads the games catalogue from Postgres (picks up
+// games created by another process/replica or inserted directly).
+const GAMES_SNAPSHOT_REFRESH_MS = 10_000;
 const players = new PlayersRepo(pool);
 const wallet = new WalletLedger(pool);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
@@ -104,6 +107,14 @@ try {
   }
   await games.refreshSnapshot();
   console.log(`[games] catalogue ready (${games.snapshot().length} active on Postgres)`);
+
+  // Periodically re-read the catalogue so games created out-of-band — by another
+  // process (a Creator hitting a different backend), a second replica, or a direct
+  // DB insert — appear in the round loop within seconds, without a pod restart.
+  // The snapshot is per-process, so boot + local-mutation refreshes alone miss them.
+  setInterval(() => {
+    void games.refreshSnapshot().catch((err) => console.error('[games] snapshot refresh failed:', err));
+  }, GAMES_SNAPSHOT_REFRESH_MS);
 } catch (err) {
   console.error('[games] Postgres bootstrap failed:', err);
   throw err; // games catalogue is required — fail fast rather than run half-wired
