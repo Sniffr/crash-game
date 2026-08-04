@@ -572,11 +572,11 @@ function drawGifOverlayBetting(
   ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
   ctx.shadowBlur = 18 * dpr;
-  ctx.font = `700 ${Math.min(140 * dpr, H * 0.22)}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `700 ${Math.min(140 * dpr, H * 0.22)}px "Space Grotesk", Sora, sans-serif`;
   ctx.fillStyle = '#ffffff';
   ctx.fillText(`${seconds}`, W / 2, H * 0.78);
 
-  ctx.font = `600 ${Math.min(18 * dpr, H * 0.04)}px Inter, sans-serif`;
+  ctx.font = `600 ${Math.min(18 * dpr, H * 0.04)}px Sora, sans-serif`;
   ctx.fillStyle = 'rgba(255,255,255,0.85)';
   ctx.fillText('PLACE YOUR BET', W / 2, H * 0.88);
   ctx.restore();
@@ -591,7 +591,7 @@ function drawGifOverlayFlying(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const fontSize = Math.min(190 * dpr, H * 0.32);
-  ctx.font = `800 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `800 ${fontSize}px "Space Grotesk", Sora, sans-serif`;
 
   // Heavy dark shadow first for legibility on bright GIFs
   ctx.shadowColor = 'rgba(0, 0, 0, 0.9)';
@@ -617,13 +617,13 @@ function drawGifOverlayCrashed(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   const fontSize = Math.min(190 * dpr, H * 0.32);
-  ctx.font = `800 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `800 ${fontSize}px "Space Grotesk", Sora, sans-serif`;
   ctx.shadowColor = 'rgba(0, 0, 0, 0.92)';
   ctx.shadowBlur = 28 * dpr;
   ctx.fillStyle = crashColor;
   ctx.fillText(`${crashPoint.toFixed(2)}x`, W / 2, H / 2 - 24 * dpr);
 
-  ctx.font = `700 ${Math.min(34 * dpr, H * 0.07)}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `700 ${Math.min(34 * dpr, H * 0.07)}px "Space Grotesk", Sora, sans-serif`;
   ctx.fillStyle = '#ffffff';
   ctx.shadowBlur = 16 * dpr;
   ctx.fillText('CRASHED', W / 2, H / 2 + Math.min(50 * dpr, H * 0.10));
@@ -921,11 +921,11 @@ function renderBetting(
 
   // Number
   ctx.fillStyle = '#ffffff';
-  ctx.font = `600 ${88 * dpr}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `600 ${88 * dpr}px "Space Grotesk", Sora, sans-serif`;
   ctx.fillText(`${seconds}`, cx, cy + 4 * dpr);
 
   // Label
-  ctx.font = `500 ${12 * dpr}px Inter, sans-serif`;
+  ctx.font = `500 ${12 * dpr}px Sora, sans-serif`;
   ctx.fillStyle = 'rgba(180, 195, 230, 0.6)';
   ctx.fillText('PLACE YOUR BET', cx, cy + ringR + 30 * dpr);
 
@@ -1099,7 +1099,7 @@ function renderFlying(
   ctx.shadowColor = tierColor;
   ctx.shadowBlur = 36 * dpr;
   const fontSize = Math.min(170 * dpr, (74 + display * 4) * dpr);
-  ctx.font = `700 ${fontSize}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `700 ${fontSize}px "Space Grotesk", Sora, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   // Vertical gradient from white to tier color so the "x" reads naturally
@@ -1261,14 +1261,14 @@ function renderCrashed(
   ctx.shadowColor = '#ef4444';
   ctx.shadowBlur = 36 * dpr;
   ctx.fillStyle = '#ef4444';
-  ctx.font = `700 ${108 * dpr}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `700 ${108 * dpr}px "Space Grotesk", Sora, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(`${cp.toFixed(2)}x`, W / 2, H / 2 - 28 * dpr);
   ctx.restore();
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.78)';
-  ctx.font = `600 ${20 * dpr}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `600 ${20 * dpr}px "Space Grotesk", Sora, sans-serif`;
   ctx.textAlign = 'center';
   ctx.fillText('CRASHED', W / 2, H / 2 + 40 * dpr);
 }
@@ -1283,13 +1283,13 @@ function renderResult(
   ctx.shadowColor = '#ef4444';
   ctx.shadowBlur = 22 * dpr;
   ctx.fillStyle = '#ef4444';
-  ctx.font = `700 ${72 * dpr}px "Space Grotesk", Inter, sans-serif`;
+  ctx.font = `700 ${72 * dpr}px "Space Grotesk", Sora, sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(`${crashPoint.toFixed(2)}x`, W / 2, H / 2 - 24 * dpr);
   ctx.restore();
   ctx.fillStyle = 'rgba(180, 195, 230, 0.55)';
-  ctx.font = `500 ${13 * dpr}px Inter, sans-serif`;
+  ctx.font = `500 ${13 * dpr}px Sora, sans-serif`;
   ctx.textAlign = 'center';
   ctx.fillText('next launch incoming…', W / 2, H / 2 + 28 * dpr);
 }

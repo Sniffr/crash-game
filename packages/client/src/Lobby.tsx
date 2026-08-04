@@ -170,7 +170,7 @@ export default function Lobby() {
           <LobbyLogo />
           <div className="flex flex-col min-w-0">
             <h1 className="font-display font-bold text-[15px] sm:text-base tracking-[0.18em] uppercase leading-none">
-              <span className="bg-gradient-to-r from-plasma-400 via-cosmos-400 to-nebula-400 bg-clip-text text-transparent">
+              <span className="text-plasma-400">
                 Nova
               </span>
               <span className="ml-1.5">Casino</span>
@@ -211,7 +211,7 @@ export default function Lobby() {
           ) : (
             <button
               onClick={() => { setPendingGameId(null); setAuthOpen(true); }}
-              className="text-xs px-4 py-2 rounded-control font-semibold uppercase tracking-wider bg-gradient-to-r from-plasma-500 to-cosmos-500 text-space-950 hover:brightness-110 transition shadow-plasma"
+              className="text-xs px-4 py-2 rounded-control font-semibold uppercase tracking-wider bg-plasma-500 text-space-950 hover:brightness-110 transition shadow-plasma"
             >
               Log in
             </button>
@@ -302,7 +302,7 @@ function GameCard({
           </button>
           <button
             onClick={onReal}
-            className="rounded-control px-3 py-2 text-xs font-semibold uppercase tracking-wider bg-gradient-to-r from-plasma-500 to-cosmos-500 text-space-950 hover:brightness-110 transition shadow-plasma"
+            className="rounded-control px-3 py-2 text-xs font-semibold uppercase tracking-wider bg-plasma-500 text-space-950 hover:brightness-110 transition shadow-plasma"
           >
             Real
           </button>
@@ -316,7 +316,12 @@ function GameCard({
 function EmptyState() {
   return (
     <div className="rounded-panel border border-dashed border-space-500/50 bg-space-900/40 px-6 py-16 text-center">
-      <div className="text-4xl mb-3">🎰</div>
+      <svg viewBox="0 0 24 24" className="w-10 h-10 mx-auto mb-3 text-plasma-400" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
+        <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
+        <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
+        <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
+      </svg>
       <h3 className="font-display font-semibold text-lg text-slate-200">No games yet</h3>
       <p className="text-sm text-slate-500 mt-1">
         Publish one from the Creator to see it here.

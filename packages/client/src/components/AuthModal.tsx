@@ -142,7 +142,7 @@ export default function AuthModal({
           <button
             type="submit"
             disabled={busy}
-            className="mt-1 rounded-control px-4 py-2.5 text-sm font-semibold uppercase tracking-wider bg-gradient-to-r from-plasma-500 to-cosmos-500 text-space-950 hover:brightness-110 transition disabled:opacity-60 disabled:cursor-not-allowed shadow-plasma"
+            className="mt-1 rounded-control px-4 py-2.5 text-sm font-semibold uppercase tracking-wider bg-plasma-500 text-space-950 hover:brightness-110 transition disabled:opacity-60 disabled:cursor-not-allowed shadow-plasma"
           >
             {busy ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Create account'}
           </button>

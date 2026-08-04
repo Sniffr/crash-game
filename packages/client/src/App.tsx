@@ -758,7 +758,7 @@ function Header({
         )}
         <div className="flex flex-col min-w-0">
           <h1 className="font-display font-bold text-[15px] sm:text-base tracking-[0.18em] uppercase leading-none truncate" style={{ color: theme.colors.text }}>
-            <span className="bg-gradient-to-r from-plasma-400 via-cosmos-400 to-nebula-400 bg-clip-text text-transparent">
+            <span className="text-plasma-400">
               {brand.split(' ')[0]}
             </span>
             {brand.split(' ').slice(1).length > 0 && (
