@@ -833,7 +833,7 @@ function renderBetting(
   ctx.fillText('PLACE YOUR BET', cx, cy + ringR + 30 * dpr);
 
   if (hashCommit) {
-    ctx.font = `${10 * dpr}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.font = `${10 * dpr}px Poppins, sans-serif`;
     ctx.fillStyle = 'rgba(124, 137, 180, 0.5)';
     ctx.fillText(`commit · ${hashCommit.slice(0, 12)}…`, cx, cy + ringR + 56 * dpr);
   }

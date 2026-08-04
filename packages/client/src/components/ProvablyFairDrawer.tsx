@@ -83,7 +83,7 @@ export default function ProvablyFairDrawer({
           <Section title="How it works">
             <ol className="space-y-2.5 text-sm text-neutral-400 leading-relaxed list-decimal pl-4 marker:text-brand-500">
               <li>Before each round, the server publishes a SHA-256 commitment of its secret seed.</li>
-              <li>The crash multiplier is derived deterministically from <code className="font-mono text-brand-400">HMAC-SHA256(seed, roundNumber)</code>.</li>
+              <li>The crash multiplier is derived deterministically from <code className="text-brand-400">HMAC-SHA256(seed, roundNumber)</code>.</li>
               <li>After the round, the seed is revealed — anyone can recompute the same crash point.</li>
             </ol>
           </Section>
@@ -110,7 +110,7 @@ export default function ProvablyFairDrawer({
           {/* Previous round (always revealed) */}
           {currentRound.prevServerSeed && currentRound.prevRoundNumber != null && (
             <Section title={`Round #${currentRound.prevRoundNumber} — revealed`} accent="solar">
-              <div className="text-xs font-mono break-all text-cash-500/90 leading-relaxed">
+              <div className="text-xs break-all text-cash-500/90 leading-relaxed">
                 {currentRound.prevServerSeed}
               </div>
               <button
@@ -134,7 +134,7 @@ export default function ProvablyFairDrawer({
                   value={verifySeed}
                   onChange={(e) => setVerifySeed(e.target.value)}
                   placeholder="hex string"
-                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs font-mono text-white focus:outline-none focus:border-brand-500/60"
+                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs text-white focus:outline-none focus:border-brand-500/60"
                 />
               </Field>
               <Field label="Round number">
@@ -143,7 +143,7 @@ export default function ProvablyFairDrawer({
                   value={verifyRoundN}
                   onChange={(e) => setVerifyRoundN(e.target.value)}
                   placeholder="42"
-                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs font-mono text-white focus:outline-none focus:border-brand-500/60"
+                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs text-white focus:outline-none focus:border-brand-500/60"
                 />
               </Field>
               <button
@@ -156,7 +156,7 @@ export default function ProvablyFairDrawer({
 
               {verifyResult && (
                 <div
-                  className={`mt-2 p-3 rounded-control text-xs font-mono leading-relaxed ${
+                  className={`mt-2 p-3 rounded-control text-xs leading-relaxed ${
                     verifyResult.ok
                       ? 'bg-bet-500/10 border border-bet-500/40 text-bet-400'
                       : 'bg-loss-500/10 border border-loss-500/40 text-loss-400'
@@ -177,13 +177,13 @@ export default function ProvablyFairDrawer({
 
           {/* Formula */}
           <Section title="Formula">
-            <pre className="text-[11px] font-mono text-neutral-400 leading-relaxed whitespace-pre-wrap">
+            <pre className="text-[11px] text-neutral-400 leading-relaxed whitespace-pre-wrap">
 {`u    = HMAC-SHA256(seed, round) → first 13 hex → [0,1)
 raw  = (100 × RTP) / (1 − u)
 crash = max(1.00, floor(raw) / 100)`}
             </pre>
             <p className="text-[11px] text-neutral-500 mt-2">
-              This gives <code className="font-mono text-brand-400">P(crash ≥ m) = RTP / m</code> for every m &gt; 1.
+              This gives <code className="text-brand-400">P(crash ≥ m) = RTP / m</code> for every m &gt; 1.
             </p>
           </Section>
         </div>
@@ -214,7 +214,7 @@ function Section({
 
 function KV({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="flex justify-between items-baseline text-xs font-mono mb-1.5">
+    <div className="flex justify-between items-baseline text-xs mb-1.5">
       <span className="text-neutral-500">{label}</span>
       <span className="truncate ml-3 tabular-nums">{children}</span>
     </div>

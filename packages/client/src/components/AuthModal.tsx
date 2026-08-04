@@ -96,7 +96,7 @@ export default function AuthModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-sm rounded-panel border border-space-500/50 bg-space-900/90 shadow-panel p-6 animate-toast-in">
+      <div className="w-full max-w-sm rounded-panel border border-space-500/50 bg-space-900/90 p-6 animate-toast-in">
         <div className="flex items-center justify-between mb-5">
           <h2 className="font-display font-bold text-lg tracking-[0.14em] uppercase text-neutral-100">
             {mode === 'login' ? 'Log in' : 'Create account'}
@@ -118,7 +118,7 @@ export default function AuthModal({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
-              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-neutral-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
+              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-neutral-100 outline-none focus:border-brand-500 transition"
             />
           </label>
 
@@ -129,7 +129,7 @@ export default function AuthModal({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-neutral-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
+              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-neutral-100 outline-none focus:border-brand-500 transition"
             />
           </label>
 
@@ -142,7 +142,7 @@ export default function AuthModal({
           <button
             type="submit"
             disabled={busy}
-            className="mt-1 rounded-control px-4 py-2.5 text-sm font-semibold uppercase tracking-wider bg-brand-500 text-space-950 hover:brightness-110 transition disabled:opacity-60 disabled:cursor-not-allowed shadow-plasma"
+            className="mt-1 rounded-control px-4 py-2.5 text-sm font-semibold uppercase tracking-wider bg-brand-500 text-space-950 hover:brightness-110 transition disabled:opacity-60 disabled:cursor-not-allowed"
           >
             {busy ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Create account'}
           </button>

@@ -30,12 +30,12 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
   });
 
   return (
-    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 flex-1 min-h-0 flex flex-col shadow-panel">
+    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 flex-1 min-h-0 flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em]">
           Pilots in this round
         </h2>
-        <span className="text-xs text-neutral-500 font-mono tabular-nums">{bets.length}</span>
+        <span className="text-xs text-neutral-500 tabular-nums">{bets.length}</span>
       </div>
 
       <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-h-[420px] lg:max-h-none">
@@ -65,23 +65,23 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
                 </span>
               </div>
               <div className="text-right shrink-0 leading-tight">
-                <div className={`text-sm font-mono tabular-nums ${isYou ? 'text-neutral-100' : 'text-neutral-400'}`}>
+                <div className={`text-sm tabular-nums ${isYou ? 'text-neutral-100' : 'text-neutral-400'}`}>
                   {bet.currency
                     ? fromMinor(bet.amountMinor ?? bet.amount, bet.currency)
                     : `$${bet.amount.toFixed(2)}`}
                 </div>
                 {bet.cashedOut ? (
-                  <div className="text-[11px] text-bet-400 font-mono tabular-nums">
+                  <div className="text-[11px] text-bet-400 tabular-nums">
                     {bet.cashoutMultiplier?.toFixed(2)}x · +{bet.currency
                       ? fromMinor(bet.profit ?? 0, bet.currency)
                       : `$${(bet.profit ?? 0).toFixed(2)}`}
                   </div>
                 ) : bet.autoCashout ? (
-                  <div className="text-[11px] text-cash-500/80 font-mono tabular-nums">
+                  <div className="text-[11px] text-cash-500/80 tabular-nums">
                     auto {bet.autoCashout.toFixed(2)}x
                   </div>
                 ) : (
-                  <div className="text-[11px] text-neutral-600 font-mono">
+                  <div className="text-[11px] text-neutral-600">
                     manual
                   </div>
                 )}

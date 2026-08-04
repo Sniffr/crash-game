@@ -4,12 +4,11 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        // Poppins — a geometric sans; heavy weights carry the display role.
-        // JetBrains Mono keeps the climbing multiplier and history figures
-        // tabular (no width jitter) — a deliberate deviation.
+        // Poppins everywhere — one geometric sans; heavy weights carry the
+        // display role. No monospace (font-mono maps to Poppins too).
         display: ['Poppins', 'system-ui', 'sans-serif'],
         sans: ['Poppins', 'system-ui', 'sans-serif'],
-        mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'],
+        mono: ['Poppins', 'system-ui', 'sans-serif'],
       },
       colors: {
         // Chrome — PURE NEUTRAL greyscale, hsl(0 0% L): black page, lighter panels.
@@ -63,16 +62,6 @@ export default {
           500: 'rgb(var(--rgb-gold) / <alpha-value>)',
           600: 'rgb(var(--rgb-gold) / <alpha-value>)',
         },
-      },
-      boxShadow: {
-        // Fixed chrome glows (iMoon palette) — consistent across games. `plasma`
-        // now means the brand orange glow; names kept so existing refs resolve.
-        'panel': '0 8px 24px -12px hsl(0 0% 0% / 0.7), 0 0 0 1px hsl(0 0% 100% / 0.05)',
-        'raised': '0 12px 32px -14px hsl(0 0% 0% / 0.8), inset 0 1px 0 hsl(0 0% 100% / 0.06)',
-        'plasma': '0 8px 22px -8px hsl(21 97% 53% / 0.55)', // orange (brand)
-        'aurora': '0 8px 22px -8px hsl(139 65% 38% / 0.5)', // green (bet)
-        'solar':  '0 8px 22px -8px hsl(37 91% 55% / 0.5)',  // amber (cashout)
-        'nebula': '0 8px 26px -8px hsl(358 75% 59% / 0.5)', // red (crash)
       },
       borderRadius: {
         'panel': '16px',

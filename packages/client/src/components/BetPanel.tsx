@@ -81,7 +81,7 @@ export default function BetPanel({
   const step = 1 / Math.pow(10, decimals);
 
   return (
-    <div className="bg-space-800 border border-white/5 rounded-panel p-4 shadow-panel">
+    <div className="bg-space-800 border border-white/5 rounded-panel p-4">
       {/* Countdown */}
       {phase === 'BETTING' && seconds != null && (
         <div className="mb-4 rounded-control overflow-hidden border border-brand-500/25 bg-brand-500/5">
@@ -91,7 +91,7 @@ export default function BetPanel({
             </div>
             <div
               key={seconds}
-              className="text-3xl font-mono font-extrabold text-brand-400 leading-none animate-countdown tabular-nums"
+              className="text-3xl font-extrabold text-brand-400 leading-none animate-countdown tabular-nums"
               style={{ textShadow: '0 0 16px hsl(21 97% 53% / 0.6)' }}
             >
               {seconds}
@@ -120,7 +120,7 @@ export default function BetPanel({
             aria-label="Toggle auto cashout"
           >
             <span
-              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
                 autoCashoutEnabled ? 'translate-x-[18px]' : 'translate-x-0.5'
               }`}
             />
@@ -136,12 +136,12 @@ export default function BetPanel({
           aria-label="halve stake"
         >½</button>
         <div className="flex-1 flex items-center gap-1 px-2 h-9">
-          <span className="text-neutral-500 font-mono font-bold">{symbol}</span>
+          <span className="text-neutral-500 font-bold">{symbol}</span>
           <input
             type="number"
             value={betAmount}
             onChange={(e) => setBetAmount(Math.max(step, Number(e.target.value) || step))}
-            className="w-full bg-transparent text-white text-lg font-mono font-extrabold focus:outline-none tabular-nums"
+            className="w-full bg-transparent text-white text-lg font-extrabold focus:outline-none tabular-nums"
             min={step}
             max={maxBetMajor}
             inputMode="decimal"
@@ -161,7 +161,7 @@ export default function BetPanel({
           <button
             key={amt}
             onClick={() => setBetAmount(amt)}
-            className={`px-1 py-1.5 rounded-lg text-xs font-mono font-bold transition border tabular-nums ${
+            className={`px-1 py-1.5 rounded-lg text-xs font-bold transition border tabular-nums ${
               betAmount === amt
                 ? 'bg-brand-500/15 text-brand-400 border-brand-500/40'
                 : 'bg-space-900/50 text-neutral-400 border-white/5 hover:border-white/15 hover:text-neutral-200'
@@ -181,11 +181,11 @@ export default function BetPanel({
               type="number"
               value={autoCashout}
               onChange={(e) => setAutoCashout(Math.max(1.01, Number(e.target.value) || 1.01))}
-              className="flex-1 bg-transparent text-white text-sm font-mono font-bold focus:outline-none tabular-nums text-right"
+              className="flex-1 bg-transparent text-white text-sm font-bold focus:outline-none tabular-nums text-right"
               min={1.01}
               step={0.1}
             />
-            <span className="text-xs text-cash-400 font-mono font-bold">×</span>
+            <span className="text-xs text-cash-400 font-bold">×</span>
           </div>
         </div>
       )}

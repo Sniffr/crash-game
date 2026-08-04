@@ -179,7 +179,7 @@ export default function Lobby() {
                   <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-neutral-500">
                     {username ?? 'Player'}
                   </div>
-                  <div className="text-base sm:text-lg font-mono font-bold text-bet-400 tabular-nums">
+                  <div className="text-base sm:text-lg font-bold text-bet-400 tabular-nums">
                     {balanceMinor == null ? '—' : `$${(balanceMinor / 100).toFixed(2)}`}
                   </div>
                 </div>
@@ -201,7 +201,7 @@ export default function Lobby() {
           ) : (
             <button
               onClick={() => { setPendingGameId(null); setAuthOpen(true); }}
-              className="text-sm px-5 py-2.5 rounded-control font-bold bg-brand-500 text-space-950 hover:bg-brand-400 transition shadow-plasma"
+              className="text-sm px-5 py-2.5 rounded-control font-bold bg-brand-500 text-space-950 hover:bg-brand-400 transition"
             >
               Log in
             </button>
@@ -217,7 +217,7 @@ export default function Lobby() {
         <SectionEyebrow>Games</SectionEyebrow>
 
         {loadError && (
-          <div className="mb-6 text-xs text-loss-500 bg-loss-500/10 border border-loss-500/30 rounded-control px-4 py-3 font-mono">
+          <div className="mb-6 text-xs text-loss-500 bg-loss-500/10 border border-loss-500/30 rounded-control px-4 py-3">
             {loadError}
           </div>
         )}
@@ -253,7 +253,7 @@ export default function Lobby() {
 // ─── Hero band ──────────────────────────────────────────────────────────────
 function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
   return (
-    <div className="relative overflow-hidden rounded-panel mb-8 border border-white/5 bg-space-800 shadow-panel">
+    <div className="relative overflow-hidden rounded-panel mb-8 border border-white/5 bg-space-800">
       {/* thin brand accent along the top edge — flat, no glow */}
       <div className="absolute inset-x-0 top-0 h-1 bg-brand-500" />
       <div className="relative flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 p-6 sm:p-8">
@@ -270,7 +270,7 @@ function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
           <div className="flex items-center gap-3 mt-5">
             <button
               onClick={onPlay}
-              className="px-6 py-3 rounded-control font-black text-space-950 bg-brand-500 hover:bg-brand-400 transition shadow-plasma"
+              className="px-6 py-3 rounded-control font-black text-space-950 bg-brand-500 hover:bg-brand-400 transition"
             >
               Play {game.name} — free
             </button>
@@ -301,14 +301,14 @@ function GameCard({
   game: Game; accent: GameAccents; onDemo: () => void; onReal: () => void;
 }) {
   return (
-    <div className="group rounded-panel border border-white/5 bg-space-800 shadow-panel overflow-hidden flex flex-col transition duration-200 hover:border-brand-500/40 hover:-translate-y-1 hover:shadow-plasma">
+    <div className="group rounded-panel border border-white/5 bg-space-800 overflow-hidden flex flex-col transition duration-200 hover:border-brand-500/40 hover:-translate-y-1">
       {/* Preview banner painted with the game's own theme accents (real identity) */}
       <div
         className="h-36 relative flex items-start justify-between p-3"
         style={{ background: `linear-gradient(135deg, ${accent.from}, ${accent.to})` }}
       >
         <div className="absolute inset-0 bg-gradient-to-t from-space-950/70 via-transparent to-transparent" />
-        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-[0.14em] bg-brand-500 text-space-950 shadow">
+        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-[0.14em] bg-brand-500 text-space-950">
           New
         </span>
         <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] bg-space-950/50 backdrop-blur-sm border border-white/10 text-white">
@@ -371,7 +371,7 @@ function GridSkeleton() {
 
 function LobbyLogo() {
   return (
-    <div className="w-10 h-10 rounded-control bg-space-900 border border-white/10 grid place-items-center shadow-plasma">
+    <div className="w-10 h-10 rounded-control bg-space-900 border border-white/10 grid place-items-center">
       <RocketGlyph className="w-5 h-5 text-brand-500" />
     </div>
   );
