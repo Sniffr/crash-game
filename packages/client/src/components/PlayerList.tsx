@@ -52,15 +52,15 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
               key={bet.playerId}
               className={`flex justify-between items-center px-3 py-2 rounded-control transition border ${
                 bet.cashedOut
-                  ? 'bg-aurora-500/10 border-aurora-500/25'
+                  ? 'bg-bet-500/10 border-bet-500/25'
                   : isYou
-                  ? 'bg-cosmos-500/10 border-cosmos-500/30'
+                  ? 'bg-info-500/10 border-info-500/30'
                   : 'bg-space-800/40 border-space-500/30'
               }`}
             >
               <div className="flex items-center gap-2 min-w-0">
                 <Avatar isYou={isYou} />
-                <span className={`text-sm truncate ${isYou ? 'text-cosmos-300 font-semibold' : 'text-slate-300'}`}>
+                <span className={`text-sm truncate ${isYou ? 'text-info-300 font-semibold' : 'text-slate-300'}`}>
                   {isYou ? 'You' : bet.botName ?? bet.playerId.slice(0, 6)}
                 </span>
               </div>
@@ -71,13 +71,13 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
                     : `$${bet.amount.toFixed(2)}`}
                 </div>
                 {bet.cashedOut ? (
-                  <div className="text-[11px] text-aurora-400 font-mono tabular-nums">
+                  <div className="text-[11px] text-bet-400 font-mono tabular-nums">
                     {bet.cashoutMultiplier?.toFixed(2)}x · +{bet.currency
                       ? fromMinor(bet.profit ?? 0, bet.currency)
                       : `$${(bet.profit ?? 0).toFixed(2)}`}
                   </div>
                 ) : bet.autoCashout ? (
-                  <div className="text-[11px] text-solar-500/80 font-mono tabular-nums">
+                  <div className="text-[11px] text-cash-500/80 font-mono tabular-nums">
                     auto {bet.autoCashout.toFixed(2)}x
                   </div>
                 ) : (
@@ -98,7 +98,7 @@ function Avatar({ isYou }: { isYou: boolean }) {
   return (
     <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
       isYou
-        ? 'bg-gradient-to-br from-cosmos-500 to-plasma-500'
+        ? 'bg-gradient-to-br from-info-500 to-brand-500'
         : 'bg-gradient-to-br from-space-600 to-space-800 border border-space-500/40'
     }`}>
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/85">

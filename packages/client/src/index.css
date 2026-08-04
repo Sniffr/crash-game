@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:opsz,wght@6..12,400;6..12,600;6..12,700;6..12,800;6..12,900&family=JetBrains+Mono:wght@500;700;800&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,21 +6,22 @@
 
 :root {
   color-scheme: dark;
-  /* Default theme RGB triples — the loader overrides these at runtime. */
-  --rgb-accent:  34 211 238;  /* cyan */
-  --rgb-accent2: 168 85 247;  /* violet */
-  --rgb-win:     52 211 153;  /* green */
-  --rgb-crash:   239 68 68;   /* red */
-  --rgb-gold:    251 191 36;  /* gold */
-  --rgb-text:    230 227 245; /* off-white */
+  /* Default theme (iMoon-derived) — the per-game loader overrides these RGB
+     triples at runtime. accent=orange, accent2=blue, win=green, crash=red, gold=amber. */
+  --rgb-accent:  251 101 20;  /* #fb6514 iMoon orange (primary / brand) */
+  --rgb-accent2:  12 112 219; /* #0c70db blue (secondary / info) */
+  --rgb-win:      34 160 74;  /* #22a04a green (place bet / positive) */
+  --rgb-crash:   229 72 77;   /* #e5484d red (crash) */
+  --rgb-gold:    245 166 35;  /* #f5a623 amber (cashout) */
+  --rgb-text:    245 243 251; /* #f5f3fb */
 }
 
 html, body {
   margin: 0;
   padding: 0;
-  background: #05030f;
-  color: #e6e3f5;
-  font-family: 'Sora', system-ui, sans-serif;
+  background: #110c20;
+  color: #f5f3fb;
+  font-family: 'Nunito Sans', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   overscroll-behavior: none;
@@ -28,15 +29,16 @@ html, body {
 
 * { box-sizing: border-box; }
 
-/* A faint global nebula tint behind the chrome so panels read against something. */
+/* Ambient depth behind the chrome: a warm orange bloom up top over a cool indigo
+   floor — the iMoon warm-dark feel, kept subtle so panels read against it. */
 body::before {
   content: '';
   position: fixed;
   inset: 0;
   background:
-    radial-gradient(60% 50% at 15% 0%, rgba(124, 58, 237, 0.18), transparent 60%),
-    radial-gradient(45% 40% at 90% 100%, rgba(34, 211, 238, 0.14), transparent 60%),
-    radial-gradient(80% 80% at 50% 50%, rgba(168, 85, 247, 0.06), transparent 70%);
+    radial-gradient(70% 55% at 50% -10%, rgba(251, 101, 20, 0.10), transparent 62%),
+    radial-gradient(50% 45% at 12% 8%, rgba(12, 112, 219, 0.08), transparent 60%),
+    radial-gradient(90% 90% at 50% 120%, rgba(11, 7, 23, 0.9), transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
@@ -68,12 +70,13 @@ body::before {
   100% { opacity: 1; transform: scale(1); }
 }
 
+/* Cashout button breathes in gold while a bet is live. */
 .btn-pulse-cashout {
   animation: pulseCashout 1.2s ease-in-out infinite;
 }
 @keyframes pulseCashout {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.0), 0 8px 28px -10px rgba(52, 211, 153, 0.7); }
-  50%      { box-shadow: 0 0 0 6px rgba(52, 211, 153, 0.0), 0 12px 36px -8px rgba(52, 211, 153, 0.9); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 166, 35, 0.0), 0 8px 26px -8px rgba(245, 166, 35, 0.7); }
+  50%      { box-shadow: 0 0 0 5px rgba(245, 166, 35, 0.0), 0 12px 34px -6px rgba(245, 166, 35, 0.95); }
 }
 
 /* Thin scrollbars */
@@ -82,10 +85,9 @@ body::before {
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.08); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.18); }
 
-/* Make sure the React root sits above the body::before nebula */
 #root { position: relative; z-index: 1; }
 
-/* Hide spinner on number inputs (cleaner look) */
+/* Hide spinner on number inputs */
 input[type='number']::-webkit-outer-spin-button,
 input[type='number']::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 input[type='number'] { -moz-appearance: textfield; }

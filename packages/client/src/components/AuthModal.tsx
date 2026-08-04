@@ -118,7 +118,7 @@ export default function AuthModal({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
-              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-slate-100 outline-none focus:border-plasma-500 focus:shadow-plasma transition"
+              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-slate-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
             />
           </label>
 
@@ -129,12 +129,12 @@ export default function AuthModal({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
-              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-slate-100 outline-none focus:border-plasma-500 focus:shadow-plasma transition"
+              className="bg-space-800/70 border border-space-500/50 rounded-control px-3 py-2 text-sm text-slate-100 outline-none focus:border-brand-500 focus:shadow-plasma transition"
             />
           </label>
 
           {error && (
-            <div className="text-xs text-nebula-400 bg-nebula-500/10 border border-nebula-500/30 rounded-control px-3 py-2">
+            <div className="text-xs text-loss-400 bg-loss-500/10 border border-loss-500/30 rounded-control px-3 py-2">
               {error}
             </div>
           )}
@@ -142,7 +142,7 @@ export default function AuthModal({
           <button
             type="submit"
             disabled={busy}
-            className="mt-1 rounded-control px-4 py-2.5 text-sm font-semibold uppercase tracking-wider bg-plasma-500 text-space-950 hover:brightness-110 transition disabled:opacity-60 disabled:cursor-not-allowed shadow-plasma"
+            className="mt-1 rounded-control px-4 py-2.5 text-sm font-semibold uppercase tracking-wider bg-brand-500 text-space-950 hover:brightness-110 transition disabled:opacity-60 disabled:cursor-not-allowed shadow-plasma"
           >
             {busy ? 'Please wait…' : mode === 'login' ? 'Log in' : 'Create account'}
           </button>
@@ -155,7 +155,7 @@ export default function AuthModal({
               setError(null);
               setMode(mode === 'login' ? 'register' : 'login');
             }}
-            className="text-plasma-400 hover:text-plasma-500 font-semibold transition"
+            className="text-brand-400 hover:text-brand-500 font-semibold transition"
           >
             {mode === 'login' ? 'Register' : 'Log in'}
           </button>

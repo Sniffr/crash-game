@@ -9,7 +9,7 @@ import {
   setMuted, startMusic, takeoffWhoosh, uiTick,
 } from './sounds';
 import { applyThemeCssVars, clearTheme, fetchServerTheme, hasUserOverride, loadTheme, readThemeFromFile, saveTheme } from './theme/loader';
-import { DEFAULT_THEME, tierColor as resolveTierColor, type Theme } from './theme/types';
+import { DEFAULT_THEME, type Theme } from './theme/types';
 import { formatBalance, fromMinor, toMinor } from './lib/money';
 
 /**
@@ -601,10 +601,15 @@ export default function App() {
   const getChipClass = (cp: number) => (cp < 2 ? 'pink' : cp < 10 ? 'purple' : 'gold');
 
   // Tier color from active theme — drives canvas curve, multiplier readout, history
-  const getMultiplierColor = useCallback(
-    (m: number) => resolveTierColor(theme, m),
-    [theme],
-  );
+  // Signature: the climbing multiplier heats up — cool white → orange → gold →
+  // white-hot — so the number itself telegraphs the tension. Fixed (not themed)
+  // so it stays consistent across games, on the iMoon warm palette.
+  const getMultiplierColor = useCallback((m: number) => {
+    if (m < 2) return '#cdd3ea';   // cool
+    if (m < 10) return '#fb6514';  // orange — heating up
+    if (m < 50) return '#f5a623';  // gold
+    return '#fff1dc';              // white-hot
+  }, []);
 
   return (
     <div className="min-h-screen text-slate-100 relative">
@@ -645,7 +650,7 @@ export default function App() {
       <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
       {sessionError && (
-        <div className="px-4 py-2 bg-nebula-500/15 border-b border-nebula-500/40 text-nebula-400 text-xs font-mono text-center">
+        <div className="px-4 py-2 bg-loss-500/15 border-b border-loss-500/40 text-loss-400 text-xs font-mono text-center">
           {sessionError}
         </div>
       )}
@@ -673,10 +678,10 @@ export default function App() {
             <div
               className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-sm font-semibold backdrop-blur-md border animate-toast-in ${
                 toast.kind === 'win'
-                  ? 'bg-aurora-500/15 text-aurora-400 border-aurora-500/40 shadow-aurora'
+                  ? 'bg-bet-500/15 text-bet-400 border-bet-500/40 shadow-aurora'
                   : toast.kind === 'loss'
-                  ? 'bg-nebula-500/15 text-nebula-400 border-nebula-500/40 shadow-nebula'
-                  : 'bg-plasma-500/15 text-plasma-400 border-plasma-500/40 shadow-plasma'
+                  ? 'bg-loss-500/15 text-loss-400 border-loss-500/40 shadow-nebula'
+                  : 'bg-brand-500/15 text-brand-400 border-brand-500/40 shadow-plasma'
               }`}
             >
               {toast.text}
@@ -758,7 +763,7 @@ function Header({
         )}
         <div className="flex flex-col min-w-0">
           <h1 className="font-display font-bold text-[15px] sm:text-base tracking-[0.18em] uppercase leading-none truncate" style={{ color: theme.colors.text }}>
-            <span className="text-plasma-400">
+            <span className="text-brand-400">
               {brand.split(' ')[0]}
             </span>
             {brand.split(' ').slice(1).length > 0 && (
@@ -770,7 +775,7 @@ function Header({
           </span>
         </div>
         <span
-          className={`hidden sm:inline-block w-1.5 h-1.5 rounded-full ml-3 ${connected ? 'bg-aurora-500' : 'bg-nebula-500 animate-pulse'}`}
+          className={`hidden sm:inline-block w-1.5 h-1.5 rounded-full ml-3 ${connected ? 'bg-bet-500' : 'bg-loss-500 animate-pulse'}`}
           title={connected ? 'live' : 'reconnecting'}
         />
       </div>
@@ -812,7 +817,7 @@ function Header({
         <div className="flex items-center gap-2 sm:gap-3 bg-space-800/80 border border-space-500/50 rounded-control px-3 py-1.5">
           <div className="leading-tight">
             <div className="text-[9px] uppercase tracking-[0.22em] text-slate-500">Balance</div>
-            <div className="text-base sm:text-lg font-mono font-semibold text-aurora-400">{formatBalance(balance, session ?? null)}</div>
+            <div className="text-base sm:text-lg font-mono font-semibold text-bet-400">{formatBalance(balance, session ?? null)}</div>
           </div>
           {!(typeof session?.balanceMinor === 'number' && session?.currency) && (
             <button
@@ -865,7 +870,7 @@ function IconButton({ onClick, label, children }: { onClick: () => void; label: 
 
 function Logo() {
   return (
-    <div className="w-9 h-9 rounded-control bg-gradient-to-br from-cosmos-600 via-space-700 to-plasma-600 border border-space-500/60 flex items-center justify-center shadow-plasma/50">
+    <div className="w-9 h-9 rounded-control bg-gradient-to-br from-info-600 via-space-700 to-brand-600 border border-space-500/60 flex items-center justify-center shadow-plasma/50">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
         <path d="M12 2 L15 8 L15 16 Q12 22 9 16 L9 8 Z" fill="#f8fafc" stroke="#0f172a" strokeWidth="0.5"/>
         <circle cx="12" cy="9" r="1.6" fill="#22d3ee"/>
@@ -920,7 +925,7 @@ function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?:
       <div className="flex items-baseline justify-between mb-3">
         <h2 className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.22em]">Your stats</h2>
         {displayName && (
-          <span className="text-[10px] font-mono text-cosmos-400 truncate ml-2" title={displayName}>
+          <span className="text-[10px] font-mono text-info-400 truncate ml-2" title={displayName}>
             {displayName}
           </span>
         )}
@@ -944,7 +949,7 @@ function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?:
 }
 
 function StatTile({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'win' | 'loss' | 'neutral' }) {
-  const color = tone === 'win' ? 'text-aurora-400' : tone === 'loss' ? 'text-nebula-400' : 'text-slate-100';
+  const color = tone === 'win' ? 'text-bet-400' : tone === 'loss' ? 'text-loss-400' : 'text-slate-100';
   return (
     <div className="bg-space-800/50 border border-space-500/30 rounded-control px-2.5 py-1.5 leading-tight">
       <div className="text-[9px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
