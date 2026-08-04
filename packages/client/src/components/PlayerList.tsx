@@ -19,6 +19,25 @@ interface PlayerListProps {
   youPlayerId?: string;
 }
 
+/** OdiBets-style multiplier chip: orange for ≥2×, muted purple below. */
+function MultChip({ m }: { m: number }) {
+  const hot = m >= 2;
+  return (
+    <span
+      className="inline-block rounded-md px-1.5 py-0.5 text-xs font-extrabold text-white tabular-nums"
+      style={{ backgroundColor: hot ? 'hsl(21 90% 52%)' : 'hsl(240 16% 45%)' }}
+    >
+      {m.toFixed(2)}x
+    </span>
+  );
+}
+
+function amountOf(bet: Player): string {
+  return bet.currency
+    ? fromMinor(bet.amountMinor ?? bet.amount, bet.currency)
+    : bet.amount.toFixed(2);
+}
+
 export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
   const sorted = [...bets].sort((a, b) => {
     const aIsYou = a.playerId === youPlayerId ? 1 : 0;
@@ -30,62 +49,62 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
   });
 
   return (
-    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 flex-1 min-h-0 flex flex-col">
-      <div className="flex items-center justify-between mb-3">
-        <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em]">
-          Pilots in this round
-        </h2>
-        <span className="text-xs text-neutral-500 tabular-nums">{bets.length}</span>
+    <div className="bg-space-800 border border-white/5 rounded-panel flex flex-col min-h-0">
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+        <div className="flex items-center gap-2">
+          <h2 className="text-base font-extrabold text-white">Live Bets</h2>
+          <span className="inline-flex items-center gap-1 text-xs font-semibold text-neutral-400 tabular-nums">
+            <UserIcon /> {bets.length}
+          </span>
+        </div>
+        <span className="text-xs font-bold text-neutral-500 border border-white/10 rounded-lg px-2.5 py-1 select-none">
+          Previous Round
+        </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto space-y-1.5 pr-1 max-h-[420px] lg:max-h-none">
-        {bets.length === 0 && (
-          <div className="text-center py-10 text-neutral-600 text-xs">
-            Awaiting pilots…
-          </div>
-        )}
+      {/* Column labels */}
+      <div className="grid grid-cols-[1.1fr_1fr_auto_1fr] gap-2 px-4 py-2 text-[11px] font-bold text-neutral-500 border-b border-white/5">
+        <span>User</span>
+        <span>Bet</span>
+        <span className="text-center">X</span>
+        <span className="text-right">Cash out</span>
+      </div>
 
+      {/* Rows */}
+      <div className="overflow-y-auto max-h-[300px] lg:max-h-[calc(100vh-220px)]">
+        {bets.length === 0 && (
+          <div className="text-center py-10 text-neutral-600 text-xs">Awaiting pilots…</div>
+        )}
         {sorted.map((bet) => {
           const isYou = bet.playerId === youPlayerId;
           return (
             <div
               key={bet.playerId}
-              className={`flex justify-between items-center px-3 py-2 rounded-control transition border ${
-                bet.cashedOut
-                  ? 'bg-bet-500/10 border-bet-500/25'
-                  : isYou
-                  ? 'bg-info-500/10 border-info-500/30'
-                  : 'bg-space-800/40 border-space-500/30'
+              className={`grid grid-cols-[1.1fr_1fr_auto_1fr] gap-2 items-center px-4 py-2 text-sm border-b border-white/[0.04] ${
+                bet.cashedOut ? 'bg-bet-500/[0.07]' : isYou ? 'bg-info-500/[0.07]' : ''
               }`}
             >
-              <div className="flex items-center gap-2 min-w-0">
-                <Avatar isYou={isYou} />
-                <span className={`text-sm truncate ${isYou ? 'text-info-300 font-semibold' : 'text-neutral-300'}`}>
-                  {isYou ? 'You' : bet.botName ?? bet.playerId.slice(0, 6)}
-                </span>
-              </div>
-              <div className="text-right shrink-0 leading-tight">
-                <div className={`text-sm tabular-nums ${isYou ? 'text-neutral-100' : 'text-neutral-400'}`}>
-                  {bet.currency
-                    ? fromMinor(bet.amountMinor ?? bet.amount, bet.currency)
-                    : `$${bet.amount.toFixed(2)}`}
-                </div>
-                {bet.cashedOut ? (
-                  <div className="text-[11px] text-bet-400 tabular-nums">
-                    {bet.cashoutMultiplier?.toFixed(2)}x · +{bet.currency
-                      ? fromMinor(bet.profit ?? 0, bet.currency)
-                      : `$${(bet.profit ?? 0).toFixed(2)}`}
-                  </div>
+              <span className={`truncate ${isYou ? 'text-info-300 font-bold' : 'text-neutral-300'}`}>
+                {isYou ? 'You' : bet.botName ?? bet.playerId.slice(0, 3)}
+              </span>
+              <span className="tabular-nums text-neutral-200">{amountOf(bet)}</span>
+              <span className="text-center">
+                {bet.cashedOut && bet.cashoutMultiplier ? (
+                  <MultChip m={bet.cashoutMultiplier} />
                 ) : bet.autoCashout ? (
-                  <div className="text-[11px] text-cash-500/80 tabular-nums">
-                    auto {bet.autoCashout.toFixed(2)}x
-                  </div>
+                  <span className="text-xs font-bold text-info-400 tabular-nums">×{bet.autoCashout.toFixed(0)}</span>
                 ) : (
-                  <div className="text-[11px] text-neutral-600">
-                    manual
-                  </div>
+                  <span className="text-neutral-600">–</span>
                 )}
-              </div>
+              </span>
+              <span className="text-right tabular-nums text-neutral-300">
+                {bet.cashedOut
+                  ? bet.currency
+                    ? fromMinor((bet.amountMinor ?? bet.amount) + (bet.profit ?? 0), bet.currency)
+                    : (bet.amount + (bet.profit ?? 0)).toFixed(2)
+                  : '–'}
+              </span>
             </div>
           );
         })}
@@ -94,28 +113,11 @@ export default function PlayerList({ bets, youPlayerId }: PlayerListProps) {
   );
 }
 
-function Avatar({ isYou }: { isYou: boolean }) {
+function UserIcon() {
   return (
-    <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
-      isYou
-        ? 'bg-gradient-to-br from-info-500 to-brand-500'
-        : 'bg-gradient-to-br from-space-600 to-space-800 border border-space-500/40'
-    }`}>
-      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-white/85">
-        {isYou ? (
-          <>
-            <circle cx="12" cy="8" r="4"/>
-            <path d="M4 21v-1a8 8 0 0 1 16 0v1"/>
-          </>
-        ) : (
-          <>
-            <rect x="4" y="6" width="16" height="12" rx="2"/>
-            <circle cx="9" cy="12" r="1.2" fill="currentColor"/>
-            <circle cx="15" cy="12" r="1.2" fill="currentColor"/>
-            <path d="M12 2v4"/>
-          </>
-        )}
-      </svg>
-    </div>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21v-1a8 8 0 0 1 16 0v1" />
+    </svg>
   );
 }
