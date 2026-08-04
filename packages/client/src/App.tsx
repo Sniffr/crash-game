@@ -155,6 +155,10 @@ export default function App() {
   const [betAmount, setBetAmount] = useState(10);
   const [autoCashoutEnabled, setAutoCashoutEnabled] = useState(false);
   const [autoCashout, setAutoCashout] = useState(2.0);
+  // Second bet section (OdiBets-style dual bet). Its own stake + auto-cashout.
+  const [bet2Amount, setBet2Amount] = useState(10);
+  const [auto2Enabled, setAuto2Enabled] = useState(false);
+  const [auto2, setAuto2] = useState(2.0);
   const [session, setSession] = useState<SessionInfo | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [lobbyUrl, setLobbyUrl] = useState<string | null>(null);
@@ -540,27 +544,28 @@ export default function App() {
     }
   }, [flashToast]);
 
-  const placeBet = () => {
+  // Place a bet with an explicit stake + auto-cashout (each bet section passes its own).
+  const placeBetWith = (amount: number, autoEnabled: boolean, autoVal: number) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
+    const autoTarget = autoEnabled ? autoVal : undefined;
     // A money session (operator OR personal-lobby real-money) carries balanceMinor
     // + currency and settles in integer minor units. Only the legacy anonymous
     // demo session uses decimal credits.
     if (typeof session.balanceMinor === 'number' && session.currency) {
-      // Money session: send amountMinor (integer minor units)
-      const amountMinor = toMinor(betAmount, session.currency);
+      const amountMinor = toMinor(amount, session.currency);
       ws.send(JSON.stringify({
         type: 'place_bet',
-        data: { sessionId: session.sessionId, amountMinor, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
+        data: { sessionId: session.sessionId, amountMinor, autoCashout: autoTarget },
       }));
     } else {
-      // Legacy demo session: send decimal amount (byte-unchanged)
       ws.send(JSON.stringify({
         type: 'place_bet',
-        data: { sessionId: session.sessionId, amount: betAmount, autoCashout: autoCashoutEnabled ? autoCashout : undefined },
+        data: { sessionId: session.sessionId, amount, autoCashout: autoTarget },
       }));
     }
   };
+  const placeBet = () => placeBetWith(betAmount, autoCashoutEnabled, autoCashout);
   const cashout = () => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !session) return;
@@ -606,78 +611,97 @@ export default function App() {
         lobbyUrl={lobbyUrl}
       />
 
-      <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
-
       {sessionError && (
         <div className="px-4 py-2 bg-loss-500/15 border-b border-loss-500/40 text-loss-400 text-xs text-center">
           {sessionError}
         </div>
       )}
 
-      <main className="flex flex-col lg:flex-row gap-4 p-4 lg:p-5 lg:h-[calc(100vh-148px)]">
-        {/* Game Canvas */}
-        <section className="flex-1 relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 min-h-[340px] lg:min-h-0">
-          {/* CSS galaxy (starfield + supernova + planet Earth), behind the canvas */}
-          <div className="game-bg absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
-            <div className="sn-earth-glow" />
-            <div className="sn-earth" />
-            <div className="sn-supernova" />
-          </div>
-          <GameCanvas
-            phase={gameState.phase}
-            flightStartTime={gameState.flightStartTime ?? null}
-            serverClockOffsetMs={serverOffsetRef.current}
-            currentMultiplier={gameState.currentMultiplier}
-            crashPoint={gameState.crashPoint}
-            hashCommit={gameState.hashCommit}
-            countdownMs={gameState.countdownMs}
-            getMultiplierColor={getMultiplierColor}
-            theme={theme}
-          />
+      <main className="max-w-[1500px] mx-auto w-full p-3 lg:p-4">
+        <div className="grid gap-3 lg:gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+          {/* Live Bets — desktop sidebar */}
+          <aside className="hidden lg:flex flex-col gap-3 min-h-0">
+            <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
+            <StatsPanel stats={stats} displayName={session?.displayName} />
+          </aside>
 
-          <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-neutral-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40">
-            Round · {gameState.roundNumber}
-          </div>
+          {/* Right column: history · canvas · dual bet */}
+          <div className="flex flex-col gap-3 min-w-0">
+            <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
-          {toast && (
-            <div
-              className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-sm font-semibold backdrop-blur-md border animate-toast-in ${
-                toast.kind === 'win'
-                  ? 'bg-bet-500/15 text-bet-400 border-bet-500/40'
-                  : toast.kind === 'loss'
-                  ? 'bg-loss-500/15 text-loss-400 border-loss-500/40'
-                  : 'bg-brand-500/15 text-brand-400 border-brand-500/40'
-              }`}
-            >
-              {toast.text}
+            <section className="relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 h-[clamp(300px,46vh,560px)]">
+              {/* CSS galaxy (starfield + supernova + planet Earth), behind the canvas */}
+              <div className="game-bg absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
+                <div className="sn-earth-glow" />
+                <div className="sn-earth" />
+                <div className="sn-supernova" />
+              </div>
+              <GameCanvas
+                phase={gameState.phase}
+                flightStartTime={gameState.flightStartTime ?? null}
+                serverClockOffsetMs={serverOffsetRef.current}
+                currentMultiplier={gameState.currentMultiplier}
+                crashPoint={gameState.crashPoint}
+                hashCommit={gameState.hashCommit}
+                countdownMs={gameState.countdownMs}
+                getMultiplierColor={getMultiplierColor}
+                theme={theme}
+              />
+
+              <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-neutral-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40">
+                Round · {gameState.roundNumber}
+              </div>
+
+              {toast && (
+                <div
+                  className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-sm font-semibold backdrop-blur-md border animate-toast-in ${
+                    toast.kind === 'win'
+                      ? 'bg-bet-500/15 text-bet-400 border-bet-500/40'
+                      : toast.kind === 'loss'
+                      ? 'bg-loss-500/15 text-loss-400 border-loss-500/40'
+                      : 'bg-brand-500/15 text-brand-400 border-brand-500/40'
+                  }`}
+                >
+                  {toast.text}
+                </div>
+              )}
+            </section>
+
+            {/* Dual bet sections — side-by-side on desktop, stacked on mobile */}
+            <div className="grid gap-3 sm:grid-cols-2">
+              <BetPanel
+                phase={gameState.phase} hasBet={hasBet} balance={balance}
+                betAmount={betAmount} setBetAmount={setBetAmount}
+                autoCashoutEnabled={autoCashoutEnabled} setAutoCashoutEnabled={setAutoCashoutEnabled}
+                autoCashout={autoCashout} setAutoCashout={setAutoCashout}
+                currentMultiplier={gameState.currentMultiplier}
+                betAmounts={[10, 100, 1000, 10000]}
+                onPlaceBet={placeBet} onCashout={cashout}
+                maxBetMinor={session?.rgLimits?.maxBetMinor}
+                currency={session?.currency}
+                isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
+              />
+              <BetPanel
+                phase={gameState.phase} hasBet={hasBet} balance={balance}
+                betAmount={bet2Amount} setBetAmount={setBet2Amount}
+                autoCashoutEnabled={auto2Enabled} setAutoCashoutEnabled={setAuto2Enabled}
+                autoCashout={auto2} setAutoCashout={setAuto2}
+                currentMultiplier={gameState.currentMultiplier}
+                betAmounts={[10, 100, 1000, 10000]}
+                onPlaceBet={() => placeBetWith(bet2Amount, auto2Enabled, auto2)} onCashout={cashout}
+                maxBetMinor={session?.rgLimits?.maxBetMinor}
+                currency={session?.currency}
+                isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
+              />
             </div>
-          )}
-        </section>
 
-        {/* Sidebar */}
-        <aside className="lg:w-[340px] flex flex-col gap-4 min-h-0">
-          <BetPanel
-            phase={gameState.phase}
-            hasBet={hasBet}
-            balance={balance}
-            betAmount={betAmount}
-            setBetAmount={setBetAmount}
-            autoCashoutEnabled={autoCashoutEnabled}
-            setAutoCashoutEnabled={setAutoCashoutEnabled}
-            autoCashout={autoCashout}
-            setAutoCashout={setAutoCashout}
-            currentMultiplier={gameState.currentMultiplier}
-            countdownMs={gameState.countdownMs}
-            betAmounts={[1, 5, 10, 25, 50, 100, 500]}
-            onPlaceBet={placeBet}
-            onCashout={cashout}
-            maxBetMinor={session?.rgLimits?.maxBetMinor}
-            currency={session?.currency}
-            isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
-          />
-          <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
-          <StatsPanel stats={stats} displayName={session?.displayName} />
-        </aside>
+            {/* Live Bets + stats on mobile (sidebar is desktop-only) */}
+            <div className="lg:hidden flex flex-col gap-3">
+              <StatsPanel stats={stats} displayName={session?.displayName} />
+              <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
+            </div>
+          </div>
+        </div>
       </main>
 
       <footer className="text-center py-3 text-[11px] text-neutral-500 border-t border-space-500/30 bg-space-950/60">

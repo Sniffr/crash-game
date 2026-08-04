@@ -11,7 +11,7 @@ interface BetPanelProps {
   autoCashout: number;
   setAutoCashout: (v: number) => void;
   currentMultiplier: number;
-  countdownMs?: number;
+  /** Quick-stake chip values; first 4 are shown (e.g. 10 / 100 / 1K / 10K). */
   betAmounts: number[];
   onPlaceBet: () => void;
   onCashout: () => void;
@@ -23,8 +23,8 @@ interface BetPanelProps {
   isOperator?: boolean;
 }
 
-const BETTING_TOTAL_MS = 5000;
-
+/** OdiBets-style bet section: Auto tabs + Bonus, a − value + stepper with quick
+ *  chips, and a big BET / CASH OUT button. Rendered twice for the dual-bet UI. */
 export default function BetPanel({
   phase,
   hasBet,
@@ -36,7 +36,6 @@ export default function BetPanel({
   autoCashout,
   setAutoCashout,
   currentMultiplier,
-  countdownMs,
   betAmounts,
   onPlaceBet,
   onCashout,
@@ -46,20 +45,12 @@ export default function BetPanel({
 }: BetPanelProps) {
   const decimals = decimalsFor(currency);
   const symbol = symbolFor(currency);
+  const step = 1 / Math.pow(10, decimals);
+  const nudge = 1; // + / − adjust by one unit
 
-  // For operator sessions: balance is in minor units, betAmount is in major units typed by user.
-  // Convert betAmount to minor units for all comparisons.
   const betAmountMinor = isOperator ? toMinor(betAmount, currency) : betAmount;
-
-  // Balance check: for operator sessions compare minor units; for legacy compare decimal credits.
-  const hasEnoughBalance = isOperator
-    ? balance >= betAmountMinor
-    : balance >= betAmount;
-
-  // Operator max-bet enforcement
+  const hasEnoughBalance = isOperator ? balance >= betAmountMinor : balance >= betAmount;
   const exceedsMaxBet = isOperator && maxBetMinor != null && betAmountMinor > maxBetMinor;
-
-  // Max allowed bet in major units (for the input's max attribute and double button)
   const maxBetMajor = isOperator && maxBetMinor != null
     ? maxBetMinor / Math.pow(10, decimals)
     : isOperator
@@ -68,161 +59,114 @@ export default function BetPanel({
 
   const canBet = phase === 'BETTING' && !hasBet && hasEnoughBalance && !exceedsMaxBet;
   const canCashout = phase === 'FLYING' && hasBet;
+  const money = (v: number) => `${symbol}${v.toFixed(Math.min(decimals, 2))}`;
+  const chip = (v: number) => (v >= 1000 ? `${v / 1000}K` : String(v));
 
-  const seconds =
-    phase === 'BETTING' && countdownMs != null
-      ? Math.max(0, Math.ceil(countdownMs / 1000))
-      : null;
-  const progress =
-    phase === 'BETTING' && countdownMs != null
-      ? Math.max(0, Math.min(1, 1 - countdownMs / BETTING_TOTAL_MS))
-      : 0;
-
-  const step = 1 / Math.pow(10, decimals);
+  const setClamped = (v: number) => setBetAmount(Math.max(step, Math.min(maxBetMajor, v)));
 
   return (
-    <div className="bg-space-800 border border-white/5 rounded-panel p-4">
-      {/* Countdown */}
-      {phase === 'BETTING' && seconds != null && (
-        <div className="mb-4 rounded-control overflow-hidden border border-brand-500/25 bg-brand-500/5">
-          <div className="flex items-center justify-between px-3 py-2">
-            <div className="text-[10px] uppercase tracking-[0.2em] text-brand-400 font-bold">
-              Launch in
-            </div>
-            <div
-              key={seconds}
-              className="text-3xl font-extrabold text-brand-400 leading-none animate-countdown tabular-nums"
-              style={{ textShadow: '0 0 16px hsl(21 97% 53% / 0.6)' }}
-            >
-              {seconds}
-            </div>
-          </div>
-          <div className="h-[3px] bg-space-950/80">
-            <div
-              className="h-full bg-brand-500 transition-all duration-100 ease-linear"
-              style={{ width: `${progress * 100}%` }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Header row */}
+    <div className="bg-space-800 border border-white/5 rounded-panel p-3">
+      {/* Tabs + Bonus */}
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-xs font-extrabold text-white tracking-tight">Place bet</h2>
-        <label className="flex items-center gap-2 cursor-pointer select-none">
-          <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-neutral-400">Auto</span>
+        <div className="flex items-center gap-4">
+          <span className="text-sm font-bold text-neutral-600 cursor-default" title="Auto-rebet — coming soon">
+            Auto Bet
+          </span>
           <button
             onClick={() => setAutoCashoutEnabled(!autoCashoutEnabled)}
-            className={`relative w-11 h-6 rounded-full border transition-colors ${
-              autoCashoutEnabled ? 'bg-brand-500 border-brand-400' : 'bg-space-600 border-white/10'
-            }`}
-            aria-pressed={autoCashoutEnabled}
-            aria-label="Toggle auto cashout"
+            className={`text-sm font-bold transition ${autoCashoutEnabled ? 'text-white' : 'text-neutral-500 hover:text-neutral-300'}`}
           >
-            <span
-              className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white transition-transform duration-200 ${
-                autoCashoutEnabled ? 'translate-x-5' : 'translate-x-0'
-              }`}
-            />
+            Auto Cashout
           </button>
-        </label>
+        </div>
+        <span className="inline-flex items-center gap-1.5 rounded-lg border border-info-500/60 text-info-500 px-2.5 py-1 text-xs font-bold select-none">
+          <svg viewBox="0 0 24 24" className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+          Bonus
+        </span>
       </div>
 
-      {/* Stake stepper: ½ · $input · 2×  (iMoon layout) */}
-      <div className="flex items-center gap-1.5 mb-2.5 bg-space-950/60 border border-white/5 rounded-control p-1.5">
-        <button
-          onClick={() => setBetAmount(Math.max(step, betAmount / 2))}
-          className="px-3 h-9 rounded-lg bg-space-700/70 border border-white/5 text-neutral-300 hover:bg-space-600 hover:text-white transition font-bold text-xs shrink-0"
-          aria-label="halve stake"
-        >½</button>
-        <div className="flex-1 flex items-center gap-1 px-2 h-9">
-          <span className="text-neutral-500 font-bold">{symbol}</span>
+      {/* Auto-cashout target */}
+      {autoCashoutEnabled && (
+        <div className="flex items-center gap-2 bg-space-950 border border-white/5 rounded-control px-3 h-9 mb-2.5">
+          <label className="text-[11px] font-bold text-neutral-400">Auto cash at</label>
           <input
             type="number"
-            value={betAmount}
-            onChange={(e) => setBetAmount(Math.max(step, Number(e.target.value) || step))}
-            className="w-full bg-transparent text-white text-lg font-extrabold focus:outline-none tabular-nums"
-            min={step}
-            max={maxBetMajor}
-            inputMode="decimal"
-            step={step}
+            value={autoCashout}
+            onChange={(e) => setAutoCashout(Math.max(1.01, Number(e.target.value) || 1.01))}
+            className="flex-1 bg-transparent text-white text-sm font-bold focus:outline-none tabular-nums text-right"
+            min={1.01}
+            step={0.1}
           />
+          <span className="text-xs text-cash-400 font-bold">×</span>
         </div>
-        <button
-          onClick={() => setBetAmount(Math.max(step, Math.min(maxBetMajor, betAmount * 2)))}
-          className="px-3 h-9 rounded-lg bg-space-700/70 border border-white/5 text-neutral-300 hover:bg-space-600 hover:text-white transition font-bold text-xs shrink-0"
-          aria-label="double stake"
-        >2×</button>
-      </div>
+      )}
 
-      {/* Quick amounts */}
-      <div className="grid grid-cols-4 gap-1.5 mb-3">
-        {betAmounts.slice(0, 8).map((amt) => (
-          <button
-            key={amt}
-            onClick={() => setBetAmount(amt)}
-            className={`px-1 py-1.5 rounded-lg text-xs font-bold transition border tabular-nums ${
-              betAmount === amt
-                ? 'bg-brand-500/15 text-brand-400 border-brand-500/40'
-                : 'bg-space-900/50 text-neutral-400 border-white/5 hover:border-white/15 hover:text-neutral-200'
-            }`}
-          >
-            {symbol}{amt}
-          </button>
-        ))}
-      </div>
-
-      {/* Auto cashout target */}
-      {autoCashoutEnabled && (
-        <div className="mb-3">
-          <div className="flex items-center gap-2 bg-space-950/60 border border-white/5 rounded-control px-3 h-10">
-            <label className="text-[10px] font-bold uppercase tracking-[0.14em] text-neutral-400">Auto cash at</label>
+      {/* Stepper + chips (left) · BET/CASH OUT (right) */}
+      <div className="flex gap-2.5">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center bg-space-950 border border-white/5 rounded-control h-11 mb-1.5 overflow-hidden">
+            <button
+              onClick={() => setClamped(betAmount - nudge)}
+              className="w-11 h-full grid place-items-center text-2xl leading-none text-neutral-300 hover:text-white hover:bg-space-700/60"
+              aria-label="decrease stake"
+            >−</button>
             <input
               type="number"
-              value={autoCashout}
-              onChange={(e) => setAutoCashout(Math.max(1.01, Number(e.target.value) || 1.01))}
-              className="flex-1 bg-transparent text-white text-sm font-bold focus:outline-none tabular-nums text-right"
-              min={1.01}
-              step={0.1}
+              value={betAmount}
+              onChange={(e) => setClamped(Number(e.target.value) || step)}
+              className="flex-1 min-w-0 bg-transparent text-center text-white text-lg font-extrabold focus:outline-none tabular-nums"
+              min={step}
+              max={maxBetMajor}
+              inputMode="decimal"
+              step={step}
             />
-            <span className="text-xs text-cash-400 font-bold">×</span>
+            <button
+              onClick={() => setClamped(betAmount + nudge)}
+              className="w-11 h-full grid place-items-center text-2xl leading-none text-neutral-300 hover:text-white hover:bg-space-700/60"
+              aria-label="increase stake"
+            >+</button>
+          </div>
+          <div className="grid grid-cols-4 gap-1.5">
+            {betAmounts.slice(0, 4).map((amt) => (
+              <button
+                key={amt}
+                onClick={() => setClamped(amt)}
+                className="bg-space-950 border border-white/5 rounded-lg py-1.5 text-xs font-bold text-neutral-300 hover:text-white hover:border-white/15 tabular-nums transition"
+              >
+                {chip(amt)}
+              </button>
+            ))}
           </div>
         </div>
-      )}
 
-      {/* Primary action — Cashout while flying with a live bet; otherwise the
-          Place Bet button is ALWAYS shown (disabled with a reason when you can't
-          bet yet), so it never disappears between rounds. */}
-      {canCashout ? (
-        <button
-          onClick={onCashout}
-          className="w-full h-12 rounded-control bg-cash-500 hover:bg-cash-400 text-space-950 font-display font-extrabold text-base transition active:scale-[0.99]"
-        >
-          Cash out {symbol}{(betAmount * currentMultiplier).toFixed(Math.min(decimals, 8))}
-        </button>
-      ) : hasBet ? (
-        <div className={`w-full h-12 rounded-control border font-bold text-sm flex items-center justify-center ${
-          phase === 'BETTING'
-            ? 'bg-bet-500/12 border-bet-500/40 text-bet-400'
-            : 'bg-space-900/50 border-white/5 text-neutral-400'
-        }`}>
-          {phase === 'BETTING' ? 'Bet locked in' : 'Round complete'}
-        </div>
-      ) : (
-        <button
-          onClick={onPlaceBet}
-          disabled={!canBet}
-          className="w-full h-12 rounded-control bg-bet-500 hover:bg-bet-400 text-white font-display font-extrabold text-base transition active:scale-[0.99] disabled:opacity-45 disabled:cursor-not-allowed disabled:hover:bg-bet-500"
-        >
-          {canBet
-            ? `Bet ${symbol}${betAmount.toFixed(Math.min(decimals, 8))}${seconds != null ? ` · ${seconds}s` : ''}`
-            : exceedsMaxBet
-            ? 'Above operator limit'
-            : !hasEnoughBalance
-            ? 'Insufficient balance'
-            : 'Bet · waiting for next round'}
-        </button>
-      )}
+        {canCashout ? (
+          <button
+            onClick={onCashout}
+            className="w-32 sm:w-36 shrink-0 rounded-control bg-cash-500 hover:bg-cash-400 text-space-950 font-extrabold flex flex-col items-center justify-center leading-tight transition active:scale-[0.99]"
+          >
+            <span className="text-xs tracking-wide">CASH OUT</span>
+            <span className="text-base tabular-nums">{money(betAmount * currentMultiplier)}</span>
+          </button>
+        ) : (
+          <button
+            onClick={onPlaceBet}
+            disabled={!canBet}
+            className="w-32 sm:w-36 shrink-0 rounded-control bg-brand-500 hover:bg-brand-400 disabled:opacity-45 disabled:cursor-not-allowed text-white font-extrabold flex flex-col items-center justify-center leading-tight transition active:scale-[0.99]"
+            title={
+              !canBet && !hasBet
+                ? exceedsMaxBet ? 'Above operator limit'
+                : !hasEnoughBalance ? 'Insufficient balance'
+                : 'Waiting for the next round'
+                : undefined
+            }
+          >
+            <span className="text-xs tracking-wide">{hasBet ? (phase === 'BETTING' ? 'PLACED' : 'ROUND OVER') : 'BET'}</span>
+            <span className="text-base tabular-nums">{money(betAmount)}</span>
+          </button>
+        )}
+      </div>
     </div>
   );
 }
