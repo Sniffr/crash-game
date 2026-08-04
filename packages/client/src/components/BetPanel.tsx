@@ -92,7 +92,7 @@ export default function BetPanel({
             <div
               key={seconds}
               className="text-3xl font-mono font-extrabold text-brand-400 leading-none animate-countdown tabular-nums"
-              style={{ textShadow: '0 0 16px rgba(251, 101, 20, 0.6)' }}
+              style={{ textShadow: '0 0 16px hsl(21 97% 53% / 0.6)' }}
             >
               {seconds}
             </div>
@@ -110,7 +110,7 @@ export default function BetPanel({
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-xs font-extrabold text-white tracking-tight">Place bet</h2>
         <label className="flex items-center gap-2 cursor-pointer select-none">
-          <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-400">Auto</span>
+          <span className="text-[10px] font-bold uppercase tracking-[0.16em] text-neutral-400">Auto</span>
           <button
             onClick={() => setAutoCashoutEnabled(!autoCashoutEnabled)}
             className={`w-9 h-5 rounded-full transition-colors relative ${
@@ -132,11 +132,11 @@ export default function BetPanel({
       <div className="flex items-center gap-1.5 mb-2.5 bg-space-950/60 border border-white/5 rounded-control p-1.5">
         <button
           onClick={() => setBetAmount(Math.max(step, betAmount / 2))}
-          className="px-3 h-9 rounded-lg bg-space-700/70 border border-white/5 text-slate-300 hover:bg-space-600 hover:text-white transition font-bold text-xs shrink-0"
+          className="px-3 h-9 rounded-lg bg-space-700/70 border border-white/5 text-neutral-300 hover:bg-space-600 hover:text-white transition font-bold text-xs shrink-0"
           aria-label="halve stake"
         >½</button>
         <div className="flex-1 flex items-center gap-1 px-2 h-9">
-          <span className="text-slate-500 font-mono font-bold">{symbol}</span>
+          <span className="text-neutral-500 font-mono font-bold">{symbol}</span>
           <input
             type="number"
             value={betAmount}
@@ -150,7 +150,7 @@ export default function BetPanel({
         </div>
         <button
           onClick={() => setBetAmount(Math.max(step, Math.min(maxBetMajor, betAmount * 2)))}
-          className="px-3 h-9 rounded-lg bg-space-700/70 border border-white/5 text-slate-300 hover:bg-space-600 hover:text-white transition font-bold text-xs shrink-0"
+          className="px-3 h-9 rounded-lg bg-space-700/70 border border-white/5 text-neutral-300 hover:bg-space-600 hover:text-white transition font-bold text-xs shrink-0"
           aria-label="double stake"
         >2×</button>
       </div>
@@ -164,7 +164,7 @@ export default function BetPanel({
             className={`px-1 py-1.5 rounded-lg text-xs font-mono font-bold transition border tabular-nums ${
               betAmount === amt
                 ? 'bg-brand-500/15 text-brand-400 border-brand-500/40'
-                : 'bg-space-900/50 text-slate-400 border-white/5 hover:border-white/15 hover:text-slate-200'
+                : 'bg-space-900/50 text-neutral-400 border-white/5 hover:border-white/15 hover:text-neutral-200'
             }`}
           >
             {symbol}{amt}
@@ -176,7 +176,7 @@ export default function BetPanel({
       {autoCashoutEnabled && (
         <div className="mb-3">
           <div className="flex items-center gap-2 bg-space-950/60 border border-white/5 rounded-control px-3 h-10">
-            <label className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">Auto cash at</label>
+            <label className="text-[10px] font-bold uppercase tracking-[0.14em] text-neutral-400">Auto cash at</label>
             <input
               type="number"
               value={autoCashout}
@@ -204,7 +204,7 @@ export default function BetPanel({
         <div className={`w-full h-12 rounded-control border font-bold text-sm flex items-center justify-center ${
           phase === 'BETTING'
             ? 'bg-bet-500/12 border-bet-500/40 text-bet-400'
-            : 'bg-space-900/50 border-white/5 text-slate-400'
+            : 'bg-space-900/50 border-white/5 text-neutral-400'
         }`}>
           {phase === 'BETTING' ? 'Bet locked in' : 'Round complete'}
         </div>

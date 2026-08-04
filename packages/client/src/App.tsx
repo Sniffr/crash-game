@@ -8,8 +8,8 @@ import {
   applyThemeSounds, cashoutChime, crashBoom, isMuted, placeBet as sndPlaceBet,
   setMuted, startMusic, takeoffWhoosh, uiTick,
 } from './sounds';
-import { applyThemeCssVars, clearTheme, fetchServerTheme, hasUserOverride, loadTheme, readThemeFromFile, saveTheme } from './theme/loader';
-import { DEFAULT_THEME, type Theme } from './theme/types';
+import { applyThemeCssVars, fetchServerTheme, hasUserOverride, loadTheme, saveTheme } from './theme/loader';
+import { type Theme } from './theme/types';
 import { formatBalance, fromMinor, toMinor } from './lib/money';
 
 /**
@@ -167,7 +167,6 @@ export default function App() {
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
   const wsRef = useRef<WebSocket | null>(null);
   const serverOffsetRef = useRef(0);
-  const themeFileInputRef = useRef<HTMLInputElement>(null);
 
   const flashToast = useCallback((kind: 'win' | 'loss' | 'info', text: string) => {
     setToast({ kind, text });
@@ -285,31 +284,6 @@ export default function App() {
     })();
     return () => { cancelled = true; };
   }, []);
-
-  const loadThemeFromFile = useCallback(async (file: File) => {
-    try {
-      const t = await readThemeFromFile(file);
-      setTheme(t);
-      saveTheme(t, /* isUserOverride */ true);
-      flashToast('info', `Theme loaded: ${t.brandName}`);
-      window.setTimeout(() => startMusic(), 50);
-    } catch (e) {
-      flashToast('loss', `Failed to load theme: ${(e as Error).message}`);
-    }
-  }, [flashToast]);
-
-  const resetTheme = useCallback(async () => {
-    // Clear user override, then re-fetch server theme; fall back to built-in.
-    clearTheme();
-    const server = await fetchServerTheme();
-    if (server) {
-      setTheme(server);
-      flashToast('info', `Reset to server theme: ${server.brandName}`);
-    } else {
-      setTheme(DEFAULT_THEME);
-      flashToast('info', 'Reset to default Galaxy Crash');
-    }
-  }, [flashToast]);
 
   useEffect(() => {
     // Don't open the WebSocket until we have a session id to attach to
@@ -605,14 +579,16 @@ export default function App() {
   // white-hot — so the number itself telegraphs the tension. Fixed (not themed)
   // so it stays consistent across games, on the iMoon warm palette.
   const getMultiplierColor = useCallback((m: number) => {
-    if (m < 2) return '#cdd3ea';   // cool
+    // Hex (not hsl): this feeds the <canvas>, which concatenates a 2-char hex
+    // alpha onto it (e.g. color + '40'), so it must be #rrggbb.
+    if (m < 2) return '#d9d9d9';   // cool grey
     if (m < 10) return '#fb6514';  // orange — heating up
     if (m < 50) return '#f5a623';  // gold
-    return '#fff1dc';              // white-hot
+    return '#fafafa';              // white-hot
   }, []);
 
   return (
-    <div className="min-h-screen text-slate-100 relative">
+    <div className="min-h-screen text-neutral-100 relative">
       <Header
         soundOn={soundOn}
         onToggleSound={() => {
@@ -626,25 +602,9 @@ export default function App() {
         balance={balance}
         onResetBalance={resetBalance}
         theme={theme}
-        themeLocked={THEME_LOCKED}
-        onLoadThemeClick={() => themeFileInputRef.current?.click()}
-        onResetTheme={resetTheme}
         session={session}
         lobbyUrl={lobbyUrl}
       />
-      {!THEME_LOCKED && (
-        <input
-          ref={themeFileInputRef}
-          type="file"
-          accept="application/json"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) loadThemeFromFile(f);
-            e.target.value = '';
-          }}
-        />
-      )}
 
       <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
@@ -656,7 +616,9 @@ export default function App() {
 
       <main className="flex flex-col lg:flex-row gap-4 p-4 lg:p-5 lg:h-[calc(100vh-148px)]">
         {/* Game Canvas */}
-        <section className="flex-1 relative rounded-panel overflow-hidden border border-space-500/40 bg-space-900/40 shadow-panel min-h-[340px] lg:min-h-0">
+        <section className="flex-1 relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 shadow-panel min-h-[340px] lg:min-h-0">
+          {/* CSS starfield + drifting stripes, behind the transparent canvas */}
+          <div className="game-bg absolute inset-0 pointer-events-none" aria-hidden="true" />
           <GameCanvas
             phase={gameState.phase}
             flightStartTime={gameState.flightStartTime ?? null}
@@ -669,7 +631,7 @@ export default function App() {
             theme={theme}
           />
 
-          <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-slate-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40 font-mono">
+          <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-neutral-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40 font-mono">
             Round · {gameState.roundNumber}
           </div>
 
@@ -714,7 +676,7 @@ export default function App() {
         </aside>
       </main>
 
-      <footer className="text-center py-3 text-[11px] text-slate-500 border-t border-space-500/30 bg-space-950/60">
+      <footer className="text-center py-3 text-[11px] text-neutral-500 border-t border-space-500/30 bg-space-950/60">
         {theme.brandName || 'Galaxy Crash'} · simulation only · no real wagers, no real money.
       </footer>
 
@@ -730,7 +692,7 @@ export default function App() {
 // ─── Header ──────────────────────────────────────────────────────────────────
 function Header({
   soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
-  theme, themeLocked, onLoadThemeClick, onResetTheme, session, lobbyUrl,
+  theme, session, lobbyUrl,
 }: {
   soundOn: boolean;
   onToggleSound: () => void;
@@ -738,9 +700,6 @@ function Header({
   balance: number;
   onResetBalance: () => void;
   theme: Theme;
-  themeLocked: boolean;
-  onLoadThemeClick: () => void;
-  onResetTheme: () => void;
   session?: SessionInfo | null;
   lobbyUrl?: string | null;
 }) {
@@ -768,7 +727,7 @@ function Header({
               <span className="ml-1.5">{brand.split(' ').slice(1).join(' ')}</span>
             )}
           </h1>
-          <span className="text-[9px] uppercase tracking-[0.22em] text-slate-500 mt-0.5 truncate">
+          <span className="text-[9px] uppercase tracking-[0.22em] text-neutral-500 mt-0.5 truncate">
             {tagline}
           </span>
         </div>
@@ -778,20 +737,9 @@ function Header({
         <IconButton onClick={onToggleSound} label={soundOn ? 'Mute sounds' : 'Unmute sounds'}>
           {soundOn ? <SpeakerIcon /> : <SpeakerMutedIcon />}
         </IconButton>
-        {!themeLocked && (
-          <>
-            <IconButton onClick={onLoadThemeClick} label="Load theme pack">
-              <ThemeIcon />
-              <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Theme</span>
-            </IconButton>
-            <IconButton onClick={onResetTheme} label="Reset to default theme">
-              <ResetIcon />
-            </IconButton>
-          </>
-        )}
         <IconButton onClick={onOpenDrawer} label="Provably fair">
           <ShieldIcon />
-          <span className="hidden md:inline ml-1.5 text-xs font-medium text-slate-300">Fair</span>
+          <span className="hidden md:inline ml-1.5 text-xs font-medium text-neutral-300">Fair</span>
         </IconButton>
 
         {lobbyUrl && (
@@ -802,7 +750,7 @@ function Header({
                 if (lobbyUrl && window.top) window.top.location.href = lobbyUrl;
               }, 50);
             }}
-            className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1.5 rounded-control bg-space-800/80 border border-space-500/50 uppercase tracking-wider font-semibold"
+            className="text-[10px] text-neutral-400 hover:text-neutral-100 transition px-2 py-1.5 rounded-control bg-space-800/80 border border-space-500/50 uppercase tracking-wider font-semibold"
             title="Return to lobby"
           >
             Lobby
@@ -810,13 +758,13 @@ function Header({
         )}
         <div className="flex items-center gap-2 sm:gap-3 bg-space-800/80 border border-space-500/50 rounded-control px-3 py-1.5">
           <div className="leading-tight">
-            <div className="text-[9px] uppercase tracking-[0.22em] text-slate-500">Balance</div>
+            <div className="text-[9px] uppercase tracking-[0.22em] text-neutral-500">Balance</div>
             <div className="text-base sm:text-lg font-mono font-semibold text-bet-400">{formatBalance(balance, session ?? null)}</div>
           </div>
           {!(typeof session?.balanceMinor === 'number' && session?.currency) && (
             <button
               onClick={onResetBalance}
-              className="text-[10px] text-slate-400 hover:text-slate-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
+              className="text-[10px] text-neutral-400 hover:text-neutral-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
               title="Reset balance to $1000"
             >
               Reset
@@ -828,34 +776,13 @@ function Header({
   );
 }
 
-function ThemeIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="13.5" cy="6.5" r="2.5"/>
-      <circle cx="19" cy="13" r="2.5"/>
-      <circle cx="6" cy="11" r="2.5"/>
-      <circle cx="10" cy="20" r="2.5"/>
-      <path d="M2 12C2 6 7 2 12 2s10 4 10 10-4 10-10 10c-2 0-2-2-1-3 1-1 1-3-1-3-2 0-8 0-8-4z"/>
-    </svg>
-  );
-}
-
-function ResetIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="1 4 1 10 7 10"/>
-      <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
-    </svg>
-  );
-}
-
 function IconButton({ onClick, label, children }: { onClick: () => void; label: string; children: React.ReactNode }) {
   return (
     <button
       onClick={onClick}
       title={label}
       aria-label={label}
-      className="flex items-center text-slate-400 hover:text-slate-100 transition px-2.5 py-2 rounded-control hover:bg-space-700/60 border border-transparent hover:border-space-500/40"
+      className="flex items-center text-neutral-400 hover:text-neutral-100 transition px-2.5 py-2 rounded-control hover:bg-space-700/60 border border-transparent hover:border-space-500/40"
     >
       {children}
     </button>
@@ -917,7 +844,7 @@ function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?:
   return (
     <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4 shadow-panel">
       <div className="flex items-baseline justify-between mb-3">
-        <h2 className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.22em]">Your stats</h2>
+        <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em]">Your stats</h2>
         {displayName && (
           <span className="text-[10px] font-mono text-info-400 truncate ml-2" title={displayName}>
             {displayName}
@@ -943,10 +870,10 @@ function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?:
 }
 
 function StatTile({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'win' | 'loss' | 'neutral' }) {
-  const color = tone === 'win' ? 'text-bet-400' : tone === 'loss' ? 'text-loss-400' : 'text-slate-100';
+  const color = tone === 'win' ? 'text-bet-400' : tone === 'loss' ? 'text-loss-400' : 'text-neutral-100';
   return (
     <div className="bg-space-800/50 border border-space-500/30 rounded-control px-2.5 py-1.5 leading-tight">
-      <div className="text-[9px] uppercase tracking-[0.18em] text-slate-500">{label}</div>
+      <div className="text-[9px] uppercase tracking-[0.18em] text-neutral-500">{label}</div>
       <div className={`font-mono font-semibold tabular-nums ${color}`}>{value}</div>
     </div>
   );

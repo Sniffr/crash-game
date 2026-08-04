@@ -68,7 +68,7 @@ export default function ProvablyFairDrawer({
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-control bg-space-700/60 border border-space-500/40 text-slate-300 hover:bg-space-600 hover:text-white transition flex items-center justify-center"
+            className="w-8 h-8 rounded-control bg-space-700/60 border border-space-500/40 text-neutral-300 hover:bg-space-600 hover:text-white transition flex items-center justify-center"
             aria-label="Close"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
@@ -81,7 +81,7 @@ export default function ProvablyFairDrawer({
         <div className="p-5 space-y-5">
           {/* How it works */}
           <Section title="How it works">
-            <ol className="space-y-2.5 text-sm text-slate-400 leading-relaxed list-decimal pl-4 marker:text-brand-500">
+            <ol className="space-y-2.5 text-sm text-neutral-400 leading-relaxed list-decimal pl-4 marker:text-brand-500">
               <li>Before each round, the server publishes a SHA-256 commitment of its secret seed.</li>
               <li>The crash multiplier is derived deterministically from <code className="font-mono text-brand-400">HMAC-SHA256(seed, roundNumber)</code>.</li>
               <li>After the round, the seed is revealed — anyone can recompute the same crash point.</li>
@@ -168,7 +168,7 @@ export default function ProvablyFairDrawer({
                     <>Verification failed — {verifyResult.reason}</>
                   )}
                   {!verifyResult.ok && verifyResult.computedCrash != null && (
-                    <div className="mt-1 text-slate-500">computed crash: {verifyResult.computedCrash}</div>
+                    <div className="mt-1 text-neutral-500">computed crash: {verifyResult.computedCrash}</div>
                   )}
                 </div>
               )}
@@ -177,12 +177,12 @@ export default function ProvablyFairDrawer({
 
           {/* Formula */}
           <Section title="Formula">
-            <pre className="text-[11px] font-mono text-slate-400 leading-relaxed whitespace-pre-wrap">
+            <pre className="text-[11px] font-mono text-neutral-400 leading-relaxed whitespace-pre-wrap">
 {`u    = HMAC-SHA256(seed, round) → first 13 hex → [0,1)
 raw  = (100 × RTP) / (1 − u)
 crash = max(1.00, floor(raw) / 100)`}
             </pre>
-            <p className="text-[11px] text-slate-500 mt-2">
+            <p className="text-[11px] text-neutral-500 mt-2">
               This gives <code className="font-mono text-brand-400">P(crash ≥ m) = RTP / m</code> for every m &gt; 1.
             </p>
           </Section>
@@ -206,7 +206,7 @@ function Section({
     : 'border-space-500/40';
   return (
     <section className={`bg-space-800/40 rounded-panel p-4 border ${border}`}>
-      <h3 className="text-[10px] font-semibold text-slate-400 uppercase tracking-[0.22em] mb-3">{title}</h3>
+      <h3 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em] mb-3">{title}</h3>
       {children}
     </section>
   );
@@ -215,7 +215,7 @@ function Section({
 function KV({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex justify-between items-baseline text-xs font-mono mb-1.5">
-      <span className="text-slate-500">{label}</span>
+      <span className="text-neutral-500">{label}</span>
       <span className="truncate ml-3 tabular-nums">{children}</span>
     </div>
   );
@@ -224,7 +224,7 @@ function KV({ label, children }: { label: string; children: React.ReactNode }) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-500 mb-1">{label}</label>
+      <label className="block text-[10px] uppercase tracking-[0.18em] text-neutral-500 mb-1">{label}</label>
       {children}
     </div>
   );

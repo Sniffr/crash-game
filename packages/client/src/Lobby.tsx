@@ -18,12 +18,12 @@ interface GameAccents {
 /** Fallback banner gradients when a game's own theme can't be fetched — vivid,
  *  game-y variety (indexed by card position). */
 const FALLBACK_GRADIENTS: GameAccents[] = [
-  { from: '#fb6514', to: '#f5a623' }, // orange → amber
-  { from: '#22a04a', to: '#0c70db' }, // green → blue
-  { from: '#e5484d', to: '#fb6514' }, // red → orange
-  { from: '#0c70db', to: '#22c3d6' }, // blue → teal
-  { from: '#7c3aed', to: '#e5484d' }, // purple → red
-  { from: '#f5a623', to: '#e5484d' }, // amber → red
+  { from: 'hsl(21 97% 53%)', to: 'hsl(37 91% 55%)' },  // orange → amber
+  { from: 'hsl(139 65% 38%)', to: 'hsl(211 90% 45%)' }, // green → blue
+  { from: 'hsl(358 75% 59%)', to: 'hsl(21 97% 53%)' },  // red → orange
+  { from: 'hsl(211 90% 45%)', to: 'hsl(187 71% 49%)' }, // blue → teal
+  { from: 'hsl(263 82% 58%)', to: 'hsl(358 75% 59%)' }, // purple → red
+  { from: 'hsl(37 91% 55%)', to: 'hsl(358 75% 59%)' },  // amber → red
 ];
 
 function readToken(): string | null {
@@ -155,7 +155,7 @@ export default function Lobby() {
   const featured = games?.[0];
 
   return (
-    <div className="min-h-screen text-slate-100 relative">
+    <div className="min-h-screen text-neutral-100 relative">
       {/* ─── Header ──────────────────────────────────────────────────────────── */}
       <header className="sticky top-0 z-20 flex items-center justify-between px-4 sm:px-6 h-16 border-b border-white/5 bg-space-700/80 backdrop-blur-xl">
         <div className="flex items-center gap-3 min-w-0">
@@ -165,7 +165,7 @@ export default function Lobby() {
               <span className="text-brand-500">Nova</span>
               <span className="ml-1 text-white">Casino</span>
             </h1>
-            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 mt-1">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-500 mt-1">
               Provably-fair crash games
             </span>
           </div>
@@ -176,7 +176,7 @@ export default function Lobby() {
             <>
               <div className="flex items-center gap-3 bg-space-900/70 border border-white/5 rounded-control pl-3 pr-1.5 py-1.5">
                 <div className="leading-tight">
-                  <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+                  <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-neutral-500">
                     {username ?? 'Player'}
                   </div>
                   <div className="text-base sm:text-lg font-mono font-bold text-bet-400 tabular-nums">
@@ -193,7 +193,7 @@ export default function Lobby() {
               </div>
               <button
                 onClick={logout}
-                className="text-xs font-bold text-slate-300 hover:text-white transition px-3.5 py-2.5 rounded-control bg-space-900/70 border border-white/5"
+                className="text-xs font-bold text-neutral-300 hover:text-white transition px-3.5 py-2.5 rounded-control bg-space-900/70 border border-white/5"
               >
                 Log out
               </button>
@@ -241,7 +241,7 @@ export default function Lobby() {
         )}
       </main>
 
-      <footer className="text-center py-5 text-[11px] text-slate-500 border-t border-white/5 bg-space-950/60 mt-10">
+      <footer className="text-center py-5 text-[11px] text-neutral-500 border-t border-white/5 bg-space-950/60 mt-10">
         Nova Casino · simulation only · no real wagers, no real money.
       </footer>
 
@@ -264,7 +264,7 @@ function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
           <h2 className="font-display font-black text-3xl sm:text-4xl leading-[1.05] tracking-tight">
             Cash out before it crashes.
           </h2>
-          <p className="text-sm text-slate-300/90 mt-2">
+          <p className="text-sm text-neutral-300/90 mt-2">
             Watch the multiplier climb and grab it in time. Every round is provably fair — verify the seed yourself.
           </p>
           <div className="flex items-center gap-3 mt-5">
@@ -274,7 +274,7 @@ function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
             >
               Play {game.name} — free
             </button>
-            <span className="text-xs text-slate-400 font-semibold">No signup for demo</span>
+            <span className="text-xs text-neutral-400 font-semibold">No signup for demo</span>
           </div>
         </div>
       </div>
@@ -323,7 +323,7 @@ function GameCard({
         <div className="mt-auto grid grid-cols-2 gap-2">
           <button
             onClick={onDemo}
-            className="rounded-control px-3 py-2.5 text-xs font-bold uppercase tracking-wide bg-space-900/80 border border-white/5 text-slate-200 hover:bg-space-600/60 hover:text-white transition"
+            className="rounded-control px-3 py-2.5 text-xs font-bold uppercase tracking-wide bg-space-900/80 border border-white/5 text-neutral-200 hover:bg-space-600/60 hover:text-white transition"
           >
             Demo
           </button>
@@ -344,8 +344,8 @@ function EmptyState() {
   return (
     <div className="rounded-panel border border-dashed border-white/10 bg-space-800/50 px-6 py-16 text-center">
       <RocketGlyph className="w-10 h-10 mx-auto mb-3 text-brand-400" />
-      <h3 className="font-display font-extrabold text-lg text-slate-200">No games yet</h3>
-      <p className="text-sm text-slate-500 mt-1">Publish one from the Creator to see it here.</p>
+      <h3 className="font-display font-extrabold text-lg text-neutral-200">No games yet</h3>
+      <p className="text-sm text-neutral-500 mt-1">Publish one from the Creator to see it here.</p>
     </div>
   );
 }
