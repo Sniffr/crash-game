@@ -1,29 +1,26 @@
-import { config } from 'dotenv';
-config({ path: '../../.env' });
-
 import { randomUUID } from 'node:crypto';
-import { describe, it, expect, afterAll } from 'vitest';
-import { getPool, bootstrapCasinoSchema } from './pg.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { makeTestDb, type TestDb } from './pg-test-support.js';
+import { bootstrapCasinoSchema } from './pg.js';
 import { PlayersRepo, DuplicateUsernameError } from './players-repo.js';
 
-const pool = getPool();
-const repo = new PlayersRepo(pool);
+// Isolated throwaway Postgres schema per file — never touches the real casino DB.
+let db: TestDb;
+let repo: PlayersRepo;
 
-// Track our own rows for cleanup — NEVER truncate (shared DB).
-const createdPlayerIds: string[] = [];
-
-afterAll(async () => {
-  for (const id of createdPlayerIds) {
-    await pool.query('DELETE FROM wallet_ledger WHERE player_id = $1', [id]);
-    await pool.query('DELETE FROM players WHERE player_id = $1', [id]);
-  }
-  await pool.end();
+beforeAll(async () => {
+  db = await makeTestDb();
+  repo = new PlayersRepo(db.pool);
 });
+afterAll(async () => { await db.cleanup(); }); // drops the whole schema — no per-row cleanup needed
+
+// Retained so the existing `.push(...)` calls are harmless; the schema drop above cleans up.
+const createdPlayerIds: string[] = [];
 
 describe('PlayersRepo', () => {
   it('bootstraps schema idempotently', async () => {
-    await bootstrapCasinoSchema(pool);
-    await bootstrapCasinoSchema(pool);
+    await bootstrapCasinoSchema(db.pool);
+    await bootstrapCasinoSchema(db.pool);
   });
 
   it('creates a player and reads it back by username and id', async () => {

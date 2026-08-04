@@ -1,6 +1,3 @@
-import { config } from 'dotenv';
-config({ path: '../../.env' });
-
 // Player JWTs are signed/verified with this secret (read at request time).
 // Save the prior value and restore it in afterAll so we don't poison other
 // test files that share this worker's process.env (they run sequentially).
@@ -8,37 +5,32 @@ const _prevJwtSecret = process.env['JWT_SECRET'];
 process.env['JWT_SECRET'] = 'test-secret';
 
 import { randomUUID } from 'node:crypto';
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 import express from 'express';
-import { getPool } from '@crash/wallet/pg';
+import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import { PlayersRepo } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { createLobbyRouter } from './lobby.js';
 
-const pool = getPool();
-const players = new PlayersRepo(pool);
-const wallet = new WalletLedger(pool);
+// Isolated throwaway Postgres schema per file — never touches the real casino DB.
+let db: TestDb;
+let app: express.Application;
 
-const app = express();
-app.use(express.json());
-app.use('/api/lobby', createLobbyRouter({ players, wallet }));
+beforeAll(async () => {
+  db = await makeTestDb();
+  const players = new PlayersRepo(db.pool);
+  const wallet = new WalletLedger(db.pool);
+  app = express();
+  app.use(express.json());
+  app.use('/api/lobby', createLobbyRouter({ players, wallet }));
+});
 
+// Retained so existing `.push(...)` calls stay harmless; the schema drop cleans up.
 const createdUsernames: string[] = [];
 
 afterAll(async () => {
-  for (const username of createdUsernames) {
-    const { rows } = await pool.query<{ player_id: string }>(
-      'SELECT player_id FROM players WHERE username = $1',
-      [username],
-    );
-    const id = rows[0]?.player_id;
-    if (id) {
-      await pool.query('DELETE FROM wallet_ledger WHERE player_id = $1', [id]);
-      await pool.query('DELETE FROM players WHERE player_id = $1', [id]);
-    }
-  }
-  await pool.end();
+  await db.cleanup();
   if (_prevJwtSecret === undefined) delete process.env['JWT_SECRET'];
   else process.env['JWT_SECRET'] = _prevJwtSecret;
 });
