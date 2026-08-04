@@ -1,28 +1,29 @@
-# ─── Galaxy Crash production image ─────────────────────────────────────────
+# ─── Crash Game production image ───────────────────────────────────────────
 #
-#   docker build -t galaxy-crash .
+#   docker build -t crash-game .
 #
-#   docker run -d --name galaxy-crash \
+#   docker run -d --name crash-game --restart unless-stopped \
 #     -p 3001:3001 \
-#     -v $(pwd)/config:/app/config:ro \
-#     -v galaxy-crash-data:/app/data \
-#     galaxy-crash
+#     -v crash-data:/app/data \
+#     --env-file .env \
+#     crash-game
+#
+# All durable data lives in Postgres (the `casino` DB) + Contabo S3. The only
+# on-disk state is RocksDB (hot session cache).
 #
 # Volumes:
-#   /app/data      RocksDB session store (persistent — mount a named volume)
-#   /app/config    Drop active-theme.json here to set the operator theme
+#   /app/data      RocksDB session cache (persistent — mount a named volume)
 #
-# Env:
-#   PORT           default 3001
-#   ROCKSDB_PATH   default /app/data/rocksdb
-#   B2B-era (Task 8.3): JWT_SECRET (required for admin API; fail-closed 503 if unset),
-#                        LOG_LEVEL (pino, default info), ADMIN_BOOTSTRAP_USER
-#                        ("username:password:role1,role2" — seeds first admin, idempotent),
-#                        DB_PATH (SQLite path; default /app/data/galaxy-crash.db when /app
-#                        is cwd-relative, see README).
+# Required env (pass via --env-file .env or -e; NEVER bake into the image):
+#   DATABASE_URL   postgresql://casino:<pw>@<host>:5432/casino
+#   S3_ENDPOINT, S3_REGION, S3_BUCKET, S3_ACCESS_KEY, S3_SECRET_KEY, S3_PUBLIC_BASE
+#   JWT_SECRET     required — admin/player auth fails closed without it
+#   ADMIN_BOOTSTRAP_USER  "username:password:role1,role2" — seeds the first admin (idempotent)
+# Optional env:
+#   PORT (default 3001) · HOST (0.0.0.0) · ROCKSDB_PATH (/app/data/rocksdb) · LOG_LEVEL (info)
 #
 # The image ships the game (client + server) only. The Creator stays a
-# dev-time tool — players can't reach it and can't override the theme.
+# dev-time tool — it is deleted from the image below.
 
 # ─── Build stage ───────────────────────────────────────────────────────────
 # Base image pinned by digest (Task 8.3) — captured 2026-05-27 from

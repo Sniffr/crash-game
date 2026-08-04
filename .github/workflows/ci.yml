@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: crashtest
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Repos (wallet/server) run their suites against this throwaway Postgres.
+      TEST_DATABASE_URL: postgresql://postgres:test@localhost:5432/crashtest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Native deps: rocksdb (session cache) compiles against libsnappy.
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsnappy-dev
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: |
+          for p in shared wallet adapters server client creator; do
+            echo "── tsc $p ──"; (cd packages/$p && npx tsc --noEmit)
+          done
+
+      - name: Test
+        run: |
+          for p in shared wallet adapters server client; do
+            echo "── test $p ──"; (cd packages/$p && npx vitest run)
+          done
+
+      - name: Build client
+        run: npm run --workspace=packages/client build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Validates the production Dockerfile builds end to end (no push).
+      - name: Build image
+        run: docker build -t crash-game:ci .
