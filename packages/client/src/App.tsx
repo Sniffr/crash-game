@@ -180,6 +180,9 @@ export default function App() {
   const [, setConnected] = useState(false);
   const [soundOn, setSoundOn] = useState(!isMuted());
   const [theme, setTheme] = useState<Theme>(() => loadTheme());
+  // For a launched catalogue game, hold rendering until THIS game's theme loads,
+  // so we never flash the default galaxy theme/gifs before the real one arrives.
+  const [themeReady, setThemeReady] = useState(() => !new URLSearchParams(location.search).has('game'));
   const wsRef = useRef<WebSocket | null>(null);
   const serverOffsetRef = useRef(0);
 
@@ -209,9 +212,11 @@ export default function App() {
   // standalone single-game flow honours a manual localStorage override.
   useEffect(() => {
     if (!isLaunchedGame && hasUserOverride()) return; // manual override wins in the standalone flow only
-    fetchServerTheme().then((t) => {
-      if (t) setTheme(t);
-    });
+    const fallback = setTimeout(() => setThemeReady(true), 4000); // never stick on the loader
+    fetchServerTheme()
+      .then((t) => { if (t) setTheme(t); })
+      .finally(() => { clearTimeout(fallback); setThemeReady(true); });
+    return () => clearTimeout(fallback);
   }, [isLaunchedGame]);
 
   // On boot, seed the history strip with THIS game's series (multi-game).
@@ -614,6 +619,18 @@ export default function App() {
     if (m < 50) return '#f5a623';  // gold
     return '#fafafa';              // white-hot
   }, []);
+
+  // Launched game: show a neutral loader until its theme is ready (no default flash).
+  if (isLaunchedGame && !themeReady) {
+    return (
+      <div className="min-h-screen grid place-items-center">
+        <div className="flex flex-col items-center gap-3 text-neutral-500">
+          <div className="w-8 h-8 rounded-full border-2 border-white/10 border-t-brand-500 animate-spin" />
+          <span className="text-sm font-bold">Loading…</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen text-neutral-100 relative">
