@@ -24,11 +24,23 @@ import { getOperatorWiringDeps } from './operator-deps';
 import { getLobbyWiringDeps } from './lobby-deps';
 import { observeWalletCall } from '../observability/metrics.js';
 
-/** Reference to the current round — set by game/round.ts at runtime. */
-let currentRoundRef: { roundNumber: number; crashPoint: number } | null = null;
+import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 
-export function setCurrentRoundRef(round: { roundNumber: number; crashPoint: number } | null) {
-  currentRoundRef = round;
+/** Per-game current-round refs — set by each game engine at runtime. Cashout only
+ *  needs the round number for a bet's game; the bet carries its gameId. */
+type RoundRef = { roundNumber: number; crashPoint: number };
+const roundRefs = new Map<string, RoundRef>();
+
+export function setRoundRefForGame(gameId: string, round: RoundRef | null) {
+  if (round) roundRefs.set(gameId, round);
+  else roundRefs.delete(gameId);
+}
+function roundRefForGame(gameId: string | undefined): RoundRef | null {
+  return roundRefs.get(gameId ?? DEFAULT_GAME_ID) ?? roundRefs.get(DEFAULT_GAME_ID) ?? null;
+}
+/** Back-compat shim (tests + _internal__setCurrentRoundForTesting): default game. */
+export function setCurrentRoundRef(round: RoundRef | null) {
+  setRoundRefForGame(DEFAULT_GAME_ID, round);
 }
 
 export async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual' | 'auto') {
@@ -37,14 +49,15 @@ export async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual
   bet.cashoutMultiplier = atMultiplier;
   bet.profit = Math.round(bet.amount * atMultiplier * 100) / 100;
 
-  if (!bet.isBot && currentRoundRef) {
+  const roundRef = roundRefForGame(bet.gameId);
+  if (!bet.isBot && roundRef) {
     const sessionId = bet.playerId;
     try {
       const newBal = await adjustBalance(sessionId, bet.profit);
       const stats = await recordWin(sessionId, bet.amount, bet.profit, atMultiplier);
       await appendHistory(sessionId, {
         kind: 'cashout',
-        roundNumber: currentRoundRef.roundNumber,
+        roundNumber: roundRef.roundNumber,
         amount: bet.amount,
         multiplier: atMultiplier,
         payout: bet.profit,
@@ -67,6 +80,7 @@ export async function cashOutBet(bet: Bet, atMultiplier: number, source: 'manual
   broadcast({
     type: 'cashout',
     data: {
+      gameId: bet.gameId ?? DEFAULT_GAME_ID,
       playerId: bet.playerId,
       multiplier: atMultiplier,
       profit: bet.profit,
@@ -91,7 +105,7 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
   bet.profit = winAmountMinor;
 
   const deps = getLobbyWiringDeps();
-  const ref = `rnd-${currentRoundRef?.roundNumber ?? 'x'}-s${bet.slot ?? 0}`;
+  const ref = `rnd-${roundRefForGame(bet.gameId)?.roundNumber ?? 'x'}-s${bet.slot ?? 0}`;
   if (deps) {
     try {
       const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? 'USD');
@@ -108,7 +122,7 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
   }
   broadcast({
     type: 'cashout',
-    data: { playerId: bet.playerId, multiplier: atMultiplier, profit: winAmountMinor, isBot: false, displayName: bet.displayName, source },
+    data: { gameId: bet.gameId ?? DEFAULT_GAME_ID, playerId: bet.playerId, multiplier: atMultiplier, profit: winAmountMinor, isBot: false, displayName: bet.displayName, source },
   });
 }
 
@@ -197,6 +211,7 @@ export async function tryCashoutBet(
       broadcast({
         type: 'cashout',
         data: {
+          gameId: bet.gameId ?? DEFAULT_GAME_ID,
           playerId: bet.playerId,
           multiplier: atMultiplier,
           profit: winAmountMinor,
@@ -235,6 +250,7 @@ export async function tryCashoutBet(
       broadcast({
         type: 'cashout',
         data: {
+          gameId: bet.gameId ?? DEFAULT_GAME_ID,
           playerId: bet.playerId,
           multiplier,
           profit: winAmountMinor,
@@ -286,6 +302,7 @@ export async function tryCashoutBet(
       broadcast({
         type: 'cashout',
         data: {
+          gameId: bet.gameId ?? DEFAULT_GAME_ID,
           playerId: bet.playerId,
           multiplier,
           profit: winAmountMinor,

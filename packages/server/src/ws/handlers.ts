@@ -16,7 +16,7 @@ import {
 import type { Session } from '@crash/shared/types';
 import { safeSend, broadcast } from './hub';
 import { DEFAULT_GAME_ID } from '@crash/shared/rng';
-import { currentRound } from '../game/round';
+import { getRoundForGame, findBetForSession } from '../game/round';
 import { cashOutBet, tryCashoutBet, placeOperatorBet } from '../game/bets';
 import { getOperatorWiringDeps } from '../game/operator-deps';
 import { getLobbyWiringDeps } from '../game/lobby-deps';
@@ -65,10 +65,6 @@ export async function handleMessage(
     }
 
     case 'place_bet': {
-      if (!currentRound || currentRound.phase !== 'BETTING') {
-        safeSend(ws, { type: 'error', data: { message: 'Betting is closed for this round' } });
-        return;
-      }
       if (!sessionId) { safeSend(ws, { type: 'error', data: { message: 'No session' } }); return; }
 
       try {
@@ -80,6 +76,14 @@ export async function handleMessage(
         const session = await getSession(sessionId);
         if (!session) {
           safeSend(ws, { type: 'session_invalid', data: { sessionId, reason: 'expired or missing' } });
+          return;
+        }
+
+        // This session's own game engine — its round is independent of every
+        // other game's phase.
+        const currentRound = getRoundForGame(session.gameId ?? DEFAULT_GAME_ID);
+        if (!currentRound || currentRound.phase !== 'BETTING') {
+          safeSend(ws, { type: 'error', data: { message: 'Betting is closed for this round' } });
           return;
         }
 
@@ -147,6 +151,7 @@ export async function handleMessage(
         broadcast({
           type: 'new_bet',
           data: {
+            gameId: bet.gameId,
             playerId: sessionId,
             amount,
             autoCashout,
@@ -167,16 +172,15 @@ export async function handleMessage(
     }
 
     case 'cashout': {
-      if (!currentRound || currentRound.phase !== 'FLYING') return;
       if (!sessionId) return;
       const slot = data.slot === 1 ? 1 : 0;
-      const bet = currentRound.bets.find((b) => b.playerId === sessionId && (b.slot ?? 0) === slot);
-      if (!bet || bet.cashedOut) return;
-      // Multi-game: refuse if this bet's game already crashed, even though the
-      // round is still FLYING for other games.
-      if (currentRound.gameCrashedAt?.[bet.gameId ?? DEFAULT_GAME_ID] != null) return;
-      const at = currentRound.currentMultiplier;
-      await tryCashoutBet(bet, at, 'manual');
+      // Find the bet across engines (a session may play any game). Its own game's
+      // round must still be FLYING — sibling games' phases are irrelevant.
+      const hit = findBetForSession(sessionId, slot);
+      if (!hit) return;
+      const { round, bet } = hit;
+      if (round.phase !== 'FLYING' || bet.cashedOut) return;
+      await tryCashoutBet(bet, round.currentMultiplier, 'manual');
       return;
     }
 
@@ -209,6 +213,7 @@ export async function handlePlaceOperatorBet(
   data: Record<string, unknown>,
   attachSession: (sessionId: string) => void,
 ): Promise<void> {
+  const currentRound = getRoundForGame(session.gameId ?? DEFAULT_GAME_ID);
   if (!currentRound || currentRound.phase !== 'BETTING') {
     safeSend(ws, { type: 'error', data: { message: 'Betting is closed for this round' } });
     return;
@@ -296,6 +301,7 @@ export async function handlePlaceOperatorBet(
     broadcast({
       type: 'new_bet',
       data: {
+        gameId,
         playerId: sessionId,
         amount: amountMinor,
         amountMinor,
@@ -339,6 +345,7 @@ export async function handlePlaceLobbyBet(
   data: Record<string, unknown>,
   attachSession: (sessionId: string) => void,
 ): Promise<void> {
+  const currentRound = getRoundForGame(session.gameId ?? DEFAULT_GAME_ID);
   if (!currentRound || currentRound.phase !== 'BETTING') {
     safeSend(ws, { type: 'error', data: { message: 'Betting is closed for this round' } });
     return;
@@ -385,7 +392,7 @@ export async function handlePlaceLobbyBet(
     broadcast({
       type: 'new_bet',
       data: {
-        playerId: sessionId, amount: amountMinor, amountMinor, currency: session.currency,
+        gameId: bet.gameId, playerId: sessionId, amount: amountMinor, amountMinor, currency: session.currency,
         autoCashout, isBot: false, displayName: session.displayName,
         roundNumber: currentRound.roundNumber, isOperator: true,
       },

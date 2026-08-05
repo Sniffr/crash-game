@@ -33,8 +33,9 @@ import { setOperatorWiringDeps } from './game/operator-deps';
 import { clients, sessionSockets, safeSend } from './ws/hub';
 import { handleMessage } from './ws/handlers';
 import * as Round from './game/round';
-const { CONFIG, startBettingPhase } = Round;
+const { CONFIG, startAllEngines, getRoundForGame, getEngine } = Round;
 import { getRecentHistory } from './game/history';
+import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 
 // ---------------------------------------------------------------------------
 // Database + crash-recovery
@@ -113,7 +114,10 @@ try {
   // DB insert — appear in the round loop within seconds, without a pod restart.
   // The snapshot is per-process, so boot + local-mutation refreshes alone miss them.
   setInterval(() => {
-    void games.refreshSnapshot().catch((err) => console.error('[games] snapshot refresh failed:', err));
+    void games
+      .refreshSnapshot()
+      .then(() => startAllEngines()) // spin up engines for any newly-appeared games
+      .catch((err) => console.error('[games] snapshot refresh failed:', err));
   }, GAMES_SNAPSHOT_REFRESH_MS);
 } catch (err) {
   console.error('[games] Postgres bootstrap failed:', err);
@@ -164,9 +168,16 @@ app.use('/api/assets', createAssetsRouter());
 registerPublicRoutes(app, { walletClientCache, games });
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   clients.add(ws);
   let claimedSession: string | null = null;
+  // Which game this socket is playing (from the /ws?game=<id> query), so the
+  // join snapshot below reflects THIS game's live round, not the default game's.
+  let joinGameId = DEFAULT_GAME_ID;
+  try {
+    const q = new URL(req.url ?? '/', 'http://localhost').searchParams.get('game');
+    if (q) joinGameId = q;
+  } catch { /* keep default */ }
 
   function attachSession(sessionId: string) {
     if (claimedSession === sessionId) return;
@@ -180,23 +191,26 @@ wss.on('connection', (ws) => {
     sessionSockets.get(sessionId)!.add(ws);
   }
 
-  if (Round.currentRound) {
+  const joinRound = getRoundForGame(joinGameId);
+  if (joinRound) {
+    const joinEngine = getEngine(joinGameId);
     const joinData: Record<string, unknown> = {
-      roundNumber: Round.currentRound.roundNumber,
-      phase: Round.currentRound.phase,
-      currentMultiplier: Round.currentRound.currentMultiplier,
-      startTime: Round.currentRound.startTime,
+      gameId: joinGameId,
+      roundNumber: joinRound.roundNumber,
+      phase: joinRound.phase,
+      currentMultiplier: joinRound.currentMultiplier,
+      startTime: joinRound.startTime,
       serverTime: Date.now(),
-      hashCommit: Round.currentRound.serverSeedHash,
-      bets: Round.currentRound.bets,
-      history: getRecentHistory(30),
-      prevServerSeed: Round.prevServerSeed,
-      prevRoundNumber: Round.prevRoundNumber,
+      hashCommit: joinRound.serverSeedHash,
+      bets: joinRound.bets,
+      history: getRecentHistory(30, joinGameId),
+      prevServerSeed: joinEngine?.prevSeed ?? null,
+      prevRoundNumber: joinEngine?.prevRound ?? null,
     };
-    if (Round.currentRound.phase === 'BETTING') {
-      const elapsed = Date.now() - Round.currentRound.startTime;
+    if (joinRound.phase === 'BETTING') {
+      const elapsed = Date.now() - joinRound.startTime;
       joinData.countdownMs = Math.max(0, CONFIG.bettingPhaseMs - elapsed);
-      joinData.countdownStart = Round.currentRound.startTime;
+      joinData.countdownStart = joinRound.startTime;
     }
     safeSend(ws, { type: 'join', data: joinData });
   }
@@ -273,7 +287,7 @@ try {
 server.listen(PORT, HOST, () => {
   console.log(`[server] listening on ${HOST}:${PORT}`);
   console.log(`[server] RTP=${CONFIG.rtp}  maxMultiplier=${CONFIG.maxMultiplier}  growth=${Round.GROWTH_RATE}`);
-  startBettingPhase();
+  startAllEngines();
 });
 
 export { app, server, wss };
