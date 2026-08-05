@@ -313,7 +313,7 @@ export default function App() {
 
     const connect = () => {
       const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
+      const ws = new WebSocket(`${wsProto}://${location.host}/ws?game=${encodeURIComponent(readGameIdFromUrl())}`);
       wsRef.current = ws;
 
       ws.onopen = () => {
@@ -344,19 +344,25 @@ export default function App() {
   }, [session?.sessionId]);
 
   const handleMessage = useCallback((message: { type: string; data: any }) => {
+    // Per-game engines broadcast every game's frames to every socket. Ignore any
+    // game-scoped frame that isn't ours — our tab only ever plays readGameIdFromUrl().
+    const GAME_SCOPED = new Set(['join', 'phase_change', 'countdown_update', 'multiplier_update', 'new_bet', 'crash', 'cashout']);
+    if (GAME_SCOPED.has(message.type) && (message.data?.gameId ?? DEFAULT_GAME_ID) !== readGameIdFromUrl()) {
+      return;
+    }
+
     if (message.data?.serverTime) {
       serverOffsetRef.current = message.data.serverTime - Date.now();
     }
 
     switch (message.type) {
       case 'join': {
-        // The join snapshot (sent before we announce our game) carries the
-        // DEFAULT game's history. Keep our own strip for non-default games.
-        const isDefault = readGameIdFromUrl() === DEFAULT_GAME_ID;
+        // The join snapshot is our own game's live round (server routes it by the
+        // ?game= on the WS URL), so its history/state apply directly.
         setGameState((prev) => ({
           ...prev,
           ...message.data,
-          history: isDefault ? (message.data.history ?? prev.history) : prev.history,
+          history: message.data.history ?? prev.history,
           flightStartTime: message.data.phase === 'FLYING' ? message.data.startTime : null,
         }));
         setHasBet([false, false]);
@@ -371,9 +377,8 @@ export default function App() {
           roundNumber: message.data.roundNumber ?? prev.roundNumber,
           hashCommit: message.data.hashCommit ?? prev.hashCommit,
           countdownMs: message.data.countdownMs,
-          // Multi-game: ignore the default game's history for non-default tabs
-          // (our strip is built from our own crash frames + boot fetch).
-          history: readGameIdFromUrl() === DEFAULT_GAME_ID ? (message.data.history ?? prev.history) : prev.history,
+          // Our own game's history (RESULT-phase frames carry it; guard drops siblings).
+          history: message.data.history ?? prev.history,
           bets: message.data.bets ?? (message.data.phase === 'BETTING' ? [] : prev.bets),
           currentMultiplier: message.data.phase === 'FLYING' ? 1.0 : prev.currentMultiplier,
           crashPoint: message.data.phase === 'BETTING' ? undefined : (message.data.crashPoint ?? prev.crashPoint),
@@ -390,16 +395,11 @@ export default function App() {
         break;
 
       case 'multiplier_update':
-        // Multi-game: once THIS game has crashed the round is over for us, even
-        // though the shared multiplier keeps climbing for still-flying games.
+        // Ignore a stray tick that races in after our own crash frame.
         setGameState((prev) => (prev.phase === 'CRASHED' ? prev : { ...prev, currentMultiplier: message.data.multiplier }));
         break;
 
       case 'crash': {
-        // Multi-game: crash frames are tagged with gameId and broadcast to all
-        // tabs. Only react to our own game's crash; ignore siblings.
-        const crashGameId = message.data.gameId ?? DEFAULT_GAME_ID;
-        if (crashGameId !== readGameIdFromUrl()) break;
         crashBoom();
         setGameState((prev) => {
           // Append this round to our game's history strip (dedup by roundNumber).

@@ -36,7 +36,7 @@ import { Router } from 'express';
 import type { Request } from 'express';
 import { getSession, deleteSession } from '../store.js';
 import { sessionSockets, sendToSession } from '../ws/hub.js';
-import { currentRound } from '../game/round.js';
+import { getBetsForSession } from '../game/round.js';
 import { voidOperatorBet } from '../game/bets.js';
 import type { OperatorAuthedRequest } from './middleware/verify-operator-signature.js';
 import { enforceTenantScope } from './middleware/tenant-scope.js';
@@ -135,8 +135,8 @@ export function createOperatorRouter(deps: OperatorRouterDeps): Router {
     // loop or crash handler. The b.operatorId === operatorId guard makes tenant
     // safety LOCAL (defense-in-depth) rather than relying solely on the caller
     // having proven session ownership.
-    const liveBets = (currentRound?.bets ?? []).filter(
-      (b) => b.playerId === sessionId && b.operatorId === operatorId && !b.cashedOut,
+    const liveBets = getBetsForSession(sessionId).filter(
+      (b) => b.operatorId === operatorId && !b.cashedOut,
     );
 
     for (const bet of liveBets) {
