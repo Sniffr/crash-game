@@ -8,9 +8,19 @@ Status: approved (brainstorm) — pending spec review
 Let each player hold a balance in **their own currency**, chosen at signup, shown
 consistently through play and disbursement. Fund and withdraw that balance via
 **Maplerad** (pay-in = collections, payout = disbursements) across all supported
-rails. Ship **KES end-to-end first**; the currency picker offers Maplerad's
-supported currencies and other rails activate as their config is populated.
+rails. **Both pay-in and payout are always in the player's account currency** —
+deposit KES → balance KES → withdraw KES; there is no cross-currency conversion.
 Redesign onboarding to be friendly.
+
+**Rail rollout priority (each fully working — pay-in + payout — before the next):**
+1. **KES** (Kenya) — first, end-to-end.
+2. **ZMW** (Zambia).
+3. **ZAR** (South African Rand).
+4. **NGN** (Nigeria).
+
+The signup currency picker offers Maplerad's supported currencies; a currency
+whose rail isn't populated yet is selectable for display but its deposit/withdraw
+shows "coming soon" until its rail config is filled.
 
 Reference integration: `commsBackend` (Java) — `MapleradClient` (momo collect,
 Svix webhook verify), `MapleradProperties`, `MapleradWebhookController`. Same
@@ -19,7 +29,10 @@ Maplerad account/credentials (`mpr_sk_…`, `whsec_…`).
 ## Phasing
 
 - **Phase 1** — currency model + onboarding + **pay-in + webhook** (KES working).
-- **Phase 2** (right after pay-in verified) — **payout / disbursement**.
+- **Phase 2** (right after pay-in verified) — **KES payout / disbursement**.
+- **Phase 3+** — add ZMW → ZAR → NGN. Each is mostly a **rail-config addition**
+  (country, pay-in/pay-out institution codes from live `/institutions`) plus its
+  money.ts symbol; the pay-in/webhook/payout code paths are currency-generic.
 
 Payout is included in this design but built in Phase 2.
 
@@ -38,8 +51,8 @@ Payout is included in this design but built in Phase 2.
 - **lobby-play.ts:** use the player's currency (from the players row) instead of
   the global `DEFAULT_CURRENCY`. Demo path keeps `DEFAULT_CURRENCY`.
 - **Display:** `money.ts` already renders per-currency (symbol + decimals). Add
-  symbols/decimals for the launch currency set (KES, NGN, GHS, USD, …). Unknown
-  currency → 2 decimals + code prefix.
+  symbols/decimals for the priority set — KES (KSh), ZMW (K), ZAR (R), NGN (₦) —
+  all 2-decimal. Unknown currency → 2 decimals + code prefix.
 
 ## 2. Rail registry (config-driven, all rails)
 
