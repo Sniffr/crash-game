@@ -18,6 +18,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import * as bcrypt from 'bcryptjs';
 import { PlayersRepo, DuplicateUsernameError } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
+import { railFor, SUPPORTED_CURRENCIES } from '@crash/wallet';
 
 // ---------------------------------------------------------------------------
 // Request augmentation — mirrors admin-auth.ts's `req.admin` pattern.
@@ -149,17 +150,46 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
   router.post('/register', async (req, res): Promise<void> => {
     if (!requireSecret(res)) return;
 
-    const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
-    const { username, password } = body;
+    const body = (req.body ?? {}) as {
+      username?: unknown;
+      password?: unknown;
+      currency?: unknown;
+      phone?: unknown;
+      email?: unknown;
+    };
+    const { username, password, currency, phone, email } = body;
 
     if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password) {
       res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'username and password (non-empty strings) required' } });
       return;
     }
 
+    if (typeof currency !== 'string' || !SUPPORTED_CURRENCIES.includes(currency)) {
+      res.status(400).json({ error: { code: 'UNSUPPORTED_CURRENCY', message: `currency must be one of ${SUPPORTED_CURRENCIES.join(', ')}` } });
+      return;
+    }
+
+    const rail = railFor(currency)!;
+    const phoneStr = typeof phone === 'string' ? phone.trim() : '';
+    const emailStr = typeof email === 'string' ? email.trim() : '';
+    if (rail.contact === 'phone' ? !phoneStr : !emailStr) {
+      res.status(400).json({
+        error: {
+          code: 'CONTACT_REQUIRED',
+          message: rail.contact === 'phone' ? 'phone is required for this currency' : 'email is required for this currency',
+        },
+      });
+      return;
+    }
+
     try {
       const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
-      const player = await deps.players.create(username.trim(), passwordHash);
+      const player = await deps.players.create(username.trim(), passwordHash, {
+        currency,
+        phone: phoneStr || null,
+        email: emailStr || null,
+        country: rail.country,
+      });
       const token = await signPlayerJwt(player.playerId);
       res.status(201).json({
         token,

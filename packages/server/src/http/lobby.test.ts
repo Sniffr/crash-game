@@ -42,7 +42,9 @@ describe('lobby router', () => {
     createdUsernames.push(username);
 
     // Register
-    const reg = await request(app).post('/api/lobby/register').send({ username, password });
+    const reg = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password, currency: 'KES', phone: '254700000000' });
     expect(reg.status).toBe(201);
     expect(reg.body.balanceMinor).toBe(0);
     expect(reg.body.player.username).toBe(username);
@@ -83,7 +85,9 @@ describe('lobby router', () => {
   it('rejects a bad login with 401 (no user enumeration)', async () => {
     const username = `t_${randomUUID()}`;
     createdUsernames.push(username);
-    await request(app).post('/api/lobby/register').send({ username, password: 'right-pass' });
+    await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'right-pass', currency: 'KES', phone: '254700000001' });
 
     const unknownUser = await request(app)
       .post('/api/lobby/login')
@@ -102,17 +106,23 @@ describe('lobby router', () => {
     const username = `t_${randomUUID()}`;
     createdUsernames.push(username);
 
-    const first = await request(app).post('/api/lobby/register').send({ username, password: 'pw' });
+    const first = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'pw', currency: 'KES', phone: '254700000002' });
     expect(first.status).toBe(201);
 
-    const dup = await request(app).post('/api/lobby/register').send({ username, password: 'pw2' });
+    const dup = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'pw2', currency: 'KES', phone: '254700000002' });
     expect(dup.status).toBe(409);
   });
 
   it('rejects deposit of a non-positive amount (400)', async () => {
     const username = `t_${randomUUID()}`;
     createdUsernames.push(username);
-    const reg = await request(app).post('/api/lobby/register').send({ username, password: 'pw' });
+    const reg = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'pw', currency: 'KES', phone: '254700000003' });
     const token = reg.body.token as string;
 
     const res = await request(app)
@@ -120,5 +130,34 @@ describe('lobby router', () => {
       .set('Authorization', `Bearer ${token}`)
       .send({ amountMinor: -1 });
     expect(res.status).toBe(400);
+  });
+
+  it('registers with currency + phone (momo)', async () => {
+    const username = `t_${randomUUID()}`;
+    createdUsernames.push(username);
+    const res = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'pw12345', currency: 'KES', phone: '254700000000' });
+    expect(res.status).toBe(201);
+  });
+
+  it('rejects an unsupported currency', async () => {
+    const username = `t_${randomUUID()}`;
+    createdUsernames.push(username);
+    const res = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'pw12345', currency: 'EUR', phone: '1' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('UNSUPPORTED_CURRENCY');
+  });
+
+  it('rejects a momo currency with no phone', async () => {
+    const username = `t_${randomUUID()}`;
+    createdUsernames.push(username);
+    const res = await request(app)
+      .post('/api/lobby/register')
+      .send({ username, password: 'pw12345', currency: 'KES' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CONTACT_REQUIRED');
   });
 });
