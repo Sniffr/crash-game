@@ -5,7 +5,6 @@
  *   - POST /register  — PUBLIC — create account, return player JWT + balance 0
  *   - POST /login     — PUBLIC — verify creds, return player JWT + balance
  *   - GET  /me        — player JWT — identity + balance
- *   - POST /deposit   — player JWT — top-up stub
  *
  * Player JWT: HS256, payload { sub: playerId, typ: 'player' }, ~24h expiry,
  * signed with process.env.JWT_SECRET via `jose` (same library admin-auth uses).
@@ -18,6 +17,7 @@ import { SignJWT, jwtVerify } from 'jose';
 import * as bcrypt from 'bcryptjs';
 import { PlayersRepo, DuplicateUsernameError } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
+import { railFor, SUPPORTED_CURRENCIES } from '@crash/wallet';
 
 // ---------------------------------------------------------------------------
 // Request augmentation — mirrors admin-auth.ts's `req.admin` pattern.
@@ -35,8 +35,6 @@ declare module 'express-serve-static-core' {
 
 const PLAYER_JWT_TTL_SECONDS = 24 * 60 * 60; // ~24h
 const BCRYPT_COST = 10;
-// Deposit top-up cap: 100,000.00 in minor units.
-const MAX_DEPOSIT_MINOR = 100_000_00;
 
 // ---------------------------------------------------------------------------
 // JWT helpers (jose, HS256) — JWT_SECRET read at call time (fail-closed).
@@ -149,17 +147,46 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
   router.post('/register', async (req, res): Promise<void> => {
     if (!requireSecret(res)) return;
 
-    const body = (req.body ?? {}) as { username?: unknown; password?: unknown };
-    const { username, password } = body;
+    const body = (req.body ?? {}) as {
+      username?: unknown;
+      password?: unknown;
+      currency?: unknown;
+      phone?: unknown;
+      email?: unknown;
+    };
+    const { username, password, currency, phone, email } = body;
 
     if (typeof username !== 'string' || !username.trim() || typeof password !== 'string' || !password) {
       res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'username and password (non-empty strings) required' } });
       return;
     }
 
+    if (typeof currency !== 'string' || !SUPPORTED_CURRENCIES.includes(currency)) {
+      res.status(400).json({ error: { code: 'UNSUPPORTED_CURRENCY', message: `currency must be one of ${SUPPORTED_CURRENCIES.join(', ')}` } });
+      return;
+    }
+
+    const rail = railFor(currency)!;
+    const phoneStr = typeof phone === 'string' ? phone.trim() : '';
+    const emailStr = typeof email === 'string' ? email.trim() : '';
+    if (rail.contact === 'phone' ? !phoneStr : !emailStr) {
+      res.status(400).json({
+        error: {
+          code: 'CONTACT_REQUIRED',
+          message: rail.contact === 'phone' ? 'phone is required for this currency' : 'email is required for this currency',
+        },
+      });
+      return;
+    }
+
     try {
       const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
-      const player = await deps.players.create(username.trim(), passwordHash);
+      const player = await deps.players.create(username.trim(), passwordHash, {
+        currency,
+        phone: phoneStr || null,
+        email: emailStr || null,
+        country: rail.country,
+      });
       const token = await signPlayerJwt(player.playerId);
       res.status(201).json({
         token,
@@ -199,11 +226,12 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
     }
 
     const token = await signPlayerJwt(found.playerId);
-    const balanceMinor = await deps.wallet.balance(found.playerId);
+    const balanceMinor = await deps.wallet.balance(found.playerId, found.currency);
     res.status(200).json({
       token,
       player: { playerId: found.playerId, username: found.username },
       balanceMinor,
+      currency: found.currency,
     });
   });
 
@@ -218,30 +246,8 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
       res.status(404).json({ error: { code: 'PLAYER_NOT_FOUND', message: 'Player not found' } });
       return;
     }
-    const balanceMinor = await deps.wallet.balance(playerId);
-    res.status(200).json({ playerId: player.playerId, username: player.username, balanceMinor });
-  });
-
-  // =========================================================================
-  // POST /deposit — player JWT — top-up stub
-  // =========================================================================
-
-  router.post('/deposit', requirePlayerJwt, async (req, res): Promise<void> => {
-    const playerId = req.player!.playerId;
-    const body = (req.body ?? {}) as { amountMinor?: unknown };
-    const amountMinor = body.amountMinor;
-
-    if (typeof amountMinor !== 'number' || !Number.isInteger(amountMinor) || amountMinor <= 0) {
-      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'amountMinor must be a positive integer (minor units)' } });
-      return;
-    }
-    if (amountMinor > MAX_DEPOSIT_MINOR) {
-      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: `amountMinor exceeds the maximum of ${MAX_DEPOSIT_MINOR}` } });
-      return;
-    }
-
-    const balanceMinor = await deps.wallet.deposit(playerId, amountMinor);
-    res.status(200).json({ balanceMinor });
+    const balanceMinor = await deps.wallet.balance(playerId, player.currency);
+    res.status(200).json({ playerId: player.playerId, username: player.username, balanceMinor, currency: player.currency });
   });
 
   return router;

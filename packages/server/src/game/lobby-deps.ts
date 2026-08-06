@@ -7,6 +7,13 @@ import type { WalletLedger } from '@crash/wallet/wallet-ledger';
  */
 export interface LobbyWiringDeps {
   wallet: WalletLedger;
+  /**
+   * Optional FX helper for normalizing a stake to KES before enforcing the
+   * global MAX_STAKE cap (Task 9). Structurally typed rather than importing
+   * the concrete MapleradFx class, to avoid a server→server import cycle;
+   * Task 11 constructs the real implementation and passes it in here.
+   */
+  fx?: { toKesMinor(amountMinor: number, currency: string): Promise<number> };
 }
 
 let deps: LobbyWiringDeps | null = null;

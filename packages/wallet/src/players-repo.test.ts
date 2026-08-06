@@ -63,4 +63,15 @@ describe('PlayersRepo', () => {
 
     await expect(repo.create(username, 'hash-2')).rejects.toBeInstanceOf(DuplicateUsernameError);
   });
+
+  it('create stores currency/phone and reads them back', async () => {
+    const username = `t_${randomUUID()}`;
+    const p = await repo.create(username, 'hash', { currency: 'KES', phone: '254700000000' });
+    createdPlayerIds.push(p.playerId);
+
+    expect(p.currency).toBe('KES');
+    expect(p.phone).toBe('254700000000');
+    const got = await repo.getByUsername(username);
+    expect(got?.currency).toBe('KES');
+  });
 });

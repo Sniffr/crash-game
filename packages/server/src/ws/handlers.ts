@@ -371,6 +371,16 @@ export async function handlePlaceLobbyBet(
   const slot = data.slot === 1 ? 1 : 0;
   const ref = `rnd-${currentRound.roundNumber}-s${slot}`;
   try {
+    if (deps.fx) {
+      // Inside the try: an FX outage (rejected/thrown promise) must reject
+      // the bet gracefully via the catch below, not throw out of the handler.
+      const kesMinor = await deps.fx.toKesMinor(amountMinor, session.currency ?? DEFAULT_CURRENCY);
+      if (kesMinor > MAX_STAKE * 100) {
+        safeSend(ws, { type: 'error', data: { message: `Max stake is KSh ${MAX_STAKE}` } });
+        return;
+      }
+    }
+
     const balanceMinor = await deps.wallet.bet(session.lobbyPlayerId!, amountMinor, ref, session.currency ?? DEFAULT_CURRENCY);
     const bet: Bet = {
       playerId: sessionId,
