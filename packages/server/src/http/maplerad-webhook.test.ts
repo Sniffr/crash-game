@@ -114,6 +114,44 @@ describe('maplerad webhook router', () => {
     // blew up and no deposit lookup/credit occurred (foreign ref short-circuits).
   });
 
+  it('does not credit when server-side re-verification does not confirm success (spoofed payload)', async () => {
+    const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
+    const playerId = player.playerId;
+    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 4200 });
+    // The webhook payload claims success, but the re-verify call (the source
+    // of truth) says otherwise — the handler must trust verifyTransaction,
+    // not the payload.
+    verifyTransactionResult = { id: 'tx5', status: 'pending' };
+
+    const raw = JSON.stringify({
+      event: 'collection.successful',
+      data: { reference, amount: 4200, status: 'success', id: 'tx5' },
+    });
+    const sig = sign(SECRET, 'e5', TS, raw);
+    const res = await postWebhook(raw, { 'svix-id': 'e5', 'svix-timestamp': TS, 'svix-signature': sig });
+
+    expect(res.status).toBe(200);
+    expect(await wallet.balance(playerId, 'KES')).toBe(0);
+    const dep = await deposits.get(reference);
+    expect(dep?.status).toBe('pending');
+
+    verifyTransactionResult = { status: 'success' };
+  });
+
+  it('returns 200 and does not credit for a game-dep- reference with no matching deposit row', async () => {
+    const reference = `game-dep-unknown-${randomUUID()}`;
+    const raw = JSON.stringify({
+      event: 'collection.successful',
+      data: { reference, amount: 1000, status: 'success', id: 'tx6' },
+    });
+    const sig = sign(SECRET, 'e6', TS, raw);
+    const res = await postWebhook(raw, { 'svix-id': 'e6', 'svix-timestamp': TS, 'svix-signature': sig });
+
+    expect(res.status).toBe(200);
+    expect(await deposits.get(reference)).toBeNull();
+  });
+
   it('marks a pending deposit failed on collection.failed (no credit)', async () => {
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;

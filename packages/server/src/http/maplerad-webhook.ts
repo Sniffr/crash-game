@@ -68,7 +68,7 @@ export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Ro
     if (evt.event === 'collection.successful') {
       // Always re-verify server-side — never trust the webhook payload alone.
       const verified = await deps.maplerad.verifyTransaction(evt.data?.id ?? '');
-      const ok = (verified as { status?: unknown })?.status === 'success' || (verified as { status?: unknown })?.status === true;
+      const ok = (verified as { status?: unknown })?.status === 'success';
       if (ok && (await deps.deposits.markSettled(reference))) {
         // markSettled only returns true on the first pending→settled
         // transition, so this branch runs at most once per reference.
