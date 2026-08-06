@@ -183,10 +183,11 @@ export default function ParallaxScene(props: ParallaxSceneProps) {
       const vRoad = vWorld * scene.layers.road.parallax;
       wheelAngle += (vRoad / scene.bus.wheel_radius) * dt;
 
-      // ── cover-fit 1280×720 into the device canvas ──
-      const cover = Math.max(W / CW, H / CH);
-      const ox = (W - CW * cover) / 2, oy = (H - CH * cover) / 2;
-      ctx.setTransform(cover, 0, 0, cover, ox, oy);
+      // ── contain-fit 1280×720 into the device canvas (never crop the scene;
+      //    the container is 16:9 so bars are ~0 in the common case) ──
+      const scale = Math.min(W / CW, H / CH);
+      const ox = (W - CW * scale) / 2, oy = (H - CH * scale) / 2;
+      ctx.setTransform(scale, 0, 0, scale, ox, oy);
 
       const I = imgsRef.current;
       tile(ctx, I.sky, scroll * scene.layers.sky.parallax, scene.layers.sky.y);
