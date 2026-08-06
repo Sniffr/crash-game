@@ -1,0 +1,42 @@
+# Traefik IngressRoute for the Creator studio subdomain.
+#
+# Same pod/service as the game (crash-gamesvc:3001) — the server routes by Host:
+# creator.games.soa.plus serves the studio (packages/creator/dist), gated by
+# admin login; games.soa.plus serves the game. TLS auto-provisions via the
+# LetsEncrypt cert resolver once DNS for the host points at the Traefik LB.
+#
+# DNS required (do this once): creator.games.soa.plus  A  173.249.40.213
+#
+#   kubectl apply -f deploy/creator-ingressroute.yaml
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: creator-studio
+  namespace: crash-game
+spec:
+  entryPoints: [websecure]
+  routes:
+    - kind: Rule
+      match: Host(`creator.games.soa.plus`)
+      services:
+        - name: crash-gamesvc
+          port: 3001
+  tls:
+    certResolver: letsencrypt
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: creator-studio-redirect
+  namespace: crash-game
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`creator.games.soa.plus`)
+      middlewares:
+        - name: redirect-https
+      services:
+        - name: crash-gamesvc
+          port: 3001
