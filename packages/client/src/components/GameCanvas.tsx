@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { BackgroundMotion, FlightAnimation, FlightTrajectory, Theme } from '../theme/types';
 import { DEFAULT_FLIGHT_ANIMATION, DEFAULT_FLIGHT_TRAJECTORY, effectiveBgSpeed } from '../theme/types';
+import ParallaxScene from './ParallaxScene';
 
 interface GameCanvasProps {
   phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT';
@@ -344,6 +345,27 @@ export default function GameCanvas({
     };
   }, [phase, flightStartTime, serverClockOffsetMs, currentMultiplier, crashPoint, hashCommit, countdownMs, getMultiplierColor, rocket, theme]);
 
+  // ─── Parallax scene (sprite mode with a scene manifest) ─────────────────
+  // A layered Canvas-2D scene pack replaces the heavy per-round MP4. Self-
+  // contained renderer; the draw loop above no-ops (its canvas isn't mounted).
+  if (theme?.gameType === 'sprite' && theme.scene) {
+    return (
+      <div className="relative w-full h-full">
+        <ParallaxScene
+          phase={phase}
+          flightStartTime={flightStartTime}
+          serverClockOffsetMs={serverClockOffsetMs}
+          currentMultiplier={currentMultiplier}
+          crashPoint={crashPoint}
+          countdownMs={countdownMs}
+          getMultiplierColor={getMultiplierColor}
+          scene={theme.scene}
+          colors={theme.colors}
+        />
+      </div>
+    );
+  }
+
   // ─── GIF mode: full-screen animated GIF behind the canvas overlay ─────
   const gifSrc = pickGif(theme, phase, currentMultiplier);
 
@@ -461,7 +483,7 @@ function pickGif(theme: Theme | undefined, phase: GameCanvasProps['phase'], mult
 }
 
 // ─── GIF-mode overlays (drawn on transparent canvas above the <img>) ────────
-function drawGifOverlayBetting(
+export function drawGifOverlayBetting(
   ctx: CanvasRenderingContext2D,
   W: number, H: number, dpr: number,
   countdownMs: number | undefined,
@@ -485,7 +507,7 @@ function drawGifOverlayBetting(
   ctx.restore();
 }
 
-function drawGifOverlayFlying(
+export function drawGifOverlayFlying(
   ctx: CanvasRenderingContext2D,
   W: number, H: number, dpr: number,
   multiplier: number, tier: string,
@@ -511,7 +533,7 @@ function drawGifOverlayFlying(
   ctx.restore();
 }
 
-function drawGifOverlayCrashed(
+export function drawGifOverlayCrashed(
   ctx: CanvasRenderingContext2D,
   W: number, H: number, dpr: number,
   crashPoint: number, crashColor: string,

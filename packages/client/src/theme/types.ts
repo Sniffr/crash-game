@@ -78,6 +78,51 @@ export interface ThemeGifs {
 
 export const DEFAULT_GIF_THRESHOLD_AT = 2.0;
 
+// ─── Parallax scene (sprite mode) ──────────────────────────────────────────
+// A layered Canvas-2D scene reconstructed from a source animation: parallax
+// background strips that tile + scroll, a composited actor (body + patched
+// passenger sheet + rotating wheels), and a crash sprite-atlas. Attached to a
+// `gameType: 'sprite'` theme as `scene`; the renderer (ParallaxScene) is driven
+// by the real round phase/multiplier and draws our own text overlays on top.
+// Shape mirrors the asset pack's assets.json 1:1 so a pack can be dropped in.
+export interface SceneLayer {
+  webp?: string; src?: string;
+  size: [number, number];
+  y: number;
+  parallax: number;
+  alpha?: boolean;
+}
+export interface SceneSheet {
+  webp?: string; src: string;
+  frames: number; cols: number; fps: number;
+  size: [number, number];
+}
+export interface SceneManifest {
+  /** Public base URL the relative asset filenames resolve against (no trailing slash). */
+  baseUrl: string;
+  world: { pano_w: number; scroll_px_per_sec: number; road_y: number };
+  layers: { sky: SceneLayer; city: SceneLayer; road: SceneLayer };
+  bus: {
+    body: string;
+    origin: [number, number];
+    size: [number, number];
+    wheel: string;
+    wheel_radius: number;
+    wheel_src_size: number;
+    wheels: [number, number][];
+    passenger_rect: [number, number, number, number];
+    passenger_fly: SceneSheet;
+    passenger_idle: SceneSheet;
+  };
+  crash: {
+    webp?: string; src: string;
+    size: [number, number];
+    fps: number;
+    frames: { a: [number, number, number, number]; d: [number, number] }[];
+  };
+  grade: { idle_multiply: number; launch_ramp_frames: number };
+}
+
 export interface ThemeSounds {
   takeoff?: string | null;
   cashout?: string | null;
@@ -109,6 +154,9 @@ export interface Theme {
   flightTrajectory?: FlightTrajectory;
   gameType?: GameType;
   gifs?: ThemeGifs;
+  /** Layered parallax scene (sprite mode). When present on a sprite theme, the
+   *  client renders ParallaxScene instead of the procedural sprite path. */
+  scene?: SceneManifest;
 }
 
 export const THEME_VERSION = 1;
