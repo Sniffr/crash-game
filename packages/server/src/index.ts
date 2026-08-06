@@ -35,6 +35,7 @@ import { handleMessage } from './ws/handlers';
 import * as Round from './game/round';
 const { CONFIG, startAllEngines, getRoundForGame, getEngine } = Round;
 import { getRecentHistory } from './game/history';
+import { bindSessionGame } from './store';
 import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 
 // ---------------------------------------------------------------------------
@@ -189,6 +190,9 @@ wss.on('connection', (ws, req) => {
     claimedSession = sessionId;
     if (!sessionSockets.has(sessionId)) sessionSockets.set(sessionId, new Set());
     sessionSockets.get(sessionId)!.add(ws);
+    // Reconcile the session's game to the one this socket is playing (?game=),
+    // so a legacy/mis-bound session doesn't bet against the wrong game's round.
+    if (joinGameId !== DEFAULT_GAME_ID) void bindSessionGame(sessionId, joinGameId).catch(() => {});
   }
 
   const joinRound = getRoundForGame(joinGameId);

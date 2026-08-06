@@ -222,11 +222,16 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   /** Create a fresh anonymous session. Returns the session id + URL hint. */
   app.post('/api/session', async (req, res) => {
     try {
-      const { displayName, balance } = (req.body ?? {}) as { displayName?: string; balance?: number };
+      const { displayName, balance, gameId } = (req.body ?? {}) as { displayName?: string; balance?: number; gameId?: string };
       const safeBalance = balance != null && Number.isFinite(balance) && balance > 0
         ? Math.min(balance, 100_000)
         : undefined;
-      const session = await createSession({ displayName, balance: safeBalance });
+      // Bind the session to the game it's playing, but only if it's a real active
+      // game (ignore bogus input — the bet gate would otherwise never open).
+      const safeGameId = typeof gameId === 'string' && deps.games.snapshot().some((g) => g.gameId === gameId)
+        ? gameId
+        : undefined;
+      const session = await createSession({ displayName, balance: safeBalance, gameId: safeGameId });
       res.json(session);
     } catch (err) {
       return sendStoreError(res, err);
