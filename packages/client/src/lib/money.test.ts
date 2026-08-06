@@ -23,3 +23,10 @@ describe('minor-unit round trip', () => {
     expect(fromMinor(4900, 'USD')).toBe('$49.00');
   });
 });
+
+describe('ZMW and ZAR', () => {
+  it('formats ZMW and ZAR', () => {
+    expect(fromMinor(150000, 'ZMW')).toBe('K1500.00');
+    expect(fromMinor(150000, 'ZAR')).toBe('R1500.00');
+  });
+});
