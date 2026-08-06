@@ -194,10 +194,15 @@ export default function ParallaxScene(props: ParallaxSceneProps) {
       tile(ctx, I.city, scroll * scene.layers.city.parallax, scene.layers.city.y);
       tile(ctx, I.road, scroll * scene.layers.road.parallax, scene.layers.road.y);
 
-      // pre-round dusk = flat multiply on the background layers only
+      // Pre-round dusk / launch ramp: dim the FULL canvas in device space (not
+      // the 1280×720 scene rect) so the tiled layers that spill past that rect —
+      // and any letterbox gap — are covered too. Drawn before the bus, so the
+      // bus stays at full brightness (dusk is a background-only effect).
       if (grade < 0.999) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.fillStyle = `rgba(0,0,0,${(1 - grade).toFixed(3)})`;
-        ctx.fillRect(0, 0, CW, CH);
+        ctx.fillRect(0, 0, W, H);
+        ctx.setTransform(scale, 0, 0, scale, ox, oy);
       }
 
       // actors
