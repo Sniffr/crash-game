@@ -1,4 +1,5 @@
 import { DEFAULT_GAME_ID } from '@crash/shared/rng';
+import { DEFAULT_GROWTH_RATE, type GrowthSegment } from '@crash/shared/curve';
 import { type RoundState, type Bet } from '@crash/shared/types';
 import { GameEngine } from './engine';
 import { getOperatorWiringDeps } from './operator-deps';
@@ -68,21 +69,30 @@ export function getBetsForSession(sessionId: string): Bet[] {
  */
 export function startAllEngines(): void {
   const games = getOperatorWiringDeps()?.games?.snapshot();
+  const base = { gameId: DEFAULT_GAME_ID, rtp: CONFIG.rtp, rate: DEFAULT_GROWTH_RATE, segments: undefined as GrowthSegment[] | undefined };
   const list =
     games && games.length
-      ? games.map((g) => ({ gameId: g.gameId, rtp: g.rtp }))
-      : [{ gameId: DEFAULT_GAME_ID, rtp: CONFIG.rtp }];
+      ? games.map((g) => ({ gameId: g.gameId, rtp: g.rtp, ...growthOf(g.theme) }))
+      : [base];
   // Always keep the base game running even if it isn't in the catalogue.
-  if (!list.some((g) => g.gameId === DEFAULT_GAME_ID)) {
-    list.push({ gameId: DEFAULT_GAME_ID, rtp: CONFIG.rtp });
-  }
+  if (!list.some((g) => g.gameId === DEFAULT_GAME_ID)) list.push(base);
   for (const g of list) {
     const existing = engines.get(g.gameId);
-    if (existing) { existing.setRtp(g.rtp); continue; }
-    const engine = new GameEngine(g.gameId, g.rtp);
+    if (existing) { existing.setRtp(g.rtp); existing.setGrowth(g.rate, g.segments); continue; }
+    const engine = new GameEngine(g.gameId, g.rtp, g.rate, g.segments);
     engines.set(g.gameId, engine);
     engine.start();
   }
+}
+
+/** Read a game's growth curve (base rate + optional piecewise bands) from its theme. */
+function growthOf(theme: unknown): { rate: number; segments?: GrowthSegment[] } {
+  const t = theme as { growthRate?: unknown; growthSegments?: unknown } | undefined;
+  const rate = typeof t?.growthRate === 'number' && t.growthRate > 0 ? t.growthRate : DEFAULT_GROWTH_RATE;
+  const segments = Array.isArray(t?.growthSegments) && t.growthSegments.length > 0
+    ? (t.growthSegments as GrowthSegment[])
+    : undefined;
+  return { rate, segments };
 }
 
 // ─── Test-only compat ─────────────────────────────────────────────────────────

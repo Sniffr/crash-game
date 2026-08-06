@@ -146,6 +146,8 @@ export interface Theme {
   colors: ThemeColors;
   rtp: number;            // 0.80–0.99
   growthRate: number;     // 0.03–0.15  (exponent per second)
+  /** Optional piecewise growth: per multiplier-band rates. Overrides growthRate. */
+  growthSegments?: { from: number; rate: number }[];
   bettingMs: number;      // 3000–10000
   maxMultiplier: number;  // 100–10000
 
