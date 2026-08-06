@@ -47,6 +47,15 @@ function loadTheme(): Theme {
 export default function App() {
   const [theme, setTheme] = useState<Theme>(loadTheme);
 
+  // Admin session (login gate). Token lives in memory only — never persisted —
+  // so closing the tab logs you out. Every write already requires this JWT.
+  const [token, setToken] = useState<string | null>(null);
+  const [admin, setAdmin] = useState<string | null>(null);
+
+  // Editor UX: Simple (essentials) vs Advanced (everything), and the active tab.
+  const [advanced, setAdvanced] = useState(false);
+  const [tab, setTab] = useState<string>('brand');
+
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(theme)); } catch { /* ignore */ }
   }, [theme]);
@@ -110,27 +119,16 @@ export default function App() {
 
   const [publishing, setPublishing] = useState(false);
   const handlePublish = useCallback(async () => {
-    // Publish this theme to the game server's catalogue as a first-class game.
-    // The catalogue API is admin-only, so we log in for a short-lived JWT.
-    // (Dev tool: creds are prompted, never stored. Server reached via vite proxy.)
+    // Publish this theme to the game server's catalogue. The admin JWT from the
+    // login gate authorises every write below; on expiry we drop back to login.
     const gameId = slug(theme.brandName);
     if (!theme.brandName?.trim() || gameId === 'theme') {
       alert('Give your game a name first (the "Game name" field under Brand).');
       return;
     }
-    const user = window.prompt(`Publish "${theme.brandName}" as game "${gameId}".\n\nAdmin username:`);
-    if (!user) return;
-    const pass = window.prompt('Admin password:');
-    if (!pass) return;
+    if (!token) { setToken(null); return; }
     setPublishing(true);
     try {
-      const login = await fetch('/admin/v1/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: user, password: pass }),
-      });
-      if (!login.ok) throw new Error(`Login failed (${login.status})`);
-      const { token } = (await login.json()) as { token: string };
       const auth = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` };
 
       // Upload any inline (base64 data:) assets to S3 first, so the stored theme
@@ -175,6 +173,10 @@ export default function App() {
       const res = exists.ok
         ? await fetch(`/admin/v1/games/${encodeURIComponent(gameId)}`, { method: 'PATCH', headers: auth, body })
         : await fetch('/admin/v1/games', { method: 'POST', headers: auth, body });
+      if (res.status === 401 || exists.status === 401) {
+        setToken(null); setAdmin(null);
+        throw new Error('Session expired — please log in again.');
+      }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err?.error?.message ?? `Publish failed (${res.status})`);
@@ -186,7 +188,7 @@ export default function App() {
     } finally {
       setPublishing(false);
     }
-  }, [theme]);
+  }, [theme, token]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handleImport = (file: File) => {
@@ -201,6 +203,11 @@ export default function App() {
     });
   };
 
+  // ─── Login gate ───────────────────────────────────────────────────────────
+  if (!token) {
+    return <LoginGate onLogin={(tok, user) => { setToken(tok); setAdmin(user); }} />;
+  }
+
   return (
     <div className="min-h-screen flex flex-col text-slate-100">
       <TopBar
@@ -211,6 +218,10 @@ export default function App() {
         onNew={handleNew}
         games={games}
         onOpen={handleOpen}
+        advanced={advanced}
+        onToggleAdvanced={() => setAdvanced((v) => !v)}
+        admin={admin}
+        onLogout={() => { setToken(null); setAdmin(null); }}
       />
 
       <input
@@ -225,11 +236,14 @@ export default function App() {
         }}
       />
 
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[380px_1fr] min-h-0 overflow-hidden">
-        {/* Editor */}
-        <aside className="border-r border-ink-500/40 bg-ink-900/40 backdrop-blur-md overflow-y-auto h-full lg:max-h-[calc(100vh-57px)]">
+      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[420px_1fr] min-h-0 overflow-hidden">
+        {/* Editor — tabbed, Simple/Advanced */}
+        <aside className="border-r border-ink-500/40 bg-ink-900/40 backdrop-blur-md flex flex-col min-h-0 lg:max-h-[calc(100vh-57px)]">
           <EditorForm
             theme={theme}
+            advanced={advanced}
+            tab={tab}
+            setTab={setTab}
             update={update}
             updateColor={updateColor}
             updateAsset={updateAsset}
@@ -239,11 +253,13 @@ export default function App() {
           />
         </aside>
 
-        {/* Preview */}
-        <section className="flex flex-col min-h-0">
+        {/* Preview — compact, centered, 16:9 to match the game stage */}
+        <section className="flex flex-col min-h-0 bg-ink-950">
           <BrandStrip theme={theme} />
-          <div className="flex-1 relative min-h-[400px] bg-ink-950">
-            <PreviewCanvas theme={theme} />
+          <div className="flex-1 min-h-0 grid place-items-center p-5 overflow-auto">
+            <div className="w-full max-w-[620px] aspect-video relative rounded-xl overflow-hidden border border-ink-500/40 shadow-2xl">
+              <PreviewCanvas theme={theme} />
+            </div>
           </div>
           <SampleControls theme={theme} />
         </section>
@@ -252,10 +268,73 @@ export default function App() {
   );
 }
 
+// ─── Login gate ───────────────────────────────────────────────────────────
+// The studio is served on its own subdomain and requires an admin sign-in
+// before the editor renders. Same accounts as the admin console; the JWT it
+// returns authorises every publish/upload. Token is held in memory only.
+function LoginGate({ onLogin }: { onLogin: (token: string, user: string) => void }) {
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !pass) return;
+    setBusy(true); setErr(null);
+    try {
+      const r = await fetch('/admin/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass }),
+      });
+      if (!r.ok) { setErr(r.status === 401 ? 'Invalid username or password.' : `Login failed (${r.status}).`); return; }
+      const { token } = (await r.json()) as { token: string };
+      onLogin(token, user);
+    } catch {
+      setErr('Could not reach the server.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen grid place-items-center text-slate-100 p-6">
+      <form onSubmit={submit} className="w-full max-w-sm bg-ink-900/70 border border-ink-500/40 rounded-2xl p-7 backdrop-blur-xl shadow-2xl">
+        <div className="flex items-center gap-3 mb-6">
+          <div className="w-9 h-9 rounded-control bg-gradient-to-br from-fuchsia-600 via-indigo-700 to-cyan-600 flex items-center justify-center border border-ink-500/50 font-display font-bold">C</div>
+          <div className="leading-tight">
+            <h1 className="font-display font-bold text-sm tracking-[0.18em] uppercase">Crash Game <span className="text-cyan-400">Creator</span></h1>
+            <p className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Admin sign-in required</p>
+          </div>
+        </div>
+        <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 mb-1.5">Admin username</label>
+        <input
+          autoFocus value={user} onChange={(e) => setUser(e.target.value)} autoComplete="username"
+          className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-10 text-sm mb-4 focus:outline-none focus:border-cyan-500/60"
+        />
+        <label className="block text-[10px] uppercase tracking-[0.18em] text-slate-400 mb-1.5">Password</label>
+        <input
+          type="password" value={pass} onChange={(e) => setPass(e.target.value)} autoComplete="current-password"
+          className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-10 text-sm mb-5 focus:outline-none focus:border-cyan-500/60"
+        />
+        {err && <div className="text-[11px] text-rose-400 mb-4 -mt-1">{err}</div>}
+        <button
+          type="submit" disabled={busy || !user || !pass}
+          className="w-full h-10 rounded-control bg-gradient-to-r from-cyan-500 to-fuchsia-500 text-ink-950 font-bold uppercase tracking-[0.18em] text-xs hover:brightness-110 transition disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {busy ? 'Signing in…' : 'Sign in'}
+        </button>
+      </form>
+    </div>
+  );
+}
+
 // ─── Top bar ────────────────────────────────────────────────────────────────
-function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen }: {
+function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen, advanced, onToggleAdvanced, admin, onLogout }: {
   onExport: () => void; onImportClick: () => void; onPublish: () => void; publishing: boolean;
   onNew: () => void; games: { gameId: string; name: string }[]; onOpen: (gameId: string) => void;
+  advanced: boolean; onToggleAdvanced: () => void; admin: string | null; onLogout: () => void;
 }) {
   return (
     <header className="flex items-center justify-between px-5 py-3 border-b border-ink-500/40 bg-ink-950/80 backdrop-blur-xl">
@@ -276,6 +355,17 @@ function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, 
       </div>
 
       <div className="flex items-center gap-2">
+        {/* Simple / Advanced */}
+        <div className="flex rounded-control border border-ink-500/50 overflow-hidden mr-1" title="Advanced reveals every field; Simple shows just the essentials">
+          <button
+            onClick={() => { if (advanced) onToggleAdvanced(); }}
+            className={`text-[11px] px-2.5 py-1.5 uppercase tracking-wider font-semibold transition ${!advanced ? 'bg-cyan-500/20 text-cyan-300' : 'bg-ink-800/60 text-slate-400 hover:text-white'}`}
+          >Simple</button>
+          <button
+            onClick={() => { if (!advanced) onToggleAdvanced(); }}
+            className={`text-[11px] px-2.5 py-1.5 uppercase tracking-wider font-semibold transition ${advanced ? 'bg-cyan-500/20 text-cyan-300' : 'bg-ink-800/60 text-slate-400 hover:text-white'}`}
+          >Advanced</button>
+        </div>
         <button
           onClick={onNew}
           className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
@@ -313,6 +403,18 @@ function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, 
         >
           {publishing ? 'Publishing…' : 'Publish'}
         </button>
+        {admin && (
+          <div className="flex items-center gap-2 pl-2 ml-1 border-l border-ink-500/40">
+            <span className="text-[10px] uppercase tracking-wider text-slate-500 hidden xl:inline">{admin}</span>
+            <button
+              onClick={onLogout}
+              className="text-xs px-2.5 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-400 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
+              title="Sign out"
+            >
+              Logout
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );
@@ -392,9 +494,12 @@ function SampleControls({ theme }: { theme: Theme }) {
 
 // ─── Editor form ────────────────────────────────────────────────────────────
 function EditorForm({
-  theme, update, updateColor, updateAsset, updateSound, updateGif, onLoadPreset,
+  theme, advanced, tab, setTab, update, updateColor, updateAsset, updateSound, updateGif, onLoadPreset,
 }: {
   theme: Theme;
+  advanced: boolean;
+  tab: string;
+  setTab: (t: string) => void;
   update: <K extends keyof Theme>(k: K, v: Theme[K]) => void;
   updateColor: <K extends keyof ThemeColors>(k: K, v: ThemeColors[K]) => void;
   updateAsset: <K extends keyof ThemeAssets>(k: K, v: ThemeAssets[K]) => void;
@@ -403,448 +508,283 @@ function EditorForm({
   onLoadPreset: (key: string) => void;
 }) {
   const gameType: GameType = theme.gameType ?? 'sprite';
-  return (
-    <div className="p-5 pb-16 space-y-7">
-      {/* Game type — the first decision: sprite-on-curve, or full-screen GIF */}
-      <Section title="Game type">
-        <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
-          Pick how this game renders. <strong className="text-slate-300">Sprite</strong> uses
-          a procedural or static sprite traveling along an elliptic curve.
-          <strong className="text-slate-300"> GIF</strong> plays a full-screen
-          animated GIF per phase with the multiplier overlaid — the GIF brings
-          its own background and motion.
-        </p>
-        <div className="grid grid-cols-2 gap-2">
-          <SegmentCard
-            active={gameType === 'sprite'}
-            label="Sprite"
-            description="Sprite + curve + background"
-            onClick={() => update('gameType', 'sprite')}
-          />
-          <SegmentCard
-            active={gameType === 'gif'}
-            label="GIF"
-            description="Full-screen GIF per phase"
-            onClick={() => update('gameType', 'gif')}
-          />
-        </div>
-      </Section>
+  const hasScene = !!theme.scene?.baseUrl;
 
-      {/* Presets */}
-      <Section title="Presets">
-        <div className="grid grid-cols-2 gap-2">
-          {Object.entries(PRESETS).map(([key, p]) => (
-            <button
-              key={key}
-              onClick={() => onLoadPreset(key)}
-              className="text-left px-3 py-2 rounded-control border border-ink-500/40 bg-ink-800/50 hover:border-ink-500/80 hover:bg-ink-800 transition group"
-              style={{ boxShadow: `inset 0 -2px 0 0 ${p.colors.accent}` }}
-            >
-              <div className="text-[11px] font-bold tracking-wide text-slate-100 truncate">{p.brandName}</div>
-              <div className="flex items-center gap-1 mt-1.5">
-                {[p.colors.bgFrom, p.colors.accent, p.colors.accent2, p.colors.gold].map((c) => (
-                  <span key={c} className="w-3 h-3 rounded-sm border border-white/10" style={{ backgroundColor: c }} />
+  // Layers (tabs) depend on render mode + Simple/Advanced, so each is short (no
+  // endless scroll) and only shows fields the current mode actually uses.
+  const tabs: { id: string; label: string }[] = [
+    { id: 'brand', label: 'Brand' },
+    { id: 'look', label: 'Colors' },
+    gameType === 'gif' ? { id: 'gif', label: 'Animations' } : { id: 'sprite', label: 'Sprite' },
+    ...(gameType === 'sprite' && advanced ? [{ id: 'motion', label: 'Motion' }] : []),
+    ...(advanced ? [{ id: 'audio', label: 'Audio' }] : []),
+    { id: 'math', label: 'Math' },
+  ];
+  const activeTab = tabs.some((t) => t.id === tab) ? tab : tabs[0].id;
+
+  // Scene guard: switching a scene-backed game to GIF would orphan the scene.
+  const setGameType = (gt: GameType) => {
+    if (gt === 'gif' && hasScene &&
+      !window.confirm('This game uses a custom scene pack that only renders in Sprite mode.\n\nSwitch to GIF anyway? The scene stays saved and renders again when you switch back to Sprite.')) return;
+    update('gameType', gt);
+  };
+
+  return (
+    <div className="flex flex-col min-h-0 h-full">
+      {/* Layer tabs */}
+      <div className="flex gap-1 px-3 pt-3 pb-2 border-b border-ink-500/30 overflow-x-auto shrink-0 bg-ink-900/60">
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`text-[11px] px-3 py-1.5 rounded-control uppercase tracking-wider font-semibold whitespace-nowrap transition ${
+              activeTab === t.id
+                ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                : 'text-slate-400 hover:text-white border border-transparent'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Active layer */}
+      <div className="flex-1 overflow-y-auto p-5 space-y-6">
+        {activeTab === 'brand' && (
+          <>
+            <Section title="Render mode">
+              <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
+                <strong className="text-slate-300">Sprite</strong> — a sprite (or a parallax scene) on the game canvas.
+                <strong className="text-slate-300"> GIF</strong> — a full-screen clip per phase with the multiplier overlaid.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <SegmentCard active={gameType === 'sprite'} label="Sprite" description="Sprite / scene + curve" onClick={() => setGameType('sprite')} />
+                <SegmentCard active={gameType === 'gif'} label="GIF" description="Full-screen clip per phase" onClick={() => setGameType('gif')} />
+              </div>
+              {hasScene && (
+                <div className="rounded-control border border-cyan-500/40 bg-cyan-500/10 p-3 text-[11px] text-cyan-200 leading-relaxed">
+                  <strong>Custom scene pack</strong> — this game renders an uploaded parallax scene (advanced sprite renderer). Name, colours, tuning and sounds are safe to edit and publish; the scene art is managed outside the studio. Keep the mode on <strong>Sprite</strong>.
+                </div>
+              )}
+            </Section>
+
+            <Section title="Brand">
+              <Field label="Game name">
+                <input
+                  type="text"
+                  value={theme.brandName}
+                  onChange={(e) => update('brandName', e.target.value)}
+                  placeholder="e.g. Skyline Cruise"
+                  className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-9 text-sm font-display font-semibold focus:outline-none focus:border-cyan-500/60"
+                  maxLength={32}
+                />
+                <p className="text-[10px] text-slate-500 mt-1">
+                  Published as game ID <span className="font-mono text-cyan-400">{slug(theme.brandName) || '—'}</span>
+                  {' '}· launch at <span className="font-mono">?game={slug(theme.brandName) || '…'}</span>
+                </p>
+              </Field>
+              <Field label="Tagline">
+                <input
+                  type="text"
+                  value={theme.brandTagline}
+                  onChange={(e) => update('brandTagline', e.target.value)}
+                  className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-9 text-sm focus:outline-none focus:border-cyan-500/60"
+                  maxLength={48}
+                />
+              </Field>
+              <AssetUpload
+                label="Header logo"
+                accept="image/png,image/svg+xml,image/webp"
+                kind="image"
+                value={theme.assets?.logo}
+                onChange={(v) => updateAsset('logo', v)}
+                hint="Replaces the procedural logo in the game header. Applies to both modes."
+              />
+            </Section>
+
+            <Section title="Presets">
+              <div className="grid grid-cols-2 gap-2">
+                {Object.entries(PRESETS).map(([key, p]) => (
+                  <button
+                    key={key}
+                    onClick={() => onLoadPreset(key)}
+                    className="text-left px-3 py-2 rounded-control border border-ink-500/40 bg-ink-800/50 hover:border-ink-500/80 hover:bg-ink-800 transition group"
+                    style={{ boxShadow: `inset 0 -2px 0 0 ${p.colors.accent}` }}
+                  >
+                    <div className="text-[11px] font-bold tracking-wide text-slate-100 truncate">{p.brandName}</div>
+                    <div className="flex items-center gap-1 mt-1.5">
+                      {[p.colors.bgFrom, p.colors.accent, p.colors.accent2, p.colors.gold].map((c) => (
+                        <span key={c} className="w-3 h-3 rounded-sm border border-white/10" style={{ backgroundColor: c }} />
+                      ))}
+                    </div>
+                  </button>
                 ))}
               </div>
-            </button>
-          ))}
-        </div>
-      </Section>
+            </Section>
+          </>
+        )}
 
-      {/* Brand */}
-      <Section title="Brand">
-        <Field label="Game name">
-          <input
-            type="text"
-            value={theme.brandName}
-            onChange={(e) => update('brandName', e.target.value)}
-            placeholder="e.g. Skyline Cruise"
-            className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-9 text-sm font-display font-semibold focus:outline-none focus:border-cyan-500/60"
-            maxLength={32}
-          />
-          <p className="text-[10px] text-slate-500 mt-1">
-            Published as game ID <span className="font-mono text-cyan-400">{slug(theme.brandName) || '—'}</span>
-            {' '}· launch at <span className="font-mono">?game={slug(theme.brandName) || '…'}</span>
-          </p>
-        </Field>
-        <Field label="Tagline">
-          <input
-            type="text"
-            value={theme.brandTagline}
-            onChange={(e) => update('brandTagline', e.target.value)}
-            className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control px-3 h-9 text-sm focus:outline-none focus:border-cyan-500/60"
-            maxLength={48}
-          />
-        </Field>
-      </Section>
-
-      {/* Sprite */}
-      <Section title="Sprite">
-        <div className="grid grid-cols-2 gap-2">
-          {SPRITE_OPTIONS.map((opt) => (
-            <PickCard
-              key={opt.key}
-              active={theme.sprite === opt.key}
-              label={opt.label}
-              description={opt.description}
-              onClick={() => update('sprite', opt.key as SpriteKey)}
-            />
-          ))}
-        </div>
-      </Section>
-
-      {/* Background */}
-      <Section title="Background">
-        <div className="grid grid-cols-2 gap-2">
-          {BACKGROUND_OPTIONS.map((opt) => (
-            <PickCard
-              key={opt.key}
-              active={theme.background === opt.key}
-              label={opt.label}
-              description={opt.description}
-              onClick={() => update('background', opt.key as BackgroundKey)}
-            />
-          ))}
-        </div>
-      </Section>
-
-      {/* Colors */}
-      <Section title="Colors">
-        <div className="grid grid-cols-2 gap-3">
-          <ColorField label="BG top"     value={theme.colors.bgFrom}  onChange={(v) => updateColor('bgFrom', v)} />
-          <ColorField label="BG bottom"  value={theme.colors.bgTo}    onChange={(v) => updateColor('bgTo', v)} />
-          <ColorField label="Accent"     value={theme.colors.accent}  onChange={(v) => updateColor('accent', v)} />
-          <ColorField label="Accent 2"   value={theme.colors.accent2} onChange={(v) => updateColor('accent2', v)} />
-          <ColorField label="Win"        value={theme.colors.win}     onChange={(v) => updateColor('win', v)} />
-          <ColorField label="Crash"      value={theme.colors.crash}   onChange={(v) => updateColor('crash', v)} />
-          <ColorField label="Gold"       value={theme.colors.gold}    onChange={(v) => updateColor('gold', v)} />
-          <ColorField label="Text"       value={theme.colors.text}    onChange={(v) => updateColor('text', v)} />
-        </div>
-      </Section>
-
-      {/* ─── GIF mode: animated GIFs per phase ──────────────────────────── */}
-      {gameType === 'gif' && (
-        <Section title="GIF animations">
-          <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
-            Each phase shows its own animated GIF full-screen. The multiplier
-            text overlays it. Backgrounds and sprite settings are not used in
-            GIF mode — the GIF brings everything.
-          </p>
-          <AssetUpload
-            label="Loading GIF (BETTING phase)"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
-            kind="image"
-            value={theme.gifs?.loading}
-            onChange={(v) => updateGif('loading', v)}
-            hint="Plays during the place-bet countdown."
-            warnBytes={5_000_000}
-          />
-          <AssetUpload
-            label="Started GIF (FLYING phase)"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
-            kind="image"
-            value={theme.gifs?.flying}
-            onChange={(v) => updateGif('flying', v)}
-            hint="Plays from the moment the round starts."
-            warnBytes={5_000_000}
-          />
-          <AssetUpload
-            label="Threshold GIF (optional)"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
-            kind="image"
-            value={theme.gifs?.flyingThreshold}
-            onChange={(v) => updateGif('flyingThreshold', v)}
-            hint="Optional: takes over the FLYING phase once the multiplier crosses the value below. Skip to keep one GIF for the whole flight."
-            warnBytes={5_000_000}
-          />
-          {theme.gifs?.flyingThreshold && (
-            <SliderField
-              label="Threshold multiplier"
-              min={1.1} max={10.0} step={0.1}
-              value={theme.gifs?.flyingThresholdAt ?? DEFAULT_GIF_THRESHOLD_AT}
-              onChange={(v) => updateGif('flyingThresholdAt', v)}
-              display={`${(theme.gifs?.flyingThresholdAt ?? DEFAULT_GIF_THRESHOLD_AT).toFixed(1)}x`}
-              hint="At this multiplier the Threshold GIF replaces the Started GIF."
-            />
-          )}
-          <AssetUpload
-            label="Crashed GIF"
-            accept="image/gif,image/webp,image/png,video/mp4,video/webm"
-            kind="image"
-            value={theme.gifs?.crashed}
-            onChange={(v) => updateGif('crashed', v)}
-            hint="Plays on crash (and stays through the brief result phase)."
-            warnBytes={5_000_000}
-          />
-        </Section>
-      )}
-
-      {/* ─── Sprite mode: existing sprite + background + flight sections ──── */}
-      {gameType === 'sprite' && <>
-      {/* Custom sprites */}
-      <Section title="Custom sprites">
-        <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
-          Upload per-state sprites for ground / flying / crashed, or just one
-          "Sprite" used for all states. The plane swaps from ground → flying at
-          the transition multiplier below.
-        </p>
-        <AssetUpload
-          label="Ground sprite (idle)"
-          accept="image/png,image/svg+xml,image/jpeg,image/webp"
-          kind="image"
-          value={theme.assets?.spriteGround}
-          onChange={(v) => updateAsset('spriteGround', v)}
-          hint="Shown during BETTING and early flight. Falls back to the flying sprite."
-        />
-        <AssetUpload
-          label="Flying sprite"
-          accept="image/png,image/svg+xml,image/jpeg,image/webp"
-          kind="image"
-          value={theme.assets?.spriteFlying}
-          onChange={(v) => updateAsset('spriteFlying', v)}
-          hint="Shown after multiplier crosses the transition threshold below."
-        />
-        <AssetUpload
-          label="Crashed sprite"
-          accept="image/png,image/svg+xml,image/jpeg,image/webp"
-          kind="image"
-          value={theme.assets?.spriteCrashed}
-          onChange={(v) => updateAsset('spriteCrashed', v)}
-          hint="Shown during the crash animation (an explosion / wreck). Falls back to the flying sprite."
-        />
-        <AssetUpload
-          label="Single sprite (legacy, used if no per-state)"
-          accept="image/png,image/svg+xml,image/jpeg,image/webp"
-          kind="image"
-          value={theme.assets?.sprite}
-          onChange={(v) => updateAsset('sprite', v)}
-          hint="Used for all states if no per-state sprite is set."
-        />
-        <SliderField
-          label="Fully airborne at"
-          min={1.0} max={5.0} step={0.1}
-          value={theme.spriteTransitionAt ?? 1.5}
-          onChange={(v) => update('spriteTransitionAt', v)}
-          display={`${(theme.spriteTransitionAt ?? 1.5).toFixed(1)}x`}
-          hint="At this multiplier the sprite (a) swaps from ground → flying and (b) reaches the cruise point on the arc. Default 1.5x."
-        />
-      </Section>
-
-      {/* Flight motion */}
-      <Section title="Flight motion">
-        {(() => {
-          const anim = { ...DEFAULT_FLIGHT_ANIMATION, ...(theme.flightAnimation ?? {}) };
-          const setAnim = (patch: Partial<FlightAnimation>) =>
-            update('flightAnimation', { ...anim, ...patch });
-          const trajectory: FlightTrajectory = theme.flightTrajectory ?? DEFAULT_FLIGHT_TRAJECTORY;
-          return (
-            <>
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400 font-semibold mb-1.5">Trajectory</div>
-                <div className="grid grid-cols-2 gap-2">
-                  <PickCard
-                    active={trajectory === 'elliptic'}
-                    label="Elliptic"
-                    description="Quarter-ellipse from bottom-left to upper-right — the default arc."
-                    onClick={() => update('flightTrajectory', 'elliptic')}
-                  />
-                  <PickCard
-                    active={trajectory === 'straight'}
-                    label="Straight"
-                    description="Takes off diagonally, then levels off and flies horizontally across the center."
-                    onClick={() => update('flightTrajectory', 'straight')}
-                  />
-                </div>
-              </div>
-              <SliderField
-                label="Cruise point on arc"
-                min={0.50} max={0.95} step={0.01}
-                value={anim.cruisePoint}
-                onChange={(v) => setAnim({ cruisePoint: v })}
-                display={`${Math.round(anim.cruisePoint * 100)}% of arc`}
-                hint="How far up the elliptic arc the sprite settles. 80% leaves visible sky above; 95% pushes it near the top."
-              />
-              <SliderField
-                label="Bob distance"
-                min={0} max={0.20} step={0.01}
-                value={anim.bobAmplitude}
-                onChange={(v) => setAnim({ bobAmplitude: v })}
-                display={anim.bobAmplitude === 0 ? 'no bob' : `±${Math.round(anim.bobAmplitude * 100)}% of arc`}
-                hint="How far the sprite slides back and forth along the arc while cruising. 0 = no bob (sprite holds position)."
-              />
-              <SliderField
-                label="Bob period"
-                min={400} max={4000} step={100}
-                value={anim.bobPeriodMs}
-                onChange={(v) => setAnim({ bobPeriodMs: v })}
-                display={`${(anim.bobPeriodMs / 1000).toFixed(1)}s / cycle`}
-                hint="Time for one full forward-and-back cycle. Shorter = faster wiggle. Disabled when bob distance is 0."
-              />
-            </>
-          );
-        })()}
-      </Section>
-
-      {/* Custom background */}
-      <Section title="Background">
-        <AssetUpload
-          label="Background image"
-          accept="image/png,image/jpeg,image/webp"
-          kind="image"
-          value={theme.assets?.background}
-          onChange={(v) => updateAsset('background', v)}
-          hint="Full-canvas image. Leave empty for the procedural scene above."
-        />
-        <Field label="Motion direction">
-          <select
-            value={theme.backgroundMotion?.direction ?? 'none'}
-            onChange={(e) => update('backgroundMotion', {
-              direction: e.target.value as 'none' | 'left' | 'right' | 'up' | 'down',
-              speed: theme.backgroundMotion?.speed ?? 'medium',
-            })}
-            className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control h-9 px-3 text-sm focus:outline-none focus:border-cyan-500/60"
-          >
-            <option value="none">None (static)</option>
-            <option value="left">Scroll left (plane appears to move right)</option>
-            <option value="right">Scroll right</option>
-            <option value="up">Scroll up (climbing)</option>
-            <option value="down">Scroll down (descending)</option>
-          </select>
-        </Field>
-        <Field label="Motion speed">
-          <select
-            value={theme.backgroundMotion?.speed ?? 'medium'}
-            onChange={(e) => update('backgroundMotion', {
-              direction: theme.backgroundMotion?.direction ?? 'none',
-              speed: e.target.value as 'slow' | 'medium' | 'fast',
-              tieToMultiplier: theme.backgroundMotion?.tieToMultiplier ?? false,
-            })}
-            className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control h-9 px-3 text-sm focus:outline-none focus:border-cyan-500/60"
-          >
-            <option value="slow">Slow</option>
-            <option value="medium">Medium</option>
-            <option value="fast">Fast</option>
-          </select>
-        </Field>
-        <label className="flex items-center gap-2 cursor-pointer select-none">
-          <input
-            type="checkbox"
-            checked={!!theme.backgroundMotion?.tieToMultiplier}
-            onChange={(e) => update('backgroundMotion', {
-              direction: theme.backgroundMotion?.direction ?? 'none',
-              speed: theme.backgroundMotion?.speed ?? 'medium',
-              tieToMultiplier: e.target.checked,
-            })}
-            className="w-4 h-4 accent-cyan-500"
-          />
-          <div className="leading-tight">
-            <div className="text-xs font-semibold text-slate-200">Tie speed to multiplier</div>
-            <div className="text-[10px] text-slate-500">
-              Background scrolls faster as the round grows. At 1× it moves at half base speed; at 5× it moves at 5× base.
+        {activeTab === 'look' && (
+          <Section title="Colors">
+            <div className="grid grid-cols-2 gap-3">
+              <ColorField label="BG top"    value={theme.colors.bgFrom} onChange={(v) => updateColor('bgFrom', v)} />
+              <ColorField label="BG bottom" value={theme.colors.bgTo}   onChange={(v) => updateColor('bgTo', v)} />
+              <ColorField label="Accent"    value={theme.colors.accent} onChange={(v) => updateColor('accent', v)} />
+              <ColorField label="Crash"     value={theme.colors.crash}  onChange={(v) => updateColor('crash', v)} />
+              <ColorField label="Win"       value={theme.colors.win}    onChange={(v) => updateColor('win', v)} />
+              <ColorField label="Text"      value={theme.colors.text}   onChange={(v) => updateColor('text', v)} />
+              {advanced && <ColorField label="Accent 2" value={theme.colors.accent2} onChange={(v) => updateColor('accent2', v)} />}
+              {advanced && <ColorField label="Gold"     value={theme.colors.gold}    onChange={(v) => updateColor('gold', v)} />}
             </div>
-          </div>
-        </label>
-      </Section>
-      </>}
+            {!advanced && <p className="text-[10px] text-slate-500">Switch to <strong className="text-slate-300">Advanced</strong> for the secondary accent and gold-tier colours.</p>}
+          </Section>
+        )}
 
-      {/* Header logo (applies to both game types) */}
-      <Section title="Header logo">
-        <AssetUpload
-          label="Logo image"
-          accept="image/png,image/svg+xml,image/webp"
-          kind="image"
-          value={theme.assets?.logo}
-          onChange={(v) => updateAsset('logo', v)}
-          hint="Replaces the procedural rocket logo in the game header."
-        />
-      </Section>
+        {activeTab === 'sprite' && (
+          <>
+            {hasScene && (
+              <div className="rounded-control border border-cyan-500/40 bg-cyan-500/10 p-3 text-[11px] text-cyan-200 leading-relaxed">
+                <strong>Scene pack active.</strong> The sprite / background pickers below are ignored while a scene is present — the uploaded parallax scene renders instead. They still publish, so switching the scene off later restores them.
+              </div>
+            )}
+            <Section title="Sprite">
+              <div className="grid grid-cols-2 gap-2">
+                {SPRITE_OPTIONS.map((opt) => (
+                  <PickCard key={opt.key} active={theme.sprite === opt.key} label={opt.label} description={opt.description} onClick={() => update('sprite', opt.key as SpriteKey)} />
+                ))}
+              </div>
+            </Section>
+            <Section title="Background">
+              <div className="grid grid-cols-2 gap-2">
+                {BACKGROUND_OPTIONS.map((opt) => (
+                  <PickCard key={opt.key} active={theme.background === opt.key} label={opt.label} description={opt.description} onClick={() => update('background', opt.key as BackgroundKey)} />
+                ))}
+              </div>
+            </Section>
+            <Section title="Custom sprites">
+              <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
+                Upload per-state sprites for ground / flying / crashed. The sprite swaps from ground → flying at the transition multiplier below.
+              </p>
+              <AssetUpload label="Ground sprite (idle)" accept="image/png,image/svg+xml,image/jpeg,image/webp" kind="image" value={theme.assets?.spriteGround} onChange={(v) => updateAsset('spriteGround', v)} hint="Shown during BETTING and early flight. Falls back to the flying sprite." />
+              <AssetUpload label="Flying sprite" accept="image/png,image/svg+xml,image/jpeg,image/webp" kind="image" value={theme.assets?.spriteFlying} onChange={(v) => updateAsset('spriteFlying', v)} hint="Shown after the multiplier crosses the transition threshold below." />
+              <AssetUpload label="Crashed sprite" accept="image/png,image/svg+xml,image/jpeg,image/webp" kind="image" value={theme.assets?.spriteCrashed} onChange={(v) => updateAsset('spriteCrashed', v)} hint="Shown during the crash animation. Falls back to the flying sprite." />
+              {advanced && (
+                <AssetUpload label="Single sprite (legacy)" accept="image/png,image/svg+xml,image/jpeg,image/webp" kind="image" value={theme.assets?.sprite} onChange={(v) => updateAsset('sprite', v)} hint="Used for all states if no per-state sprite is set." />
+              )}
+              <SliderField label="Fully airborne at" min={1.0} max={5.0} step={0.1} value={theme.spriteTransitionAt ?? 1.5} onChange={(v) => update('spriteTransitionAt', v)} display={`${(theme.spriteTransitionAt ?? 1.5).toFixed(1)}x`} hint="At this multiplier the sprite swaps ground → flying and reaches the cruise point. Default 1.5x." />
+            </Section>
+          </>
+        )}
 
-      {/* Custom sounds */}
-      <Section title="Custom sounds">
-        <AssetUpload
-          label="Takeoff whoosh"
-          accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3"
-          kind="audio"
-          value={theme.sounds?.takeoff}
-          onChange={(v) => updateSound('takeoff', v)}
-          hint="Plays when the round transitions to flight."
-        />
-        <AssetUpload
-          label="Cashout chime"
-          accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3"
-          kind="audio"
-          value={theme.sounds?.cashout}
-          onChange={(v) => updateSound('cashout', v)}
-          hint="Plays on a successful cashout."
-        />
-        <AssetUpload
-          label="Crash boom"
-          accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3"
-          kind="audio"
-          value={theme.sounds?.crash}
-          onChange={(v) => updateSound('crash', v)}
-          hint="Plays when the round crashes."
-        />
-        <AssetUpload
-          label="Bet placed ping"
-          accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3"
-          kind="audio"
-          value={theme.sounds?.bet}
-          onChange={(v) => updateSound('bet', v)}
-        />
-        <AssetUpload
-          label="UI tick"
-          accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3"
-          kind="audio"
-          value={theme.sounds?.tick}
-          onChange={(v) => updateSound('tick', v)}
-        />
-        <AssetUpload
-          label="Background music loop"
-          accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3"
-          kind="audio"
-          value={theme.sounds?.music}
-          onChange={(v) => updateSound('music', v)}
-          hint="Loops continuously while the game is running. Keep file size small."
-          warnBytes={3_000_000}
-        />
-      </Section>
+        {activeTab === 'gif' && (
+          <Section title="GIF animations">
+            <p className="text-[10px] text-slate-500 leading-relaxed -mt-1">
+              Each phase shows its own full-screen clip; the multiplier overlays it. Sprite / background settings aren't used in GIF mode.
+            </p>
+            <AssetUpload label="Loading (BETTING)" accept="image/gif,image/webp,image/png,video/mp4,video/webm" kind="image" value={theme.gifs?.loading} onChange={(v) => updateGif('loading', v)} hint="Plays during the place-bet countdown." warnBytes={5_000_000} />
+            <AssetUpload label="Started (FLYING)" accept="image/gif,image/webp,image/png,video/mp4,video/webm" kind="image" value={theme.gifs?.flying} onChange={(v) => updateGif('flying', v)} hint="Plays from the moment the round starts." warnBytes={5_000_000} />
+            {advanced && (
+              <>
+                <AssetUpload label="Threshold (optional)" accept="image/gif,image/webp,image/png,video/mp4,video/webm" kind="image" value={theme.gifs?.flyingThreshold} onChange={(v) => updateGif('flyingThreshold', v)} hint="Takes over FLYING once the multiplier crosses the value below." warnBytes={5_000_000} />
+                {theme.gifs?.flyingThreshold && (
+                  <SliderField label="Threshold multiplier" min={1.1} max={10.0} step={0.1} value={theme.gifs?.flyingThresholdAt ?? DEFAULT_GIF_THRESHOLD_AT} onChange={(v) => updateGif('flyingThresholdAt', v)} display={`${(theme.gifs?.flyingThresholdAt ?? DEFAULT_GIF_THRESHOLD_AT).toFixed(1)}x`} hint="At this multiplier the Threshold clip replaces the Started clip." />
+                )}
+              </>
+            )}
+            <AssetUpload label="Crashed" accept="image/gif,image/webp,image/png,video/mp4,video/webm" kind="image" value={theme.gifs?.crashed} onChange={(v) => updateGif('crashed', v)} hint="Plays on crash (and through the brief result phase)." warnBytes={5_000_000} />
+          </Section>
+        )}
 
-      {/* Tuning */}
-      <Section title="Game tuning">
-        <SliderField
-          label="RTP"
-          min={0.80} max={0.99} step={0.01}
-          value={theme.rtp}
-          onChange={(v) => update('rtp', v)}
-          display={`${(theme.rtp * 100).toFixed(0)}%`}
-          hint="The expected return per unit staked under a fixed cashout strategy."
-        />
-        <SliderField
-          label="Growth rate"
-          min={0.03} max={0.15} step={0.005}
-          value={theme.growthRate}
-          onChange={(v) => update('growthRate', v)}
-          display={theme.growthRate.toFixed(3)}
-          hint={`At ${theme.growthRate}, 2× takes ${(Math.log(2) / theme.growthRate).toFixed(1)}s, 10× takes ${(Math.log(10) / theme.growthRate).toFixed(1)}s.`}
-        />
-        <SliderField
-          label="Betting window"
-          min={3000} max={10000} step={500}
-          value={theme.bettingMs}
-          onChange={(v) => update('bettingMs', v)}
-          display={`${(theme.bettingMs / 1000).toFixed(1)}s`}
-          hint="How long players have to place bets before the round starts."
-        />
-        <SliderField
-          label="Max multiplier"
-          min={100} max={10000} step={100}
-          value={theme.maxMultiplier}
-          onChange={(v) => update('maxMultiplier', v)}
-          display={`${theme.maxMultiplier}x`}
-          hint="Hard ceiling on the displayed multiplier."
-        />
-      </Section>
+        {activeTab === 'motion' && (
+          <>
+            <Section title="Flight motion">
+              {(() => {
+                const anim = { ...DEFAULT_FLIGHT_ANIMATION, ...(theme.flightAnimation ?? {}) };
+                const setAnim = (patch: Partial<FlightAnimation>) => update('flightAnimation', { ...anim, ...patch });
+                const trajectory: FlightTrajectory = theme.flightTrajectory ?? DEFAULT_FLIGHT_TRAJECTORY;
+                return (
+                  <>
+                    <div>
+                      <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400 font-semibold mb-1.5">Trajectory</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <PickCard active={trajectory === 'elliptic'} label="Elliptic" description="Quarter-ellipse from bottom-left to upper-right." onClick={() => update('flightTrajectory', 'elliptic')} />
+                        <PickCard active={trajectory === 'straight'} label="Straight" description="Takes off diagonally, then levels off horizontally." onClick={() => update('flightTrajectory', 'straight')} />
+                      </div>
+                    </div>
+                    <SliderField label="Cruise point on arc" min={0.50} max={0.95} step={0.01} value={anim.cruisePoint} onChange={(v) => setAnim({ cruisePoint: v })} display={`${Math.round(anim.cruisePoint * 100)}% of arc`} hint="How far up the arc the sprite settles." />
+                    <SliderField label="Bob distance" min={0} max={0.20} step={0.01} value={anim.bobAmplitude} onChange={(v) => setAnim({ bobAmplitude: v })} display={anim.bobAmplitude === 0 ? 'no bob' : `±${Math.round(anim.bobAmplitude * 100)}% of arc`} hint="How far the sprite slides along the arc while cruising. 0 = none." />
+                    <SliderField label="Bob period" min={400} max={4000} step={100} value={anim.bobPeriodMs} onChange={(v) => setAnim({ bobPeriodMs: v })} display={`${(anim.bobPeriodMs / 1000).toFixed(1)}s / cycle`} hint="Time for one forward-and-back cycle. Disabled when bob distance is 0." />
+                  </>
+                );
+              })()}
+            </Section>
+            <Section title="Custom background">
+              <AssetUpload label="Background image" accept="image/png,image/jpeg,image/webp" kind="image" value={theme.assets?.background} onChange={(v) => updateAsset('background', v)} hint="Full-canvas image. Leave empty for the procedural scene." />
+              <Field label="Motion direction">
+                <select
+                  value={theme.backgroundMotion?.direction ?? 'none'}
+                  onChange={(e) => update('backgroundMotion', { direction: e.target.value as 'none' | 'left' | 'right' | 'up' | 'down', speed: theme.backgroundMotion?.speed ?? 'medium', tieToMultiplier: theme.backgroundMotion?.tieToMultiplier ?? false })}
+                  className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control h-9 px-3 text-sm focus:outline-none focus:border-cyan-500/60"
+                >
+                  <option value="none">None (static)</option>
+                  <option value="left">Scroll left (moves right)</option>
+                  <option value="right">Scroll right</option>
+                  <option value="up">Scroll up (climbing)</option>
+                  <option value="down">Scroll down (descending)</option>
+                </select>
+              </Field>
+              <Field label="Motion speed">
+                <select
+                  value={theme.backgroundMotion?.speed ?? 'medium'}
+                  onChange={(e) => update('backgroundMotion', { direction: theme.backgroundMotion?.direction ?? 'none', speed: e.target.value as 'slow' | 'medium' | 'fast', tieToMultiplier: theme.backgroundMotion?.tieToMultiplier ?? false })}
+                  className="w-full bg-ink-800/80 border border-ink-500/40 rounded-control h-9 px-3 text-sm focus:outline-none focus:border-cyan-500/60"
+                >
+                  <option value="slow">Slow</option>
+                  <option value="medium">Medium</option>
+                  <option value="fast">Fast</option>
+                </select>
+              </Field>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={!!theme.backgroundMotion?.tieToMultiplier}
+                  onChange={(e) => update('backgroundMotion', { direction: theme.backgroundMotion?.direction ?? 'none', speed: theme.backgroundMotion?.speed ?? 'medium', tieToMultiplier: e.target.checked })}
+                  className="w-4 h-4 accent-cyan-500"
+                />
+                <div className="leading-tight">
+                  <div className="text-xs font-semibold text-slate-200">Tie speed to multiplier</div>
+                  <div className="text-[10px] text-slate-500">Background scrolls faster as the round grows.</div>
+                </div>
+              </label>
+            </Section>
+          </>
+        )}
+
+        {activeTab === 'audio' && (
+          <Section title="Custom sounds">
+            <AssetUpload label="Takeoff whoosh" accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3" kind="audio" value={theme.sounds?.takeoff} onChange={(v) => updateSound('takeoff', v)} hint="Plays when the round transitions to flight." />
+            <AssetUpload label="Cashout chime" accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3" kind="audio" value={theme.sounds?.cashout} onChange={(v) => updateSound('cashout', v)} hint="Plays on a successful cashout." />
+            <AssetUpload label="Crash boom" accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3" kind="audio" value={theme.sounds?.crash} onChange={(v) => updateSound('crash', v)} hint="Plays when the round crashes." />
+            <AssetUpload label="Bet placed ping" accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3" kind="audio" value={theme.sounds?.bet} onChange={(v) => updateSound('bet', v)} />
+            <AssetUpload label="UI tick" accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3" kind="audio" value={theme.sounds?.tick} onChange={(v) => updateSound('tick', v)} />
+            <AssetUpload label="Background music loop" accept="audio/mpeg,audio/wav,audio/ogg,audio/mp3" kind="audio" value={theme.sounds?.music} onChange={(v) => updateSound('music', v)} hint="Loops while the game runs. Keep it small." warnBytes={3_000_000} />
+          </Section>
+        )}
+
+        {activeTab === 'math' && (
+          <Section title="Game tuning">
+            <SliderField label="RTP" min={0.80} max={0.99} step={0.01} value={theme.rtp} onChange={(v) => update('rtp', v)} display={`${(theme.rtp * 100).toFixed(0)}%`} hint="Expected return per unit staked under a fixed cashout strategy." />
+            <SliderField label="Betting window" min={3000} max={10000} step={500} value={theme.bettingMs} onChange={(v) => update('bettingMs', v)} display={`${(theme.bettingMs / 1000).toFixed(1)}s`} hint="How long players have to place bets before the round starts." />
+            {advanced && (
+              <>
+                <SliderField label="Growth rate" min={0.03} max={0.15} step={0.005} value={theme.growthRate} onChange={(v) => update('growthRate', v)} display={theme.growthRate.toFixed(3)} hint={`At ${theme.growthRate}, 2× takes ${(Math.log(2) / theme.growthRate).toFixed(1)}s, 10× takes ${(Math.log(10) / theme.growthRate).toFixed(1)}s.`} />
+                <SliderField label="Max multiplier" min={100} max={10000} step={100} value={theme.maxMultiplier} onChange={(v) => update('maxMultiplier', v)} display={`${theme.maxMultiplier}x`} hint="Hard ceiling on the displayed multiplier." />
+              </>
+            )}
+            {!advanced && <p className="text-[10px] text-slate-500">Switch to <strong className="text-slate-300">Advanced</strong> for growth rate and max multiplier.</p>}
+          </Section>
+        )}
+      </div>
     </div>
   );
 }

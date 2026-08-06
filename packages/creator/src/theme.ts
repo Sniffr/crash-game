@@ -166,6 +166,15 @@ export interface Theme {
   gameType?: GameType;
   /** GIF slots, used only when gameType === 'gif'. */
   gifs?: ThemeGifs;
+
+  /**
+   * Layered parallax scene pack (advanced sprite renderer). Authored outside the
+   * Creator (uploaded to S3 + wired into the theme JSON) and NOT edited here, but
+   * declared so the editor treats it as first-class: it round-trips untouched on
+   * publish and the UI can warn before an edit would orphan it. `gameType` must
+   * stay `'sprite'` for a scene to render — see the scene guard in App.tsx.
+   */
+  scene?: { baseUrl: string; [k: string]: unknown };
 }
 
 export const THEME_VERSION = 1;

@@ -46,6 +46,14 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const clientDist = path.join(__dirname, '../../../client/dist');
+const creatorDist = path.join(__dirname, '../../../creator/dist');
+
+// The Creator studio is served on its own host (default creator.games.soa.plus);
+// every other host gets the game. Same pod, same API — routing is by Host only.
+const CREATOR_HOST = process.env.CREATOR_HOST ?? 'creator.games.soa.plus';
+function isCreatorHost(req: express.Request): boolean {
+  return req.hostname === CREATOR_HOST;
+}
 
 // ─── Launch error HTML template (loaded once at module initialisation) ────────
 const LAUNCH_ERROR_TEMPLATE_PATH = path.join(__dirname, '../views/launch-error.html');
@@ -126,8 +134,10 @@ function sendStoreError(res: express.Response, err: unknown) {
 // ─── Route registration ───────────────────────────────────────────────────────
 
 export function registerPublicRoutes(app: express.Application, deps: PublicRouteDeps) {
-  // ─── Static client ─────────────────────────────────────────────────────────
-  app.use(express.static(clientDist));
+  // ─── Static assets (host-aware: studio on the creator host, else the game) ──
+  const serveClient = express.static(clientDist);
+  const serveCreator = express.static(creatorDist);
+  app.use((req, res, next) => (isCreatorHost(req) ? serveCreator : serveClient)(req, res, next));
 
   // ─── Games catalogue (public) ────────────────────────────────────────────────
   // Lobbies + the Creator list active games. No theme_json here — the theme
@@ -402,8 +412,8 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // so the SPA can render. Direct loads of /?session=abc and similar work.
   // Must come AFTER express.static and all /api routes.
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/') || req.path === '/ws') return next();
-    const indexHtml = path.join(clientDist, 'index.html');
+    if (req.path.startsWith('/api/') || req.path.startsWith('/admin/') || req.path === '/ws') return next();
+    const indexHtml = path.join(isCreatorHost(req) ? creatorDist : clientDist, 'index.html');
     if (!fs.existsSync(indexHtml)) return next();
     res.sendFile(indexHtml);
   });

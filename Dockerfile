@@ -22,8 +22,9 @@
 # Optional env:
 #   PORT (default 3001) · HOST (0.0.0.0) · ROCKSDB_PATH (/app/data/rocksdb) · LOG_LEVEL (info)
 #
-# The image ships the game (client + server) only. The Creator stays a
-# dev-time tool — it is deleted from the image below.
+# The image ships the game (client + server) and the Creator studio. The studio
+# is served on the creator host (CREATOR_HOST, default creator.games.soa.plus)
+# and gated by admin login; every other host gets the game.
 
 # ─── Build stage ───────────────────────────────────────────────────────────
 # Base image pinned by digest (Task 8.3) — captured 2026-05-27 from
@@ -39,17 +40,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Bring in source. The Creator package is deleted before install so it isn't
-# baked into the production image at all.
+# Bring in source.
 COPY . .
-RUN rm -rf packages/creator
 
 # Install everything (workspaces). devDeps are needed because we use tsx as
-# the production runtime and Vite to build the client.
+# the production runtime and Vite to build the client + creator.
 RUN npm install --no-audit --no-fund
 
 # Build the client (Vite → packages/client/dist)
 RUN npm run --workspace=packages/client build
+
+# Build the Creator studio (Vite → packages/creator/dist). Served by the same
+# server on the creator host (creator.games.soa.plus), gated by admin login.
+RUN npm run --workspace=packages/creator build
 
 # ─── Runtime stage ─────────────────────────────────────────────────────────
 # Same pinned digest as the build stage.
