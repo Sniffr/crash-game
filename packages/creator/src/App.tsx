@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import PreviewCanvas from './PreviewCanvas';
 import AssetUpload from './AssetUpload';
+import SceneBuilder from './SceneBuilder';
 import {
   BACKGROUND_OPTIONS,
   DEFAULT_FLIGHT_ANIMATION,
@@ -55,6 +56,31 @@ export default function App() {
   // Editor UX: Simple (essentials) vs Advanced (everything), and the active tab.
   const [advanced, setAdvanced] = useState(false);
   const [tab, setTab] = useState<string>('brand');
+
+  // Resizable editor / preview split — drag the divider to shrink the canvas and
+  // give the (many-fielded) form more room. Persisted so it sticks per browser.
+  const [editorW, setEditorW] = useState<number>(() => {
+    const v = Number(localStorage.getItem('crash-creator-editorw'));
+    return v >= 360 && v <= 1100 ? v : 460;
+  });
+  useEffect(() => { try { localStorage.setItem('crash-creator-editorw', String(editorW)); } catch { /* ignore */ } }, [editorW]);
+  const startDrag = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const move = (ev: MouseEvent) => setEditorW(Math.min(1100, Math.max(360, ev.clientX)));
+    const up = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      document.body.style.cursor = ''; document.body.style.userSelect = '';
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+    document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+  }, []);
+
+  // Scene-pack image files pending upload (filename → data URL). Transient and
+  // NOT persisted — they can be multiple MB, and only the resolved S3 URLs
+  // (theme.scene.baseUrl) belong in the saved theme.
+  const [sceneFiles, setSceneFiles] = useState<Record<string, string>>({});
 
   useEffect(() => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(theme)); } catch { /* ignore */ }
@@ -159,6 +185,29 @@ export default function App() {
         }
       }
 
+      // Scene pack: upload any freshly-added scene images to games/<id>/scene/…
+      // and set the manifest baseUrl. If nothing new was added we keep the
+      // existing baseUrl (editing a scene game without touching its art).
+      if (uploaded.scene && Object.keys(sceneFiles).length > 0) {
+        const manifest = { ...(uploaded.scene as Record<string, unknown>) };
+        let baseUrl = (manifest.baseUrl as string) || '';
+        for (const [fname, dataUrl] of Object.entries(sceneFiles)) {
+          const up = await fetch('/api/assets/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ gameId, assetKey: `scene/${fname}`, dataUrl }),
+          });
+          if (!up.ok) {
+            const e = await up.json().catch(() => ({}));
+            throw new Error(e?.error?.message ?? `Scene upload failed for ${fname} (${up.status})`);
+          }
+          const { url } = (await up.json()) as { url: string };
+          baseUrl = url.slice(0, url.lastIndexOf('/')); // the scene/ directory
+        }
+        manifest.baseUrl = baseUrl;
+        uploaded.scene = manifest as Theme['scene'];
+      }
+
       const payload: Theme = { ...uploaded, version: THEME_VERSION };
       const body = JSON.stringify({
         gameId,
@@ -182,13 +231,14 @@ export default function App() {
         throw new Error(err?.error?.message ?? `Publish failed (${res.status})`);
       }
       alert(`Published "${theme.brandName}" as game "${gameId}" (${exists.ok ? 'updated' : 'created'}).\nLaunch with ?game=${gameId}`);
+      setSceneFiles({}); // uploaded — clear the pending scene images
       void refreshGames(); // a newly-created game now appears in "Open game"
     } catch (e) {
       alert('Publish failed: ' + (e as Error).message);
     } finally {
       setPublishing(false);
     }
-  }, [theme, token]);
+  }, [theme, token, sceneFiles]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const handleImport = (file: File) => {
@@ -236,8 +286,11 @@ export default function App() {
         }}
       />
 
-      <main className="flex-1 grid grid-cols-1 lg:grid-cols-[420px_1fr] min-h-0 overflow-hidden">
-        {/* Editor — tabbed, Simple/Advanced */}
+      <main
+        className="flex-1 grid grid-cols-1 min-h-0 overflow-hidden lg:[grid-template-columns:var(--ew)_6px_1fr]"
+        style={{ ['--ew' as string]: `${editorW}px` }}
+      >
+        {/* Editor — tabbed, Simple/Advanced, resizable */}
         <aside className="border-r border-ink-500/40 bg-ink-900/40 backdrop-blur-md flex flex-col min-h-0 lg:max-h-[calc(100vh-57px)]">
           <EditorForm
             theme={theme}
@@ -250,14 +303,24 @@ export default function App() {
             updateSound={updateSound}
             updateGif={updateGif}
             onLoadPreset={(key) => setTheme(PRESETS[key])}
+            sceneFiles={sceneFiles}
+            setSceneFiles={setSceneFiles}
           />
         </aside>
 
-        {/* Preview — compact, centered, 16:9 to match the game stage */}
-        <section className="flex flex-col min-h-0 bg-ink-950">
+        {/* Drag handle */}
+        <div
+          onMouseDown={startDrag}
+          onDoubleClick={() => setEditorW(460)}
+          title="Drag to resize · double-click to reset"
+          className="hidden lg:block cursor-col-resize bg-ink-500/25 hover:bg-cyan-500/60 active:bg-cyan-400 transition"
+        />
+
+        {/* Preview — fills the (resizable) column; shrink it to grow the form */}
+        <section className="flex flex-col min-h-0 bg-ink-950 overflow-hidden">
           <BrandStrip theme={theme} />
           <div className="flex-1 min-h-0 grid place-items-center p-5 overflow-auto">
-            <div className="w-full max-w-[620px] aspect-video relative rounded-xl overflow-hidden border border-ink-500/40 shadow-2xl">
+            <div className="w-full max-w-[860px] aspect-video relative rounded-xl overflow-hidden border border-ink-500/40 shadow-2xl">
               <PreviewCanvas theme={theme} />
             </div>
           </div>
@@ -495,6 +558,7 @@ function SampleControls({ theme }: { theme: Theme }) {
 // ─── Editor form ────────────────────────────────────────────────────────────
 function EditorForm({
   theme, advanced, tab, setTab, update, updateColor, updateAsset, updateSound, updateGif, onLoadPreset,
+  sceneFiles, setSceneFiles,
 }: {
   theme: Theme;
   advanced: boolean;
@@ -506,9 +570,11 @@ function EditorForm({
   updateSound: <K extends keyof ThemeSounds>(k: K, v: ThemeSounds[K]) => void;
   updateGif: <K extends keyof ThemeGifs>(k: K, v: ThemeGifs[K]) => void;
   onLoadPreset: (key: string) => void;
+  sceneFiles: Record<string, string>;
+  setSceneFiles: (f: Record<string, string>) => void;
 }) {
   const gameType: GameType = theme.gameType ?? 'sprite';
-  const hasScene = !!theme.scene?.baseUrl;
+  const hasScene = !!theme.scene;
 
   // Layers (tabs) depend on render mode + Simple/Advanced, so each is short (no
   // endless scroll) and only shows fields the current mode actually uses.
@@ -517,6 +583,7 @@ function EditorForm({
     { id: 'look', label: 'Colors' },
     gameType === 'gif' ? { id: 'gif', label: 'Animations' } : { id: 'sprite', label: 'Sprite' },
     ...(gameType === 'sprite' && advanced ? [{ id: 'motion', label: 'Motion' }] : []),
+    ...(gameType === 'sprite' && advanced ? [{ id: 'scene', label: `Scene${hasScene ? ' ●' : ''}` }] : []),
     ...(advanced ? [{ id: 'audio', label: 'Audio' }] : []),
     { id: 'math', label: 'Math' },
   ];
@@ -758,6 +825,17 @@ function EditorForm({
               </label>
             </Section>
           </>
+        )}
+
+        {activeTab === 'scene' && (
+          <Section title="Scene pack (advanced sprite)">
+            <SceneBuilder
+              scene={theme.scene as Record<string, unknown> | undefined}
+              setScene={(s) => update('scene', s as Theme['scene'])}
+              sceneFiles={sceneFiles}
+              setSceneFiles={setSceneFiles}
+            />
+          </Section>
         )}
 
         {activeTab === 'audio' && (

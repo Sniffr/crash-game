@@ -155,9 +155,15 @@ export default function Lobby() {
   const featured = games?.[0];
 
   return (
-    <div className="min-h-screen text-neutral-100 relative">
+    <div className="min-h-screen text-neutral-100 relative overflow-x-hidden">
+      {/* Ambient background — soft brand glow, sits behind everything */}
+      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10">
+        <div className="absolute -top-40 -left-32 w-[38rem] h-[38rem] rounded-full bg-brand-500/10 blur-[120px]" />
+        <div className="absolute top-1/3 -right-40 w-[34rem] h-[34rem] rounded-full bg-bet-400/10 blur-[130px]" />
+      </div>
+
       {/* ─── Header ──────────────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-20 flex items-center justify-between px-4 sm:px-6 h-16 border-b border-white/5 bg-space-700/80 backdrop-blur-xl">
+      <header className="sticky top-0 z-20 flex items-center justify-between px-4 sm:px-6 h-16 border-b border-white/5 bg-space-950/60 backdrop-blur-xl">
         <div className="flex items-center gap-3 min-w-0">
           <LobbyLogo />
           <div className="flex flex-col min-w-0 leading-none">
@@ -253,30 +259,79 @@ export default function Lobby() {
 // ─── Hero band ──────────────────────────────────────────────────────────────
 function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
   return (
-    <div className="relative overflow-hidden rounded-panel mb-8 border border-white/5 bg-space-800">
-      {/* thin brand accent along the top edge — flat, no glow */}
-      <div className="absolute inset-x-0 top-0 h-1 bg-brand-500" />
-      <div className="relative flex flex-col sm:flex-row items-start sm:items-center justify-between gap-5 p-6 sm:p-8">
-        <div className="max-w-lg">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-500/15 text-brand-400 text-[10px] font-extrabold uppercase tracking-[0.16em] px-2.5 py-1 mb-3">
-            <RocketGlyph className="w-3 h-3" /> Featured
+    <div className="relative overflow-hidden rounded-panel mb-6 border border-white/10 bg-gradient-to-br from-space-800 to-space-900">
+      {/* gradient mesh accents */}
+      <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-24 right-10 w-96 h-96 rounded-full bg-brand-500/20 blur-[90px]" />
+        <div className="absolute -bottom-28 -left-10 w-96 h-96 rounded-full bg-bet-400/15 blur-[90px]" />
+      </div>
+
+      <div className="relative grid md:grid-cols-[1.2fr_1fr] gap-6 p-6 sm:p-9 items-center">
+        <div className="max-w-xl">
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-500/15 text-brand-300 text-[10px] font-extrabold uppercase tracking-[0.16em] px-2.5 py-1 mb-4 ring-1 ring-brand-500/25">
+            <RocketGlyph className="w-3 h-3" /> Featured · {game.name}
           </span>
-          <h2 className="font-display font-black text-3xl sm:text-4xl leading-[1.05] tracking-tight">
-            Cash out before it crashes.
+          <h2 className="font-display font-black text-4xl sm:text-5xl leading-[1.02] tracking-tight">
+            Cash out before<br className="hidden sm:block" /> it <span className="text-brand-400">crashes.</span>
           </h2>
-          <p className="text-sm text-neutral-300/90 mt-2">
+          <p className="text-sm text-neutral-300/90 mt-3 leading-relaxed">
             Watch the multiplier climb and grab it in time. Every round is provably fair — verify the seed yourself.
           </p>
-          <div className="flex items-center gap-3 mt-5">
+          <div className="flex flex-wrap items-center gap-3 mt-6">
             <button
               onClick={onPlay}
-              className="px-6 py-3 rounded-control font-black text-space-950 bg-brand-500 hover:bg-brand-400 transition"
+              className="px-6 py-3 rounded-control font-black text-space-950 bg-brand-500 hover:bg-brand-400 transition shadow-lg shadow-brand-500/20"
             >
-              Play {game.name} — free
+              Play free
             </button>
             <span className="text-xs text-neutral-400 font-semibold">No signup for demo</span>
           </div>
+          <div className="flex flex-wrap gap-x-5 gap-y-2 mt-6 text-[11px] font-semibold text-neutral-400">
+            <TrustChip>Provably fair</TrustChip>
+            <TrustChip>Instant cash-out</TrustChip>
+            <TrustChip>Live multiplayer</TrustChip>
+          </div>
         </div>
+
+        {/* Animated multiplier motif */}
+        <div className="hidden md:flex items-center justify-center">
+          <HeroMultiplier />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TrustChip({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-bet-400" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+      {children}
+    </span>
+  );
+}
+
+// A looping climb-then-reset multiplier — a tiny live taste of the game.
+function HeroMultiplier() {
+  const [m, setM] = useState(1.0);
+  useEffect(() => {
+    let raf = 0, t0 = performance.now(), cap = 2 + Math.random() * 8;
+    const tick = (now: number) => {
+      const t = (now - t0) / 1000;
+      const v = Math.pow(Math.E, 0.14 * t);
+      if (v >= cap) { t0 = now; cap = 2 + Math.random() * 8; setM(1.0); }
+      else setM(v);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const col = m >= 5 ? '#fbbf24' : m >= 2 ? '#22d3ee' : '#34d399';
+  return (
+    <div className="relative w-full max-w-xs aspect-video rounded-2xl border border-white/10 bg-space-950/60 grid place-items-center overflow-hidden">
+      <div aria-hidden className="absolute inset-0 opacity-40" style={{ background: `radial-gradient(circle at 50% 60%, ${col}22, transparent 60%)` }} />
+      <div className="relative text-5xl font-black tabular-nums tracking-tight" style={{ color: col, textShadow: `0 0 24px ${col}66` }}>
+        {m.toFixed(2)}x
       </div>
     </div>
   );
@@ -301,39 +356,50 @@ function GameCard({
   game: Game; accent: GameAccents; onDemo: () => void; onReal: () => void;
 }) {
   return (
-    <div className="group rounded-panel border border-white/5 bg-space-800 overflow-hidden flex flex-col transition duration-200 hover:border-brand-500/40 hover:-translate-y-1">
+    <div className="group rounded-panel border border-white/10 bg-space-800/70 overflow-hidden flex flex-col transition duration-200 hover:border-brand-500/50 hover:-translate-y-1 hover:shadow-2xl hover:shadow-brand-500/10">
       {/* Preview banner painted with the game's own theme accents (real identity) */}
       <div
-        className="h-36 relative flex items-start justify-between p-3"
+        className="aspect-[16/10] relative flex items-start justify-between p-3 overflow-hidden"
         style={{ background: `linear-gradient(135deg, ${accent.from}, ${accent.to})` }}
       >
-        <div className="absolute inset-0 bg-gradient-to-t from-space-950/70 via-transparent to-transparent" />
+        {/* gloss sweep on hover */}
+        <div aria-hidden className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-out bg-gradient-to-r from-transparent via-white/15 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-space-950/80 via-transparent to-transparent" />
         <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-[0.14em] bg-brand-500 text-space-950">
           New
         </span>
         <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] bg-space-950/50 backdrop-blur-sm border border-white/10 text-white">
           {game.gameType}
         </span>
-      </div>
-
-      <div className="p-4 flex flex-col gap-3 flex-1">
-        <h3 className="font-display font-extrabold text-base tracking-tight truncate" title={game.name}>
+        {/* hover play affordance */}
+        <div aria-hidden className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition duration-200">
+          <span className="grid place-items-center w-14 h-14 rounded-full bg-space-950/60 backdrop-blur-sm border border-white/20 scale-90 group-hover:scale-100 transition">
+            <svg viewBox="0 0 24 24" className="w-6 h-6 text-white translate-x-0.5" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+          </span>
+        </div>
+        {/* game name over the banner */}
+        <h3 className="absolute z-10 bottom-2.5 left-3 right-3 font-display font-extrabold text-lg tracking-tight truncate drop-shadow" title={game.name}>
           {game.name}
         </h3>
-        <div className="mt-auto grid grid-cols-2 gap-2">
-          <button
-            onClick={onDemo}
-            className="rounded-control px-3 py-2.5 text-xs font-bold uppercase tracking-wide bg-space-900/80 border border-white/5 text-neutral-200 hover:bg-space-600/60 hover:text-white transition"
-          >
-            Demo
-          </button>
-          <button
-            onClick={onReal}
-            className="rounded-control px-3 py-2.5 text-xs font-bold uppercase tracking-wide bg-brand-500 text-space-950 hover:bg-brand-400 transition"
-          >
-            Real
-          </button>
-        </div>
+      </div>
+
+      <div className="p-3.5 flex items-center gap-2">
+        <span className="mr-auto inline-flex items-center gap-1.5 text-[10px] font-semibold text-neutral-400">
+          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-bet-400" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+          Provably fair
+        </span>
+        <button
+          onClick={onDemo}
+          className="rounded-control px-4 py-2 text-xs font-bold uppercase tracking-wide bg-space-900/80 border border-white/10 text-neutral-200 hover:bg-space-600/60 hover:text-white transition"
+        >
+          Demo
+        </button>
+        <button
+          onClick={onReal}
+          className="rounded-control px-4 py-2 text-xs font-bold uppercase tracking-wide bg-brand-500 text-space-950 hover:bg-brand-400 transition"
+        >
+          Real
+        </button>
       </div>
     </div>
   );
