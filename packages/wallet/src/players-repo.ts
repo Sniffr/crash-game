@@ -31,6 +31,10 @@ export interface Player {
   playerId: string;
   username: string;
   createdAt: string;
+  currency: string;
+  phone: string | null;
+  email: string | null;
+  country: string | null;
 }
 
 /** Player + hash — only returned by getByUsernameWithHash (login path). */
@@ -47,6 +51,10 @@ interface PlayerRow {
   username: string;
   password_hash: string;
   created_at: Date | string;
+  currency: string;
+  phone: string | null;
+  email: string | null;
+  country: string | null;
 }
 
 function rowToPlayer(row: PlayerRow): Player {
@@ -55,6 +63,10 @@ function rowToPlayer(row: PlayerRow): Player {
     username: row.username,
     // timestamptz comes back as a Date from pg — normalise to an ISO string.
     createdAt: row.created_at instanceof Date ? row.created_at.toISOString() : String(row.created_at),
+    currency: row.currency,
+    phone: row.phone,
+    email: row.email,
+    country: row.country,
   };
 }
 
@@ -73,13 +85,24 @@ export class PlayersRepo {
   }
 
   /** Insert a new player. Throws DuplicateUsernameError on unique violation. */
-  async create(username: string, passwordHash: string): Promise<Player> {
+  async create(
+    username: string,
+    passwordHash: string,
+    opts: { currency?: string; phone?: string | null; email?: string | null; country?: string | null } = {},
+  ): Promise<Player> {
     try {
       const { rows } = await this.pool.query<PlayerRow>(
-        `INSERT INTO players (username, password_hash)
-         VALUES ($1, $2)
-         RETURNING player_id, username, password_hash, created_at`,
-        [username, passwordHash],
+        `INSERT INTO players (username, password_hash, currency, phone, email, country)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING player_id, username, password_hash, created_at, currency, phone, email, country`,
+        [
+          username,
+          passwordHash,
+          opts.currency ?? 'KES',
+          opts.phone ?? null,
+          opts.email ?? null,
+          opts.country ?? null,
+        ],
       );
       return rowToPlayer(rows[0]!);
     } catch (err: unknown) {
@@ -93,7 +116,7 @@ export class PlayersRepo {
   /** Fetch a player by username (public shape, no hash). */
   async getByUsername(username: string): Promise<Player | null> {
     const { rows } = await this.pool.query<PlayerRow>(
-      `SELECT player_id, username, password_hash, created_at
+      `SELECT player_id, username, password_hash, created_at, currency, phone, email, country
        FROM players WHERE username = $1`,
       [username],
     );
@@ -103,7 +126,7 @@ export class PlayersRepo {
   /** Fetch a player by username, including the password hash (login path only). */
   async getByUsernameWithHash(username: string): Promise<PlayerWithHash | null> {
     const { rows } = await this.pool.query<PlayerRow>(
-      `SELECT player_id, username, password_hash, created_at
+      `SELECT player_id, username, password_hash, created_at, currency, phone, email, country
        FROM players WHERE username = $1`,
       [username],
     );
@@ -115,7 +138,7 @@ export class PlayersRepo {
   /** Fetch a player by id (public shape, no hash). */
   async getById(playerId: string): Promise<Player | null> {
     const { rows } = await this.pool.query<PlayerRow>(
-      `SELECT player_id, username, password_hash, created_at
+      `SELECT player_id, username, password_hash, created_at, currency, phone, email, country
        FROM players WHERE player_id = $1`,
       [playerId],
     );

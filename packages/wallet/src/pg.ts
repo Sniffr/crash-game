@@ -77,6 +77,11 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       created_at    timestamptz NOT NULL DEFAULT now()
     );
 
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS currency text NOT NULL DEFAULT 'KES';
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS phone    text;
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS email    text;
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS country  text;
+
     CREATE TABLE IF NOT EXISTS wallet_ledger (
       id           bigserial PRIMARY KEY,
       player_id    uuid NOT NULL REFERENCES players(player_id),
