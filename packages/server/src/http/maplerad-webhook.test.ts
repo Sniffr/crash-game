@@ -80,7 +80,7 @@ describe('maplerad webhook router', () => {
     const playerId = player.playerId;
     const reference = `game-dep-${playerId}-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 5000 });
-    verifyTransactionResult = { status: 'success' };
+    verifyTransactionResult = { id: 'tx1', reference, amount: 5000, currency: 'KES', status: 'success' };
 
     const raw = JSON.stringify({
       event: 'collection.successful',
@@ -130,6 +130,59 @@ describe('maplerad webhook router', () => {
     });
     const sig = sign(SECRET, 'e5', TS, raw);
     const res = await postWebhook(raw, { 'svix-id': 'e5', 'svix-timestamp': TS, 'svix-signature': sig });
+
+    expect(res.status).toBe(200);
+    expect(await wallet.balance(playerId, 'KES')).toBe(0);
+    const dep = await deposits.get(reference);
+    expect(dep?.status).toBe('pending');
+
+    verifyTransactionResult = { status: 'success' };
+  });
+
+  it('C1: does not credit when the verified transaction belongs to a DIFFERENT reference (forged webhook)', async () => {
+    // Exploit shape: attacker knows a pending deposit's reference (B, from the
+    // deposit response) and a real successful transaction id (T, from a tiny
+    // real deposit). A forged webhook claims {reference: B, id: T}. Even
+    // though verifyTransaction(T) genuinely reports status: 'success', the
+    // verified transaction's own reference does not match B — must not credit.
+    const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
+    const playerId = player.playerId;
+    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 500_000 }); // large pending deposit
+    // verifyTransaction resolves to a genuinely successful txn, but for a
+    // DIFFERENT reference (the attacker's small real deposit).
+    verifyTransactionResult = { id: 'tx-real', reference: `game-dep-${playerId}-other`, amount: 500_000, currency: 'KES', status: 'success' };
+
+    const raw = JSON.stringify({
+      event: 'collection.successful',
+      data: { reference, amount: 500_000, status: 'success', id: 'tx-real' },
+    });
+    const sig = sign(SECRET, 'e7', TS, raw);
+    const res = await postWebhook(raw, { 'svix-id': 'e7', 'svix-timestamp': TS, 'svix-signature': sig });
+
+    expect(res.status).toBe(200);
+    expect(await wallet.balance(playerId, 'KES')).toBe(0);
+    const dep = await deposits.get(reference);
+    expect(dep?.status).toBe('pending');
+
+    verifyTransactionResult = { status: 'success' };
+  });
+
+  it('C1: does not credit when the verified transaction amount does not match the deposit (reference matches but amount is smaller)', async () => {
+    const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
+    const playerId = player.playerId;
+    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 500_000 }); // large pending deposit
+    // Reference matches, but the verified amount is the attacker's tiny real
+    // deposit amount, not the large pending deposit's amount — must not credit.
+    verifyTransactionResult = { id: 'tx-real', reference, amount: 100, currency: 'KES', status: 'success' };
+
+    const raw = JSON.stringify({
+      event: 'collection.successful',
+      data: { reference, amount: 500_000, status: 'success', id: 'tx-real' },
+    });
+    const sig = sign(SECRET, 'e8', TS, raw);
+    const res = await postWebhook(raw, { 'svix-id': 'e8', 'svix-timestamp': TS, 'svix-signature': sig });
 
     expect(res.status).toBe(200);
     expect(await wallet.balance(playerId, 'KES')).toBe(0);

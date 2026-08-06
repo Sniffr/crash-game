@@ -58,6 +58,11 @@ export function createLobbyDepositRouter(deps: LobbyDepositRouterDeps): Router {
       return;
     }
 
+    if (rail.contact === 'phone' && !player.phone) {
+      res.status(400).json({ error: { code: 'CONTACT_MISSING', message: 'A phone number is required on file for this deposit method' } });
+      return;
+    }
+
     const reference = `game-dep-${playerId}-${randomUUID()}`;
     await deps.deposits.createPending({ reference, playerId, currency: player.currency, amountMinor });
     await deps.maplerad.collect({

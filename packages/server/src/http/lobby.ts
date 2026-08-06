@@ -226,11 +226,12 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
     }
 
     const token = await signPlayerJwt(found.playerId);
-    const balanceMinor = await deps.wallet.balance(found.playerId);
+    const balanceMinor = await deps.wallet.balance(found.playerId, found.currency);
     res.status(200).json({
       token,
       player: { playerId: found.playerId, username: found.username },
       balanceMinor,
+      currency: found.currency,
     });
   });
 
@@ -245,8 +246,8 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
       res.status(404).json({ error: { code: 'PLAYER_NOT_FOUND', message: 'Player not found' } });
       return;
     }
-    const balanceMinor = await deps.wallet.balance(playerId);
-    res.status(200).json({ playerId: player.playerId, username: player.username, balanceMinor });
+    const balanceMinor = await deps.wallet.balance(playerId, player.currency);
+    res.status(200).json({ playerId: player.playerId, username: player.username, balanceMinor, currency: player.currency });
   });
 
   return router;

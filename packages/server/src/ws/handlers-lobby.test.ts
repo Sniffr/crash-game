@@ -157,6 +157,39 @@ describe('handlePlaceLobbyBet — MAX_STAKE enforced in KES via FX', () => {
     );
   });
 
+  it('M2: an FX outage (toKesMinor throws) rejects the bet gracefully instead of throwing out of the handler', async () => {
+    const wallet = makeWalletMock();
+    const flakyFx = { toKesMinor: vi.fn().mockRejectedValue(new Error('fx provider unreachable')) };
+    setLobbyWiringDeps({ wallet, fx: flakyFx });
+
+    const sessionId = 'lobby-session-4';
+    const round = makeBettingRound(13);
+    _internal__setCurrentRoundForTesting(round);
+
+    mockGetSession.mockResolvedValueOnce({
+      sessionId,
+      displayName: 'Lucky Falcon',
+      balance: 0,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+      lobbyPlayerId: 'lp-4',
+      currency: 'NGN',
+    });
+
+    // Must not throw out of handleMessage — the FX failure should be caught
+    // and surfaced as a normal error frame, with no bet placed and no debit.
+    await expect(
+      handleMessage(fakeWs, { type: 'place_bet', data: { sessionId, amountMinor: 100_000 } }, noop),
+    ).resolves.toBeUndefined();
+
+    expect(round.bets).toHaveLength(0);
+    expect(wallet.bet).not.toHaveBeenCalled();
+    expect(mockSafeSend).toHaveBeenCalledWith(
+      fakeWs,
+      expect.objectContaining({ type: 'error' }),
+    );
+  });
+
   it('skips the KES cap check when fx is not wired (back-compat)', async () => {
     const wallet = makeWalletMock();
     setLobbyWiringDeps({ wallet }); // no fx

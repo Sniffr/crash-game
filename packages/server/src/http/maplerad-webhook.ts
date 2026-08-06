@@ -69,7 +69,27 @@ export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Ro
     if (evt.event === 'collection.successful') {
       // Always re-verify server-side — never trust the webhook payload alone.
       const verified = await deps.maplerad.verifyTransaction(evt.data?.id ?? '');
-      const ok = (verified as { status?: unknown })?.status === 'success';
+      const v = verified as { status?: unknown; reference?: unknown; amount?: unknown; currency?: unknown };
+
+      // PRIMARY hard gate: the verified transaction's reference must be THIS
+      // deposit's reference. Our reference is unique per collection, so this
+      // proves the confirmed txn is the one we initiated for this deposit —
+      // without it, a forged webhook could point at an unrelated (but real,
+      // successfully-verified) transaction to credit a different deposit's
+      // amount. Best-effort amount/currency checks add defense in depth.
+      const statusOk = v?.status === 'success';
+      const referenceOk = String(v?.reference ?? '') === reference;
+      const amountOk = v?.amount === undefined || v?.amount === null || Number(v.amount) === dep.amountMinor;
+      const currencyOk = v?.currency === undefined || v?.currency === null || String(v.currency) === dep.currency;
+      const ok = statusOk && referenceOk && amountOk && currencyOk;
+
+      if (!ok) {
+        console.warn(
+          `[maplerad-webhook] verification did not match deposit ${reference}: ` +
+            `status=${String(v?.status)} reference=${String(v?.reference)} amount=${String(v?.amount)} currency=${String(v?.currency)}`,
+        );
+      }
+
       if (ok && (await deps.deposits.markSettled(reference))) {
         // markSettled only returns true on the first pending→settled
         // transition, so this branch runs at most once per reference.

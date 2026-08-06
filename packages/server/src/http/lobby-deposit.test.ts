@@ -103,6 +103,24 @@ describe('lobby-deposit router', () => {
     expect(res.body.error.code).toBe('DEPOSIT_UNAVAILABLE');
   });
 
+  it('M1: rejects a KES (phone-rail) deposit when the player has no phone on file (400 CONTACT_MISSING)', async () => {
+    const players = new PlayersRepo(db.pool);
+    // A KES player with no phone (e.g. cleared later) — the router must not
+    // call Maplerad with phone: null; it should reject before ever collecting.
+    const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
+    const token = await signPlayerJwt(player.playerId);
+
+    const before = collectCalls.length;
+    const res = await request(app)
+      .post('/api/lobby/deposit')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ amountMinor: 5000 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CONTACT_MISSING');
+    expect(collectCalls.length).toBe(before);
+  });
+
   it('rejects a request without a player JWT (401)', async () => {
     const res = await request(app).post('/api/lobby/deposit').send({ amountMinor: 5000 });
     expect(res.status).toBe(401);
