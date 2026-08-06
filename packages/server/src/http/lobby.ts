@@ -5,7 +5,6 @@
  *   - POST /register  — PUBLIC — create account, return player JWT + balance 0
  *   - POST /login     — PUBLIC — verify creds, return player JWT + balance
  *   - GET  /me        — player JWT — identity + balance
- *   - POST /deposit   — player JWT — top-up stub
  *
  * Player JWT: HS256, payload { sub: playerId, typ: 'player' }, ~24h expiry,
  * signed with process.env.JWT_SECRET via `jose` (same library admin-auth uses).
@@ -36,8 +35,6 @@ declare module 'express-serve-static-core' {
 
 const PLAYER_JWT_TTL_SECONDS = 24 * 60 * 60; // ~24h
 const BCRYPT_COST = 10;
-// Deposit top-up cap: 100,000.00 in minor units.
-const MAX_DEPOSIT_MINOR = 100_000_00;
 
 // ---------------------------------------------------------------------------
 // JWT helpers (jose, HS256) — JWT_SECRET read at call time (fail-closed).
@@ -250,28 +247,6 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
     }
     const balanceMinor = await deps.wallet.balance(playerId);
     res.status(200).json({ playerId: player.playerId, username: player.username, balanceMinor });
-  });
-
-  // =========================================================================
-  // POST /deposit — player JWT — top-up stub
-  // =========================================================================
-
-  router.post('/deposit', requirePlayerJwt, async (req, res): Promise<void> => {
-    const playerId = req.player!.playerId;
-    const body = (req.body ?? {}) as { amountMinor?: unknown };
-    const amountMinor = body.amountMinor;
-
-    if (typeof amountMinor !== 'number' || !Number.isInteger(amountMinor) || amountMinor <= 0) {
-      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'amountMinor must be a positive integer (minor units)' } });
-      return;
-    }
-    if (amountMinor > MAX_DEPOSIT_MINOR) {
-      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: `amountMinor exceeds the maximum of ${MAX_DEPOSIT_MINOR}` } });
-      return;
-    }
-
-    const balanceMinor = await deps.wallet.deposit(playerId, amountMinor);
-    res.status(200).json({ balanceMinor });
   });
 
   return router;

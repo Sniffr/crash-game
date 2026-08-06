@@ -36,7 +36,7 @@ afterAll(async () => {
 });
 
 describe('lobby router', () => {
-  it('register → login → me → deposit → me', async () => {
+  it('register → login → me', async () => {
     const username = `t_${randomUUID()}`;
     const password = 'p@ssw0rd';
     createdUsernames.push(username);
@@ -62,19 +62,6 @@ describe('lobby router', () => {
     expect(me0.status).toBe(200);
     expect(me0.body.username).toBe(username);
     expect(me0.body.balanceMinor).toBe(0);
-
-    // Deposit 5000
-    const dep = await request(app)
-      .post('/api/lobby/deposit')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ amountMinor: 5000 });
-    expect(dep.status).toBe(200);
-    expect(dep.body.balanceMinor).toBe(5000);
-
-    // /me shows 5000
-    const me1 = await request(app).get('/api/lobby/me').set('Authorization', `Bearer ${token}`);
-    expect(me1.status).toBe(200);
-    expect(me1.body.balanceMinor).toBe(5000);
   });
 
   it('rejects /me without a token (401)', async () => {
@@ -115,21 +102,6 @@ describe('lobby router', () => {
       .post('/api/lobby/register')
       .send({ username, password: 'pw2', currency: 'KES', phone: '254700000002' });
     expect(dup.status).toBe(409);
-  });
-
-  it('rejects deposit of a non-positive amount (400)', async () => {
-    const username = `t_${randomUUID()}`;
-    createdUsernames.push(username);
-    const reg = await request(app)
-      .post('/api/lobby/register')
-      .send({ username, password: 'pw', currency: 'KES', phone: '254700000003' });
-    const token = reg.body.token as string;
-
-    const res = await request(app)
-      .post('/api/lobby/deposit')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ amountMinor: -1 });
-    expect(res.status).toBe(400);
   });
 
   it('registers with currency + phone (momo)', async () => {

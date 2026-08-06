@@ -34,7 +34,8 @@ export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Ro
   const router = Router();
 
   router.post('/maplerad', async (req, res): Promise<void> => {
-    const raw = (req as unknown as { rawBody?: string }).rawBody ?? '';
+    const rawBody = (req as unknown as { rawBody?: Buffer | string }).rawBody;
+    const raw = Buffer.isBuffer(rawBody) ? rawBody.toString('utf8') : (rawBody ?? '');
     const svixId = req.header('svix-id') ?? '';
     const svixTs = req.header('svix-timestamp') ?? '';
     const sigHeader = req.header('svix-signature') ?? '';

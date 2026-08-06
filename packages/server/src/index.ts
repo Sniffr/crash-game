@@ -14,6 +14,11 @@ import { PlayersRepo } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { createLobbyRouter } from './http/lobby';
 import { createLobbyPlayRouter } from './http/lobby-play';
+import { createLobbyDepositRouter } from './http/lobby-deposit';
+import { createMapleradWebhookRouter } from './http/maplerad-webhook';
+import { MapleradClient } from './maplerad/client';
+import { MapleradFx } from './maplerad/fx';
+import { PgDepositsRepo } from '@crash/wallet';
 import { createAssetsRouter } from './http/assets';
 import { setLobbyWiringDeps } from './game/lobby-deps';
 import type { OperatorLedgerSource } from '@crash/wallet';
@@ -30,12 +35,12 @@ import * as bcrypt from 'bcryptjs';
 import type { AdminRole } from './admin/admin-store';
 import { WalletClientCache } from './wallet/client-cache';
 import { setOperatorWiringDeps } from './game/operator-deps';
-import { clients, sessionSockets, safeSend } from './ws/hub';
+import { clients, sessionSockets, safeSend, sendToSession } from './ws/hub';
 import { handleMessage } from './ws/handlers';
 import * as Round from './game/round';
 const { CONFIG, startAllEngines, getRoundForGame, getEngine } = Round;
 import { getRecentHistory } from './game/history';
-import { bindSessionGame } from './store';
+import { bindSessionGame, getSession } from './store';
 import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 
 // ---------------------------------------------------------------------------
@@ -61,7 +66,25 @@ const GAMES_SNAPSHOT_REFRESH_MS = 10_000;
 const players = new PlayersRepo(pool);
 const wallet = new WalletLedger(pool);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
-setLobbyWiringDeps({ wallet });
+
+// ─── Maplerad pay-in (deposits) ─────────────────────────────────────────────
+// KES-only depositable at launch (spec §Phase 1); FX is only exercised if a
+// non-KES lobby bet occurs, so FX_RATES is an acceptable static config
+// fallback until the live rate endpoint is wired for ZMW/ZAR/NGN.
+const maplerad = new MapleradClient({
+  baseUrl: process.env.MAPLERAD_BASE_URL ?? 'https://api.maplerad.com/v1',
+  secretKey: process.env.MAPLERAD_SECRET_KEY ?? '',
+  webhookSecret: process.env.MAPLERAD_WEBHOOK_SECRET ?? '',
+});
+const deposits = new PgDepositsRepo(pool);
+const fx = new MapleradFx(async (from) => {
+  const rates = JSON.parse(process.env.FX_RATES ?? '{}');
+  const r = rates[from];
+  if (typeof r !== 'number') throw new Error('no FX rate for ' + from);
+  return r;
+});
+
+setLobbyWiringDeps({ wallet, fx });
 
 // Reconciliation (Task 8.1, spec §9).
 //
@@ -163,7 +186,29 @@ app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, 
 // internal to the lobby router; asset uploads are admin-JWT protected.
 app.use('/api/lobby', createLobbyRouter({ players, wallet }));
 app.use('/api/lobby', createLobbyPlayRouter({ games, players, wallet }));
+app.use('/api/lobby', createLobbyDepositRouter({ players, deposits, maplerad, wallet }));
 app.use('/api/assets', createAssetsRouter());
+
+// ─── Maplerad webhook (Svix-signed collection events) ───────────────────────
+// notifyBalance is best-effort: it scans currently-connected sessions for one
+// bound to the deposited lobby player (via lobbyPlayerId) and pushes a live
+// balance update over the socket. If the player has no live session (or the
+// store is offline) this is a harmless no-op — the client re-reads its
+// balance on its next action regardless, so Phase 1 doesn't depend on this.
+async function notifyBalance(playerId: string, balanceMinor: number, currency: string): Promise<void> {
+  try {
+    for (const sessionId of sessionSockets.keys()) {
+      const session = await getSession(sessionId).catch(() => null);
+      if (session?.lobbyPlayerId === playerId) {
+        sendToSession(sessionId, { type: 'balance', data: { balanceMinor, currency } });
+      }
+    }
+  } catch (err) {
+    console.debug('[maplerad] notifyBalance best-effort push failed (non-fatal):', err);
+  }
+}
+
+app.use('/api/webhooks', createMapleradWebhookRouter({ maplerad, deposits, wallet, notifyBalance }));
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache, games });
