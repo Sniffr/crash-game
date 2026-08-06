@@ -72,12 +72,12 @@ export class WalletLedger {
   }
 
   /** Credit a deposit (top-up). Returns the new balance. */
-  async deposit(playerId: string, amountMinor: number, currency = 'KES'): Promise<number> {
+  async deposit(playerId: string, amountMinor: number, currency = 'KES', ref: string | null = null): Promise<number> {
     assertPositiveInt(amountMinor, 'amountMinor');
     await this.pool.query(
       `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
        VALUES ($1, $2, $3, 'deposit', $4)`,
-      [playerId, currency, amountMinor, null],
+      [playerId, currency, amountMinor, ref],
     );
     return this.balance(playerId, currency);
   }
