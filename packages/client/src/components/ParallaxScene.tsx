@@ -5,6 +5,7 @@ import {
   drawGifOverlayBetting,
   drawGifOverlayFlying,
   drawGifOverlayCrashed,
+  type Curve,
 } from './GameCanvas';
 
 interface ParallaxSceneProps {
@@ -17,6 +18,7 @@ interface ParallaxSceneProps {
   getMultiplierColor: (m: number) => string;
   scene: SceneManifest;
   colors: ThemeColors;
+  curve: Curve;
 }
 
 // The scene is authored in the source clip's 1280×720 space; every draw coord
@@ -166,7 +168,7 @@ export default function ParallaxScene(props: ParallaxSceneProps) {
       const rampSec = g.launch_ramp_frames / 30;
       let grade = 1;
       let vWorld = 0;
-      const m = liveMultiplier(s.flightStartTime, s.serverClockOffsetMs, s.currentMultiplier, s.crashPoint);
+      const m = liveMultiplier(s.flightStartTime, s.serverClockOffsetMs, s.currentMultiplier, s.crashPoint, s.curve.rate, s.curve.segments);
       if (s.phase === 'BETTING') {
         grade = g.idle_multiply;
       } else if (s.phase === 'FLYING') {

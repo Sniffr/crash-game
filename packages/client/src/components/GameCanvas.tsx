@@ -2,6 +2,13 @@ import { useEffect, useMemo, useRef } from 'react';
 import type { BackgroundMotion, FlightAnimation, FlightTrajectory, Theme } from '../theme/types';
 import { DEFAULT_FLIGHT_ANIMATION, DEFAULT_FLIGHT_TRAJECTORY, effectiveBgSpeed } from '../theme/types';
 import ParallaxScene from './ParallaxScene';
+import { multiplierAtMs, timeToMultiplierMs, DEFAULT_GROWTH_RATE, type GrowthSegment } from '@crash/shared/curve';
+
+/** A game's multiplier curve — base rate + optional piecewise bands. */
+export type Curve = { rate: number; segments?: GrowthSegment[] };
+export function themeCurve(theme?: { growthRate?: number; growthSegments?: GrowthSegment[] }): Curve {
+  return { rate: theme?.growthRate ?? DEFAULT_GROWTH_RATE, segments: theme?.growthSegments };
+}
 
 interface GameCanvasProps {
   phase: 'BETTING' | 'FLYING' | 'CRASHED' | 'RESULT';
@@ -15,14 +22,8 @@ interface GameCanvasProps {
   theme?: Theme;
 }
 
-// Stay in sync with server GROWTH_RATE
-const GROWTH_RATE = 0.06;
 const ROCKET_W = 84;
 const ROCKET_H = 44;
-
-function multiplierAt(elapsedMs: number): number {
-  return Math.exp((GROWTH_RATE * Math.max(0, elapsedMs)) / 1000);
-}
 
 /**
  * Smooth per-frame FLYING multiplier: interpolate locally from the server
@@ -35,10 +36,12 @@ export function liveMultiplier(
   serverClockOffsetMs: number,
   serverMultiplier: number,
   crashPoint?: number,
+  baseRate: number = DEFAULT_GROWTH_RATE,
+  segments?: GrowthSegment[],
 ): number {
   if (!flightStartTime) return serverMultiplier;
   const elapsedMs = Math.max(0, Date.now() + serverClockOffsetMs - flightStartTime);
-  let m = multiplierAt(elapsedMs);
+  let m = multiplierAtMs(elapsedMs, baseRate, segments);
   if (m < serverMultiplier) m = serverMultiplier;
   if (crashPoint && m > crashPoint) m = crashPoint;
   return m;
@@ -260,6 +263,7 @@ export default function GameCanvas({
     resize();
     window.addEventListener('resize', resize);
 
+    const curve = themeCurve(theme);
     const draw = () => {
       const ctx = canvas.getContext('2d');
       if (!ctx) {
@@ -276,7 +280,7 @@ export default function GameCanvas({
         // Interpolate locally so the number is smooth (see liveMultiplier);
         // rendering the raw 50ms WS value here made GIF games look laggy.
         const m = phase === 'FLYING'
-          ? liveMultiplier(flightStartTime, serverClockOffsetMs, currentMultiplier, crashPoint)
+          ? liveMultiplier(flightStartTime, serverClockOffsetMs, currentMultiplier, crashPoint, curve.rate, curve.segments)
           : currentMultiplier;
         const tier = getMultiplierColor(m);
         if (phase === 'BETTING') drawGifOverlayBetting(ctx, W, H, dpr, countdownMs);
@@ -327,7 +331,7 @@ export default function GameCanvas({
           ctx, W, H, dpr,
           flightStartTime, serverClockOffsetMs,
           currentMultiplier, crashPoint, getMultiplierColor,
-          flameParticlesRef, useSprite, transitionAt, anim, trajectory,
+          flameParticlesRef, useSprite, transitionAt, anim, trajectory, curve,
         );
       } else if (phase === 'CRASHED') {
         renderCrashed(ctx, W, H, dpr, crashAnimRef.current, crashed);
@@ -361,6 +365,7 @@ export default function GameCanvas({
           getMultiplierColor={getMultiplierColor}
           scene={theme.scene}
           colors={theme.colors}
+          curve={themeCurve(theme)}
         />
       </div>
     );
@@ -683,9 +688,9 @@ function drawParkedSprite(
  * derived from the configured "fully airborne" multiplier and the game's
  * growth rate. e.g. threshold 1.5x @ growth 0.06 → ln(1.5)/0.06 ≈ 6.76s.
  */
-function ellipticTargetMs(transitionAt: number | undefined): number {
+function ellipticTargetMs(transitionAt: number | undefined, curve: Curve): number {
   const m = Math.max(1.05, transitionAt ?? 1.5);
-  return (Math.log(m) / GROWTH_RATE) * 1000;
+  return timeToMultiplierMs(m, curve.rate, curve.segments);
 }
 
 /**
@@ -875,18 +880,19 @@ function renderFlying(
   transitionAt: number,
   anim: FlightAnimation,
   trajectory: FlightTrajectory,
+  curve: Curve,
 ) {
   let elapsedMs = 0;
   let m: number;
   if (flightStartTime) {
     const serverNow = Date.now() + serverClockOffsetMs;
     elapsedMs = Math.max(0, serverNow - flightStartTime);
-    m = multiplierAt(elapsedMs);
+    m = multiplierAtMs(elapsedMs, curve.rate, curve.segments);
     if (m < serverMultiplier) m = serverMultiplier;
     if (crashPoint && m > crashPoint) m = crashPoint;
   } else {
     m = serverMultiplier;
-    elapsedMs = (Math.log(Math.max(1, m)) / GROWTH_RATE) * 1000;
+    elapsedMs = timeToMultiplierMs(Math.max(1, m), curve.rate, curve.segments);
   }
   const display = Math.floor(m * 100) / 100;
 
@@ -897,7 +903,7 @@ function renderFlying(
   // At the configured "fully airborne" multiplier, the sprite reaches its
   // cruise point, then bobs back and forth per the theme's flight animation
   // settings.
-  const fullyFlyingAt = ellipticTargetMs(transitionAt);
+  const fullyFlyingAt = ellipticTargetMs(transitionAt, curve);
   const progress = computeFlightProgress(elapsedMs, fullyFlyingAt, anim);
 
   // ─── Cruise extension (both trajectories) ──────────────────────────────

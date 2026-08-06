@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import PreviewCanvas from './PreviewCanvas';
 import AssetUpload from './AssetUpload';
 import SceneBuilder from './SceneBuilder';
+import GrowthEditor from './GrowthEditor';
 import {
   BACKGROUND_OPTIONS,
   DEFAULT_FLIGHT_ANIMATION,
@@ -855,7 +856,16 @@ function EditorForm({
             <SliderField label="Betting window" min={3000} max={10000} step={500} value={theme.bettingMs} onChange={(v) => update('bettingMs', v)} display={`${(theme.bettingMs / 1000).toFixed(1)}s`} hint="How long players have to place bets before the round starts." />
             {advanced && (
               <>
-                <SliderField label="Growth rate" min={0.03} max={0.15} step={0.005} value={theme.growthRate} onChange={(v) => update('growthRate', v)} display={theme.growthRate.toFixed(3)} hint={`At ${theme.growthRate}, 2× takes ${(Math.log(2) / theme.growthRate).toFixed(1)}s, 10× takes ${(Math.log(10) / theme.growthRate).toFixed(1)}s.`} />
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-slate-400 font-semibold mb-2">Growth curve</div>
+                  <p className="text-[10px] text-slate-500 leading-relaxed mb-3 -mt-1">How fast the multiplier climbs. Piecewise bands give each range its own pace — only timing changes, RTP is unaffected (the crash point is RNG-driven).</p>
+                  <GrowthEditor
+                    growthRate={theme.growthRate}
+                    segments={theme.growthSegments}
+                    onChangeRate={(v) => update('growthRate', v)}
+                    onChangeSegments={(s) => update('growthSegments', s)}
+                  />
+                </div>
                 <SliderField label="Max multiplier" min={100} max={10000} step={100} value={theme.maxMultiplier} onChange={(v) => update('maxMultiplier', v)} display={`${theme.maxMultiplier}x`} hint="Hard ceiling on the displayed multiplier." />
               </>
             )}

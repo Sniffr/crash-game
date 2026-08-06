@@ -13,11 +13,8 @@ import { tryCashoutBet, expireOperatorBetsOnCrash, setRoundRefForGame } from './
 import { getOperatorWiringDeps } from './operator-deps';
 import { pushHistory, getRecentHistory } from './history';
 import { recordLoss, appendHistory, getStats } from '../store';
-import { CONFIG, GROWTH_RATE } from './config-consts';
-
-function multiplierAt(elapsedMs: number): number {
-  return Math.exp((GROWTH_RATE * Math.max(0, elapsedMs)) / 1000);
-}
+import { CONFIG } from './config-consts';
+import { multiplierAtMs, DEFAULT_GROWTH_RATE, type GrowthSegment } from '@crash/shared/curve';
 
 /**
  * One fully-independent crash game: its own betting → flight → crash → result
@@ -30,6 +27,8 @@ function multiplierAt(elapsedMs: number): number {
 export class GameEngine {
   readonly gameId: string;
   private rtp: number;
+  private growthRate: number;
+  private growthSegments?: GrowthSegment[];
   round: RoundState | null = null;
 
   private roundNumber = 0;
@@ -41,12 +40,20 @@ export class GameEngine {
   private timers = new Set<ReturnType<typeof setTimeout>>();
   private stopped = false;
 
-  constructor(gameId: string, rtp: number) {
+  constructor(gameId: string, rtp: number, growthRate = DEFAULT_GROWTH_RATE, growthSegments?: GrowthSegment[]) {
     this.gameId = gameId;
     this.rtp = rtp;
+    this.growthRate = growthRate;
+    this.growthSegments = growthSegments;
   }
 
   setRtp(rtp: number) { this.rtp = rtp; }
+  setGrowth(rate: number, segments?: GrowthSegment[]) { this.growthRate = rate; this.growthSegments = segments; }
+
+  /** This game's multiplier curve (per-game rate + optional piecewise bands). */
+  private multiplierAt(elapsedMs: number): number {
+    return multiplierAtMs(elapsedMs, this.growthRate, this.growthSegments);
+  }
 
   // Read-only accessors for the join snapshot (prev-round reveal).
   get prevSeed(): string | null { return this.prevServerSeed; }
@@ -135,7 +142,7 @@ export class GameEngine {
 
     const interval = setInterval(() => {
       if (this.stopped || !this.round || this.round.phase !== 'FLYING') { clearInterval(interval); return; }
-      const raw = multiplierAt(Date.now() - this.round.startTime);
+      const raw = this.multiplierAt(Date.now() - this.round.startTime);
       if (raw >= this.round.crashPoint) {
         this.round.currentMultiplier = this.round.crashPoint;
         clearInterval(interval);
