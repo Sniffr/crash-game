@@ -368,6 +368,14 @@ export async function handlePlaceLobbyBet(
     return;
   }
 
+  if (deps.fx) {
+    const kesMinor = await deps.fx.toKesMinor(amountMinor, session.currency ?? DEFAULT_CURRENCY);
+    if (kesMinor > MAX_STAKE * 100) {
+      safeSend(ws, { type: 'error', data: { message: `Max stake is KSh ${MAX_STAKE}` } });
+      return;
+    }
+  }
+
   const slot = data.slot === 1 ? 1 : 0;
   const ref = `rnd-${currentRound.roundNumber}-s${slot}`;
   try {
