@@ -10,7 +10,7 @@ import {
 } from './sounds';
 import { applyThemeCssVars, fetchServerTheme, hasUserOverride, loadTheme, saveTheme } from './theme/loader';
 import { type Theme } from './theme/types';
-import { formatBalance, fromMinor, toMinor } from './lib/money';
+import { formatBalance, fromMinor, toMinor, DEFAULT_SYMBOL } from './lib/money';
 
 /**
  * In a production build the theme is whatever the server is serving from
@@ -443,7 +443,7 @@ export default function App() {
           // Operator frame: bet.amount is integer minor units; currency is top-level.
           flashToast('info', `Bet placed · ${fromMinor(message.data.bet.amount, message.data.currency)}`);
         } else {
-          flashToast('info', `Bet placed · $${message.data.bet.amount.toFixed(2)}`);
+          flashToast('info', `Bet placed · ${DEFAULT_SYMBOL}${message.data.bet.amount.toFixed(2)}`);
         }
         break;
 
@@ -462,7 +462,7 @@ export default function App() {
           // Operator frame: no `profit` field; use winAmountMinor + currency.
           flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${fromMinor(message.data.winAmountMinor, message.data.currency)}`);
         } else {
-          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +$${message.data.profit.toFixed(2)}`);
+          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${DEFAULT_SYMBOL}${message.data.profit.toFixed(2)}`);
         }
         break;
 
@@ -841,7 +841,7 @@ function Header({
             <button
               onClick={onResetBalance}
               className="text-[10px] text-neutral-400 hover:text-neutral-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
-              title="Reset balance to $1000"
+              title="Reset balance to KSh 1000"
             >
               Reset
             </button>
@@ -930,16 +930,16 @@ function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?:
       <div className="grid grid-cols-2 gap-2 text-[11px]">
         <StatTile label="Bets" value={stats.bets.toString()} />
         <StatTile label="Wins" value={`${stats.wins} / ${stats.losses}`} />
-        <StatTile label="Wagered" value={`$${stats.totalWagered.toFixed(2)}`} />
-        <StatTile label="Won" value={`$${stats.totalWon.toFixed(2)}`} />
+        <StatTile label="Wagered" value={`${DEFAULT_SYMBOL}${stats.totalWagered.toFixed(2)}`} />
+        <StatTile label="Won" value={`${DEFAULT_SYMBOL}${stats.totalWon.toFixed(2)}`} />
         <StatTile
           label="Net P/L"
-          value={`${net >= 0 ? '+' : ''}$${net.toFixed(2)}`}
+          value={`${net >= 0 ? '+' : ''}${DEFAULT_SYMBOL}${net.toFixed(2)}`}
           tone={net > 0 ? 'win' : net < 0 ? 'loss' : 'neutral'}
         />
         <StatTile label="Streak" value={streakLabel} tone={stats.currentStreak > 0 ? 'win' : stats.currentStreak < 0 ? 'loss' : 'neutral'} />
         <StatTile label="Biggest x" value={stats.biggestCashout > 0 ? `${stats.biggestCashout.toFixed(2)}x` : '—'} />
-        <StatTile label="Best win" value={stats.biggestWin > 0 ? `$${stats.biggestWin.toFixed(2)}` : '—'} />
+        <StatTile label="Best win" value={stats.biggestWin > 0 ? `${DEFAULT_SYMBOL}${stats.biggestWin.toFixed(2)}` : '—'} />
       </div>
     </div>
   );

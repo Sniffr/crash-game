@@ -80,7 +80,7 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
     CREATE TABLE IF NOT EXISTS wallet_ledger (
       id           bigserial PRIMARY KEY,
       player_id    uuid NOT NULL REFERENCES players(player_id),
-      currency     text NOT NULL DEFAULT 'USD',
+      currency     text NOT NULL DEFAULT 'KES',
       amount_minor bigint NOT NULL,                     -- +credit / -debit
       kind         text NOT NULL,                       -- 'deposit'|'bet'|'win'|'adjust'
       ref          text,

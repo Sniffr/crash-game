@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import AuthModal, { type AuthSuccess } from './components/AuthModal';
+import { fromMinor } from './lib/money';
 
 const TOKEN_KEY = 'casino_player_token';
 const USERNAME_KEY = 'casino_player_username';
@@ -186,15 +187,15 @@ export default function Lobby() {
                     {username ?? 'Player'}
                   </div>
                   <div className="text-base sm:text-lg font-bold text-bet-400 tabular-nums">
-                    {balanceMinor == null ? '—' : `$${(balanceMinor / 100).toFixed(2)}`}
+                    {balanceMinor == null ? '—' : fromMinor(balanceMinor, 'KES')}
                   </div>
                 </div>
                 <button
                   onClick={deposit}
                   className="text-[11px] font-bold text-space-950 bg-brand-500 hover:bg-brand-400 transition px-3 py-2 rounded-lg"
-                  title="Add $50 of play credit"
+                  title="Add KSh 50 of play credit"
                 >
-                  + $50
+                  + KSh 50
                 </button>
               </div>
               <button

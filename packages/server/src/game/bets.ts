@@ -25,6 +25,7 @@ import { getLobbyWiringDeps } from './lobby-deps';
 import { observeWalletCall } from '../observability/metrics.js';
 
 import { DEFAULT_GAME_ID } from '@crash/shared/rng';
+import { DEFAULT_CURRENCY } from '@crash/shared/config';
 
 /** Per-game current-round refs — set by each game engine at runtime. Cashout only
  *  needs the round number for a bet's game; the bet carries its gameId. */
@@ -108,12 +109,12 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
   const ref = `rnd-${roundRefForGame(bet.gameId)?.roundNumber ?? 'x'}-s${bet.slot ?? 0}`;
   if (deps) {
     try {
-      const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? 'USD');
+      const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? DEFAULT_CURRENCY);
       sendToSession(bet.playerId, {
         type: 'cashout_success',
         // Carry the same money fields as operator cashouts so the client formats
         // the win in minor units (currency), not as raw dollars.
-        data: { multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? 'USD', profit: winAmountMinor, balanceMinor, source, slot: bet.slot ?? 0 },
+        data: { multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? DEFAULT_CURRENCY, profit: winAmountMinor, balanceMinor, source, slot: bet.slot ?? 0 },
       });
     } catch (err) {
       console.error('[cashOutLobbyBet] wallet.win failed:', err);

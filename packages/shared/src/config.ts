@@ -14,6 +14,14 @@ export const CLIENT_PORT = 5173;
 
 // ─── Session + economy ──────────────────────────────────────────────────────
 
+/**
+ * Settlement currency for the balance / wallet / bets. KES (Kenyan Shilling) —
+ * matches the Maplerad M-PESA Kenya collection flow (country=KE). Maplerad
+ * supports NGN/KES/USD; change here to switch. KES is 2-decimal (like USD), so
+ * minor-unit math (×100) is unchanged.
+ */
+export const DEFAULT_CURRENCY = 'KES';
+
 /** Hard cap on a single bet, in credits. The server rejects anything larger. */
 export const MAX_STAKE = 1000;
 

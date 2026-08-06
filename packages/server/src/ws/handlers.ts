@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { WebSocket } from 'ws';
 import { type Bet, type HistoryEntry } from '@crash/shared/types';
-import { MAX_STAKE } from '@crash/shared/config';
+import { MAX_STAKE, DEFAULT_CURRENCY } from '@crash/shared/config';
 import {
   getSession,
   getStats,
@@ -371,7 +371,7 @@ export async function handlePlaceLobbyBet(
   const slot = data.slot === 1 ? 1 : 0;
   const ref = `rnd-${currentRound.roundNumber}-s${slot}`;
   try {
-    const balanceMinor = await deps.wallet.bet(session.lobbyPlayerId!, amountMinor, ref, session.currency ?? 'USD');
+    const balanceMinor = await deps.wallet.bet(session.lobbyPlayerId!, amountMinor, ref, session.currency ?? DEFAULT_CURRENCY);
     const bet: Bet = {
       playerId: sessionId,
       amount: amountMinor,
@@ -388,7 +388,7 @@ export async function handlePlaceLobbyBet(
     currentRound.bets.push(bet);
     attachSession(sessionId);
 
-    safeSend(ws, { type: 'bet_placed', data: { bet, isOperator: true, balanceMinor, currency: session.currency ?? 'USD' } });
+    safeSend(ws, { type: 'bet_placed', data: { bet, isOperator: true, balanceMinor, currency: session.currency ?? DEFAULT_CURRENCY } });
     broadcast({
       type: 'new_bet',
       data: {
