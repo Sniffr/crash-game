@@ -111,7 +111,9 @@ async function createNewSession(): Promise<SessionInfo | null> {
     const res = await fetch('/api/session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      // Bind the demo session to the game this tab is playing, so bets are gated
+      // against THIS game's round (not the default game's).
+      body: JSON.stringify({ gameId: readGameIdFromUrl() }),
     });
     if (res.status === 503) return null; // backend offline
     if (!res.ok) return null;

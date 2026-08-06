@@ -83,6 +83,13 @@ export function startAllEngines(): void {
     engines.set(g.gameId, engine);
     engine.start();
   }
+  // Stop engines for games that were archived/removed (keep the base game).
+  const activeIds = new Set(list.map((g) => g.gameId));
+  for (const [gid, engine] of engines) {
+    if (gid === DEFAULT_GAME_ID || activeIds.has(gid)) continue;
+    engine.stop();
+    engines.delete(gid);
+  }
 }
 
 /** Read a game's growth curve (base rate + optional piecewise bands) from its theme. */

@@ -144,6 +144,27 @@ export default function App() {
     } catch (e) { alert('Load failed: ' + (e as Error).message); }
   }, [theme.brandName]);
 
+  // Delete (archive) a published game: it leaves the lobby + Open list and its
+  // engine stops. Soft — bet history keeps its game reference.
+  const handleDelete = useCallback(async (gameId: string) => {
+    if (!gameId || !token) return;
+    if (!window.confirm(`Delete game "${gameId}"?\n\nIt will be removed from the lobby and can no longer be launched. This can't be undone here.`)) return;
+    try {
+      const res = await fetch(`/admin/v1/games/${encodeURIComponent(gameId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ status: 'archived' }),
+      });
+      if (res.status === 401) { setToken(null); setAdmin(null); return; }
+      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e?.error?.message ?? `Delete failed (${res.status})`); }
+      await refreshGames();
+      if (slug(theme.brandName) === gameId) setTheme({ ...PRESETS.galaxy, brandName: '' });
+      alert(`Deleted "${gameId}".`);
+    } catch (e) {
+      alert('Delete failed: ' + (e as Error).message);
+    }
+  }, [token, theme.brandName]);
+
   const [publishing, setPublishing] = useState(false);
   const handlePublish = useCallback(async () => {
     // Publish this theme to the game server's catalogue. The admin JWT from the
@@ -269,6 +290,8 @@ export default function App() {
         onNew={handleNew}
         games={games}
         onOpen={handleOpen}
+        onDelete={handleDelete}
+        currentGameId={slug(theme.brandName)}
         advanced={advanced}
         onToggleAdvanced={() => setAdvanced((v) => !v)}
         admin={admin}
@@ -395,11 +418,13 @@ function LoginGate({ onLogin }: { onLogin: (token: string, user: string) => void
 }
 
 // ─── Top bar ────────────────────────────────────────────────────────────────
-function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen, advanced, onToggleAdvanced, admin, onLogout }: {
+function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen, onDelete, currentGameId, advanced, onToggleAdvanced, admin, onLogout }: {
   onExport: () => void; onImportClick: () => void; onPublish: () => void; publishing: boolean;
   onNew: () => void; games: { gameId: string; name: string }[]; onOpen: (gameId: string) => void;
+  onDelete: (gameId: string) => void; currentGameId: string;
   advanced: boolean; onToggleAdvanced: () => void; admin: string | null; onLogout: () => void;
 }) {
+  const canDelete = games.some((g) => g.gameId === currentGameId);
   return (
     <header className="flex items-center justify-between px-5 py-3 border-b border-ink-500/40 bg-ink-950/80 backdrop-blur-xl">
       <div className="flex items-center gap-3">
@@ -448,6 +473,15 @@ function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, 
             <option key={g.gameId} value={g.gameId}>{g.name} ({g.gameId})</option>
           ))}
         </select>
+        {canDelete && (
+          <button
+            onClick={() => onDelete(currentGameId)}
+            className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-rose-500/40 text-rose-300 hover:bg-rose-500/15 hover:text-rose-200 transition uppercase tracking-wider font-semibold"
+            title={`Delete "${currentGameId}"`}
+          >
+            Delete
+          </button>
+        )}
         <button
           onClick={onImportClick}
           className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"

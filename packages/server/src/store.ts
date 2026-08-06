@@ -205,7 +205,7 @@ export async function createPlayerSession(opts: {
   return session;
 }
 
-export async function createSession(opts: { displayName?: string; balance?: number } = {}): Promise<Session> {
+export async function createSession(opts: { displayName?: string; balance?: number; gameId?: string } = {}): Promise<Session> {
   ensureOnline();
   const sessionId = newId();
   const now = Date.now();
@@ -215,10 +215,25 @@ export async function createSession(opts: { displayName?: string; balance?: numb
     balance: opts.balance ?? DEFAULT_DEMO_BALANCE,
     createdAt: now,
     expiresAt: now + SESSION_TTL_SEC * 1000,
+    // Which game this session plays — so bets are gated against THIS game's
+    // round, not the default game's (otherwise a matwinner player gets "betting
+    // closed" whenever galaxy-crash is mid-flight). Absent → default game.
+    ...(opts.gameId ? { gameId: opts.gameId } : {}),
   };
   await jput(sessKey(sessionId), session);
   await jput(statsKey(sessionId), { ...ZERO_STATS });
   return session;
+}
+
+/**
+ * Backfill a session's game when it has none (legacy demo sessions created before
+ * gameId was threaded). No-op if already set — never overrides an operator/lobby
+ * session's authoritative gameId.
+ */
+export async function bindSessionGame(sessionId: string, gameId: string): Promise<void> {
+  const session = await getSession(sessionId);
+  if (!session || session.gameId) return;
+  await jput(sessKey(sessionId), { ...session, gameId });
 }
 
 export async function getSession(sessionId: string): Promise<Session | null> {
