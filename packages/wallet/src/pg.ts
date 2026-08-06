@@ -202,5 +202,16 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       details_json text NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_recon_mismatches_run ON reconciliation_mismatches(run_id);
+
+    CREATE TABLE IF NOT EXISTS deposits (
+      reference    text PRIMARY KEY,
+      player_id    uuid NOT NULL REFERENCES players(player_id),
+      currency     text NOT NULL,
+      amount_minor bigint NOT NULL,
+      status       text NOT NULL DEFAULT 'pending',
+      created_at   timestamptz NOT NULL DEFAULT now(),
+      updated_at   timestamptz NOT NULL DEFAULT now(),
+      CHECK (status IN ('pending','settled','failed'))
+    );
   `);
 }
