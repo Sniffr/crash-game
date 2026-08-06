@@ -669,7 +669,11 @@ export default function App() {
           <div className="flex flex-col gap-3 min-w-0">
             <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
-            <section className="relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 h-[clamp(300px,46vh,560px)]">
+            {/* 16:9 to match the 1280×720 game scene so nothing is cropped
+                (gif clips are 16:9 too). max-h keeps it from dominating short
+                viewports; the renderer contain-fits, so any residual gap just
+                shows the stage backdrop rather than clipping the road/wheels. */}
+            <section className="relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 w-full aspect-[16/9] max-h-[70vh]">
               {/* CSS galaxy (starfield + supernova + planet Earth), behind the canvas */}
               <div className="game-bg absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
                 <div className="sn-earth-glow" />
