@@ -9,8 +9,9 @@ Let each player hold a balance in **their own currency**, chosen at signup, show
 consistently through play and disbursement. Fund and withdraw that balance via
 **Maplerad** (pay-in = collections, payout = disbursements) across all supported
 rails. **Both pay-in and payout are always in the player's account currency** —
-deposit KES → balance KES → withdraw KES; there is no cross-currency conversion.
-Redesign onboarding to be friendly.
+deposit KES → balance KES → withdraw KES; no FX ever touches the player's money.
+KES is used only as an internal base for shared limits + house accounting via
+live Maplerad FX (see §1b). Redesign onboarding to be friendly.
 
 **Rail rollout priority (each fully working — pay-in + payout — before the next):**
 1. **KES** (Kenya) — first, end-to-end.
@@ -39,20 +40,37 @@ Payout is included in this design but built in Phase 2.
 ## 1. Per-player currency
 
 - **Schema:** add to `players` (packages/wallet, `pg.ts`): `currency text`, `phone
-  text`, `country text` (country derived from currency's rail, stored for the
-  deposit rail). Migration is additive (`ALTER TABLE ... ADD COLUMN IF NOT
-  EXISTS`); existing rows default `currency='KES'`.
-- **players-repo:** `create(username, passwordHash, { currency, phone })`;
-  `getById` returns currency/phone.
-- **Flow:** `POST /api/lobby/register` accepts `currency`, `phone` (validated:
-  currency ∈ supported set; phone required when the currency's pay-in method is
-  momo). The player's currency flows into `createPlayerSession({ currency })`
-  (already supported) → session.currency → bets/wins/balance/payout all use it.
+  text`, `email text`, `country text` (country derived from the currency's rail,
+  stored for the deposit rail). Migration is additive (`ALTER TABLE ... ADD
+  COLUMN IF NOT EXISTS`); existing rows default `currency='KES'`.
+- **players-repo:** `create(username, passwordHash, { currency, phone, email })`;
+  `getById` returns currency/phone/email.
+- **Flow:** `POST /api/lobby/register` accepts `currency` + **contact** (`phone`
+  for momo currencies, `email` when the rail is bank/non-phone). Validated:
+  currency ∈ supported set; phone required when pay-in method is `momo`, else
+  email required. The player's currency flows into `createPlayerSession({
+  currency })` → session.currency → bets/wins/balance/payout all use it.
 - **lobby-play.ts:** use the player's currency (from the players row) instead of
   the global `DEFAULT_CURRENCY`. Demo path keeps `DEFAULT_CURRENCY`.
 - **Display:** `money.ts` already renders per-currency (symbol + decimals). Add
   symbols/decimals for the priority set — KES (KSh), ZMW (K), ZAR (R), NGN (₦) —
   all 2-decimal. Unknown currency → 2 decimals + code prefix.
+
+## 1b. FX & limits (local-currency wallet; KES only internal)
+
+Chosen model: the player's **wallet, bets, wins, deposit, and payout are all in
+their account currency** — no FX conversion ever touches their money. A 2.0× on a
+₦1,000 bet pays ₦2,000 (multiplier math is currency-agnostic).
+
+KES is only an **internal base** for two things:
+- **Shared stake limits** (`MAX_STAKE`): convert the stake currency→KES to check
+  the one global cap.
+- **House-side accounting/reporting**: record a KES-equivalent per bet/settle.
+
+- **Rate source:** live **Maplerad FX/quote** API, pulled with the repo key.
+  Cache per currency with a short TTL (≈5 min); on provider error use last-known;
+  KES→KES = 1. A small `fx.ts` service: `toKes(amountMinor, currency)`.
+- The player never sees a KES number; conversion is invisible.
 
 ## 2. Rail registry (config-driven, all rails)
 
@@ -120,8 +138,10 @@ Port of the commsBackend client to `packages/server/src/maplerad/` (or
 
 `AuthModal` → a friendly, on-brand flow:
 - **Register:** step 1 username + password; step 2 currency picker (Maplerad
-  supported list, KES default) + phone (shown/required when the currency uses
-  momo). Clear validation, progress affordance, no email/KYC.
+  supported list, KES default) + **contact** — a **phone** field when the chosen
+  currency's rail is momo (KES/ZMW), swapping to **email** when it's bank/
+  non-phone (ZAR). The field switches live as the currency changes. Clear
+  validation, progress affordance, no KYC.
 - **Login:** username + password (unchanged fields, restyled).
 - Uses the frontend-design skill for the visual pass; matches the game's
   pure-black HSL + Poppins system.
