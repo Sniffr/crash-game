@@ -51,7 +51,7 @@ export class WalletLedger {
   }
 
   /** Current balance (minor units) = SUM(amount_minor) for the player+currency. */
-  async balance(playerId: string, currency = 'USD'): Promise<number> {
+  async balance(playerId: string, currency = 'KES'): Promise<number> {
     const { rows } = await this.pool.query<{ balance: string | null }>(
       `SELECT COALESCE(SUM(amount_minor), 0)::bigint AS balance
        FROM wallet_ledger WHERE player_id = $1 AND currency = $2`,
@@ -72,7 +72,7 @@ export class WalletLedger {
   }
 
   /** Credit a deposit (top-up). Returns the new balance. */
-  async deposit(playerId: string, amountMinor: number, currency = 'USD'): Promise<number> {
+  async deposit(playerId: string, amountMinor: number, currency = 'KES'): Promise<number> {
     assertPositiveInt(amountMinor, 'amountMinor');
     await this.pool.query(
       `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
@@ -88,7 +88,7 @@ export class WalletLedger {
    * and overdraw the account. Throws InsufficientFundsError if balance < amount.
    * Returns the new balance.
    */
-  async bet(playerId: string, amountMinor: number, ref: string, currency = 'USD'): Promise<number> {
+  async bet(playerId: string, amountMinor: number, ref: string, currency = 'KES'): Promise<number> {
     assertPositiveInt(amountMinor, 'amountMinor');
     const client = await this.pool.connect();
     try {
@@ -126,7 +126,7 @@ export class WalletLedger {
   }
 
   /** Credit a win. Returns the new balance. */
-  async win(playerId: string, amountMinor: number, ref: string, currency = 'USD'): Promise<number> {
+  async win(playerId: string, amountMinor: number, ref: string, currency = 'KES'): Promise<number> {
     assertPositiveInt(amountMinor, 'amountMinor');
     await this.pool.query(
       `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
@@ -140,7 +140,7 @@ export class WalletLedger {
    * Manual adjustment (positive or negative). Amount is a signed integer of
    * minor units. Returns the new balance. Not overdraw-guarded — admin use only.
    */
-  async adjust(playerId: string, amountMinor: number, ref: string, currency = 'USD'): Promise<number> {
+  async adjust(playerId: string, amountMinor: number, ref: string, currency = 'KES'): Promise<number> {
     if (!Number.isInteger(amountMinor) || amountMinor === 0) {
       throw new Error(`amountMinor must be a non-zero integer (minor units), got ${amountMinor}`);
     }

@@ -29,7 +29,7 @@ import type { HistoryEntry, Session, SessionStats } from '@crash/shared/types';
 import { ZERO_STATS } from '@crash/shared/types';
 import {
   ANON_ADJ, ANON_NOUN, BETS_PER_MINUTE, HISTORY_LIMIT,
-  SESSION_TTL_SEC,
+  SESSION_TTL_SEC, DEFAULT_CURRENCY,
 } from '@crash/shared/config';
 
 // TEMP demo seed; Task 3.1 replaces this with the operator authenticate balance.
@@ -195,7 +195,7 @@ export async function createPlayerSession(opts: {
     balance: opts.balanceMinor,
     createdAt: now,
     expiresAt: now + OPERATOR_SESSION_TTL_MS,
-    currency: opts.currency ?? 'USD',
+    currency: opts.currency ?? DEFAULT_CURRENCY,
     balanceMinor: opts.balanceMinor,
     gameId: opts.gameId,
     lobbyPlayerId: opts.lobbyPlayerId,

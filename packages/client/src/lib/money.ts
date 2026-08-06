@@ -9,6 +9,8 @@ export const DECIMALS_BY_CURRENCY: Record<string, number> = {
   USD: 2,
   EUR: 2,
   GBP: 2,
+  KES: 2,
+  NGN: 2,
   BTC: 8,
   ETH: 18,
   DEMO: 2,
@@ -23,11 +25,16 @@ export function symbolFor(currency: string | undefined): string {
     case 'USD': return '$';
     case 'EUR': return '€';
     case 'GBP': return '£';
+    case 'KES': return 'KSh ';
+    case 'NGN': return '₦';
     case 'BTC': return '₿';
     case 'ETH': return 'Ξ';
-    default: return '$';
+    default: return 'KSh ';
   }
 }
+
+/** Symbol for the app's default settlement currency (demo balance / stats). */
+export const DEFAULT_SYMBOL = symbolFor('KES');
 
 /** Convert an integer minor-unit amount to a display string with the currency symbol. */
 export function fromMinor(minor: number, currency: string | undefined): string {
@@ -63,5 +70,5 @@ export function formatBalance(
   if (typeof session?.balanceMinor === 'number') {
     return fromMinor(session.balanceMinor, session.currency);
   }
-  return `$${balance.toFixed(2)}`;
+  return `${DEFAULT_SYMBOL}${balance.toFixed(2)}`;
 }

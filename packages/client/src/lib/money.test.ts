@@ -10,8 +10,8 @@ describe('formatBalance', () => {
   it('operator session renders via minor units', () => {
     expect(formatBalance(9000, { operatorId: 'op', balanceMinor: 9000, currency: 'EUR' })).toBe('€90.00');
   });
-  it('legacy demo session (no balanceMinor) renders the decimal balance', () => {
-    expect(formatBalance(1000, { })).toBe('$1000.00');
+  it('legacy demo session (no balanceMinor) renders the decimal balance in the default currency', () => {
+    expect(formatBalance(1000, { })).toBe('KSh 1000.00');
   });
 });
 

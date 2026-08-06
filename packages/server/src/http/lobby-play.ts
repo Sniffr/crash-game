@@ -4,6 +4,7 @@ import type { PlayersRepo } from '@crash/wallet/players-repo';
 import type { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { requirePlayerJwt } from './lobby.js';
 import { createPlayerSession } from '../store.js';
+import { DEFAULT_CURRENCY } from '@crash/shared/config';
 
 /**
  * `POST /api/lobby/play/start` — mint a REAL-money game session bound to the
@@ -36,13 +37,13 @@ export function createLobbyPlayRouter(deps: {
       return;
     }
 
-    const balanceMinor = await deps.wallet.balance(playerId, 'USD');
+    const balanceMinor = await deps.wallet.balance(playerId, DEFAULT_CURRENCY);
     const session = await createPlayerSession({
       lobbyPlayerId: playerId,
       username: player.username,
       gameId,
       balanceMinor,
-      currency: 'USD',
+      currency: DEFAULT_CURRENCY,
     });
     res.json({ sessionId: session.sessionId, gameId, balanceMinor });
   });
