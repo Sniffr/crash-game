@@ -71,12 +71,20 @@ export class WalletLedger {
     return Number(rows[0]?.balance ?? 0);
   }
 
-  /** Credit a deposit (top-up). Returns the new balance. */
+  /**
+   * Credit a deposit (top-up). Returns the new balance.
+   *
+   * Idempotent on `ref` (partial unique index `uq_wallet_deposit_ref`): a
+   * replayed webhook with the same reference is a no-op credit, so crediting
+   * can run BEFORE the deposit row is marked settled without ever
+   * double-crediting — closing the crash window between the two writes.
+   */
   async deposit(playerId: string, amountMinor: number, currency = 'KES', ref: string | null = null): Promise<number> {
     assertPositiveInt(amountMinor, 'amountMinor');
     await this.pool.query(
       `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
-       VALUES ($1, $2, $3, 'deposit', $4)`,
+       VALUES ($1, $2, $3, 'deposit', $4)
+       ON CONFLICT (ref) WHERE kind = 'deposit' DO NOTHING`,
       [playerId, currency, amountMinor, ref],
     );
     return this.balance(playerId, currency);

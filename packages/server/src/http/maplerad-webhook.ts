@@ -90,12 +90,16 @@ export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Ro
         );
       }
 
-      if (ok && (await deps.deposits.markSettled(reference))) {
-        // markSettled only returns true on the first pending→settled
-        // transition, so this branch runs at most once per reference.
+      if (ok) {
+        // Credit FIRST — idempotent on the reference (partial unique index),
+        // so a replay is a harmless no-op and a crash before markSettled loses
+        // nothing (the retry re-credits into the same no-op, then settles).
         await deps.wallet.deposit(dep.playerId, dep.amountMinor, dep.currency, reference);
-        const balanceMinor = await deps.wallet.balance(dep.playerId, dep.currency);
-        deps.notifyBalance?.(dep.playerId, balanceMinor, dep.currency);
+        // markSettled only flips pending→settled once, so notify exactly once.
+        if (await deps.deposits.markSettled(reference)) {
+          const balanceMinor = await deps.wallet.balance(dep.playerId, dep.currency);
+          deps.notifyBalance?.(dep.playerId, balanceMinor, dep.currency);
+        }
       }
     } else if (evt.event === 'collection.failed') {
       await deps.deposits.markFailed(reference);
