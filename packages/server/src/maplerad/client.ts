@@ -5,6 +5,10 @@ export interface MapleradClientConfig {
   secretKey: string;
   webhookSecret: string;
   fetchImpl?: typeof fetch;
+  // KES MoMo payouts require a full sender (house) KYC block on meta.sender —
+  // first_name/last_name/email/phone_number/address/country/dob/state/city and
+  // id{type,number,issued_at,issued_date}. Sourced from env (MAPLERAD_PAYOUT_SENDER).
+  payoutSender?: Record<string, unknown>;
 }
 
 export interface MapleradCollectInput {
@@ -50,12 +54,14 @@ export class MapleradClient {
   private readonly secretKey: string;
   private readonly webhookSecret: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly payoutSender?: Record<string, unknown>;
 
   constructor(cfg: MapleradClientConfig) {
     this.baseUrl = cfg.baseUrl;
     this.secretKey = cfg.secretKey;
     this.webhookSecret = cfg.webhookSecret;
     this.fetchImpl = cfg.fetchImpl ?? fetch;
+    this.payoutSender = cfg.payoutSender;
   }
 
   /**
@@ -103,7 +109,11 @@ export class MapleradClient {
       currency: input.currency,
       reason: input.reason,
       reference: input.reference,
-      meta: { scheme: 'MOBILEMONEY', counterparty: { name } },
+      meta: {
+        scheme: 'MOBILEMONEY',
+        ...(this.payoutSender ? { sender: this.payoutSender } : {}),
+        counterparty: { name },
+      },
     };
     const envelope = await this.call('POST', '/transfers', body);
     return this.data(envelope);
@@ -112,6 +122,16 @@ export class MapleradClient {
   /** Verify a collection transaction's status. Docs: always verify before giving value. */
   async verifyTransaction(id: string): Promise<Record<string, unknown>> {
     const envelope = await this.call('GET', `/transactions/verify/${id}`);
+    return this.data(envelope);
+  }
+
+  /**
+   * Fetch a transfer (payout) for server-side re-verification. Transfers are NOT
+   * found by /transactions/verify/{id}; use /transfers/{id}, which returns
+   * status ('SUCCESS'|'FAILED'|…), reference, amount, currency.
+   */
+  async verifyTransfer(id: string): Promise<Record<string, unknown>> {
+    const envelope = await this.call('GET', `/transfers/${id}`);
     return this.data(envelope);
   }
 

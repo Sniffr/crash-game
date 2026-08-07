@@ -24,7 +24,8 @@ import type { PgWithdrawalsRepo } from '@crash/wallet/withdrawals-repo';
 /** Minimal shape this router needs from MapleradClient — kept structural so tests can stub it. */
 export interface MapleradWebhookVerifier {
   verifyWebhookSignature(svixId: string, svixTimestamp: string, rawBody: string, sigHeader: string): boolean;
-  verifyTransaction(id: string): Promise<Record<string, unknown>>;
+  verifyTransaction(id: string): Promise<Record<string, unknown>>; // collections (pay-in)
+  verifyTransfer(id: string): Promise<Record<string, unknown>>;    // transfers (pay-out)
 }
 
 export type NotifyBalance = (playerId: string, balanceMinor: number, currency: string) => void;
@@ -83,7 +84,7 @@ export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Ro
 async function handleCollection(
   deps: MapleradWebhookRouterDeps, event: string, reference: string, id: string,
 ): Promise<void> {
-  if (!/^game-dep-/.test(reference)) return; // foreign event — not ours
+  if (!/^gd-/.test(reference)) return; // foreign event — not ours
   const dep = await deps.deposits.get(reference);
   if (!dep) return;
 
@@ -113,14 +114,15 @@ async function handleTransfer(
 ): Promise<void> {
   // The transfer webhook may not echo our reference — correlate by it when
   // present, else by the stored Maplerad transfer id.
-  let wd = /^game-wd-/.test(reference) ? await deps.withdrawals.get(reference) : null;
+  let wd = /^gw-/.test(reference) ? await deps.withdrawals.get(reference) : null;
   if (!wd && id) wd = await deps.withdrawals.getByMapleradId(id);
   if (!wd) return; // foreign transfer — not ours
 
-  // Re-verify and bind to THIS withdrawal (same C1 gate as deposits). Guards
-  // BOTH the settle and the refund: a forged transfer.failed must not refund a
-  // payout that genuinely succeeded, and vice-versa.
-  const v = (await deps.maplerad.verifyTransaction(id)) as VerifiedTxn;
+  // Re-verify (via /transfers/{id}) and bind to THIS withdrawal (same C1 gate as
+  // deposits). Guards BOTH the settle and the refund: a forged transfer.failed
+  // must not refund a payout that genuinely succeeded, and vice-versa.
+  const v = (await deps.maplerad.verifyTransfer(id)) as VerifiedTxn;
+  const succeeded = String(v?.status ?? '').toLowerCase() === 'success'; // API returns 'SUCCESS'
   const boundToUs = String(v?.reference ?? '') === wd.reference
     && (v?.amount === undefined || v?.amount === null || Number(v.amount) === wd.amountMinor)
     && (v?.currency === undefined || v?.currency === null || String(v.currency) === wd.currency);
@@ -130,7 +132,7 @@ async function handleTransfer(
   }
 
   if (event === 'transfer.successful') {
-    if (v?.status !== 'success') { warnMismatch('withdrawal(success)', wd.reference, v); return; }
+    if (!succeeded) { warnMismatch('withdrawal(success)', wd.reference, v); return; }
     // Funds were already debited at reserve time — just finalise.
     if (await deps.withdrawals.markSettled(wd.reference)) {
       const balanceMinor = await deps.wallet.balance(wd.playerId, wd.currency);
@@ -139,7 +141,7 @@ async function handleTransfer(
   } else {
     // transfer.failed — the verified txn must genuinely NOT be a success before
     // we hand the money back, or a spoofed failure could double-pay.
-    if (v?.status === 'success') { warnMismatch('withdrawal(failed?)', wd.reference, v); return; }
+    if (succeeded) { warnMismatch('withdrawal(failed?)', wd.reference, v); return; }
     if (await deps.withdrawals.markFailed(wd.reference)) {
       await deps.wallet.refund(wd.playerId, wd.amountMinor, wd.reference, wd.currency);
       const balanceMinor = await deps.wallet.balance(wd.playerId, wd.currency);
@@ -149,7 +151,7 @@ async function handleTransfer(
 }
 
 function matches(v: VerifiedTxn, reference: string, amountMinor: number, currency: string): boolean {
-  return v?.status === 'success'
+  return String(v?.status ?? '').toLowerCase() === 'success'
     && String(v?.reference ?? '') === reference
     && (v?.amount === undefined || v?.amount === null || Number(v.amount) === amountMinor)
     && (v?.currency === undefined || v?.currency === null || String(v.currency) === currency);

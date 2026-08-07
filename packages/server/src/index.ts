@@ -76,6 +76,8 @@ const maplerad = new MapleradClient({
   baseUrl: process.env.MAPLERAD_BASE_URL ?? 'https://api.maplerad.com/v1',
   secretKey: process.env.MAPLERAD_SECRET_KEY ?? '',
   webhookSecret: process.env.MAPLERAD_WEBHOOK_SECRET ?? '',
+  // House KYC block required on KES MoMo payouts (meta.sender). JSON in env.
+  payoutSender: process.env.MAPLERAD_PAYOUT_SENDER ? JSON.parse(process.env.MAPLERAD_PAYOUT_SENDER) : undefined,
 });
 const deposits = new PgDepositsRepo(pool);
 const withdrawals = new PgWithdrawalsRepo(pool);

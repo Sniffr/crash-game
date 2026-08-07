@@ -10,7 +10,7 @@ export type Rail = {
 // isPayoutable() is false and withdrawals return WITHDRAW_UNAVAILABLE.
 // ZMW/ZAR/NGN likewise stay gated until their codes are populated.
 export const RAILS: Record<string, Rail> = {
-  KES: { currency: 'KES', country: 'KE', decimals: 2, payIn: { method: 'momo', institutionCode: '1271' }, payOut: { type: 'MOMO', scheme: 'MOBILEMONEY' }, contact: 'phone' },
+  KES: { currency: 'KES', country: 'KE', decimals: 2, payIn: { method: 'momo', institutionCode: '1271' }, payOut: { type: 'MOMO', institutionCode: '187', scheme: 'MOBILEMONEY' }, contact: 'phone' },
   ZMW: { currency: 'ZMW', country: 'ZM', decimals: 2, payIn: { method: 'momo' }, payOut: { type: 'MOMO', scheme: 'MOBILEMONEY' }, contact: 'phone' },
   ZAR: { currency: 'ZAR', country: 'ZA', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'WALLET' }, contact: 'email' },
   NGN: { currency: 'NGN', country: 'NG', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'NUBAN' }, contact: 'email' },

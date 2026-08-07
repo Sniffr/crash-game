@@ -72,7 +72,7 @@ describe('lobby-withdraw router', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('pending');
-    expect(res.body.reference.startsWith('game-wd-')).toBe(true);
+    expect(res.body.reference.startsWith('gw-')).toBe(true);
 
     // Wallet debited by the reserve.
     expect(await wallet.balance(playerId, 'KES')).toBe(6000);

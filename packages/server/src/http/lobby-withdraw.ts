@@ -67,7 +67,8 @@ export function createLobbyWithdrawRouter(deps: LobbyWithdrawRouterDeps): Router
       return;
     }
 
-    const reference = `game-wd-${playerId}-${randomUUID()}`;
+    // Short ref (Maplerad rejects long references); uniqueness from the uuid.
+    const reference = `gw-${randomUUID()}`;
     await deps.withdrawals.createPending({ reference, playerId, currency: player.currency, amountMinor });
 
     // Reserve (debit) first — overdraw-guarded. Never disburse un-reserved funds.
