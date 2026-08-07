@@ -18,6 +18,16 @@ export interface MapleradCollectInput {
   payerEmail?: string;
 }
 
+export interface MapleradDisburseInput {
+  currency: string;
+  amountMinor: number;
+  phone: string;
+  bankCode: string;
+  reference: string;
+  reason: string;
+  payeeName?: string;
+}
+
 interface MapleradEnvelope {
   status: boolean;
   message?: string;
@@ -73,6 +83,29 @@ export class MapleradClient {
       meta: { counterparty },
     };
     const envelope = await this.call('POST', '/collections/momo', body);
+    return this.data(envelope);
+  }
+
+  /**
+   * Initiates a local mobile-money payout (M-PESA etc.) via POST /transfers.
+   * amountMinor is in the lowest denomination. Returns the transfer envelope
+   * data (incl. `id` + `status: PENDING`); a signed transfer.successful /
+   * transfer.failed webhook arrives later, re-verified via verifyTransaction.
+   * meta.counterparty.name is required for a MOBILEMONEY transfer.
+   */
+  async disburse(input: MapleradDisburseInput): Promise<Record<string, unknown>> {
+    const rawName = input.payeeName?.trim();
+    const name = rawName && rawName.length > 0 ? rawName : 'Customer';
+    const body = {
+      account_number: input.phone,
+      amount: input.amountMinor,
+      bank_code: input.bankCode,
+      currency: input.currency,
+      reason: input.reason,
+      reference: input.reference,
+      meta: { scheme: 'MOBILEMONEY', counterparty: { name } },
+    };
+    const envelope = await this.call('POST', '/transfers', body);
     return this.data(envelope);
   }
 

@@ -19,3 +19,4 @@ export * from './reconciler.js';
 export * from './reconciler-pg.js';
 export * from './maplerad-rails.js';
 export * from './deposits-repo.js';
+export * from './withdrawals-repo.js';
