@@ -93,6 +93,9 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       CHECK (kind IN ('deposit','bet','win','adjust'))
     );
     CREATE INDEX IF NOT EXISTS idx_wallet_player ON wallet_ledger(player_id, currency);
+    -- One credit per deposit reference (idempotent webhook replay + crash-safety).
+    -- Partial so it only constrains deposit rows; bet/win/adjust reuse refs freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_deposit_ref ON wallet_ledger(ref) WHERE kind = 'deposit';
 
     -- ── Wave B: B2B ledger + control plane (ported from SQLite) ──────────────
     CREATE TABLE IF NOT EXISTS operators (

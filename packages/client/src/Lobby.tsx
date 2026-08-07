@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import AuthModal, { type AuthSuccess } from './components/AuthModal';
-import { fromMinor } from './lib/money';
+import { fromMinor, symbolFor, toMinor } from './lib/money';
 
 const TOKEN_KEY = 'casino_player_token';
 const USERNAME_KEY = 'casino_player_username';
@@ -42,8 +42,10 @@ export default function Lobby() {
   const [token, setToken] = useState<string | null>(() => readToken());
   const [username, setUsername] = useState<string | null>(() => readUsername());
   const [balanceMinor, setBalanceMinor] = useState<number | null>(null);
+  const [currency, setCurrency] = useState<string>('KES');
 
   const [authOpen, setAuthOpen] = useState(false);
+  const [depositOpen, setDepositOpen] = useState(false);
   // Where to go once auth succeeds (a "Real" launch the user attempted while logged out).
   const [pendingGameId, setPendingGameId] = useState<string | null>(null);
 
@@ -94,8 +96,9 @@ export default function Lobby() {
       });
       if (res.status === 401) { logout(); return; }
       if (!res.ok) return;
-      const j = (await res.json()) as { balanceMinor: number };
+      const j = (await res.json()) as { balanceMinor: number; currency?: string };
       setBalanceMinor(j.balanceMinor ?? 0);
+      if (j.currency) setCurrency(j.currency);
     } catch { /* leave balance as-is */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -140,19 +143,6 @@ export default function Lobby() {
     window.location.href = `/play?game=${encodeURIComponent(gameId)}&mode=real`;
   };
 
-  const deposit = async () => {
-    const tok = readToken();
-    if (!tok) return;
-    try {
-      const res = await fetch('/api/lobby/deposit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        body: JSON.stringify({ amountMinor: 5000 }),
-      });
-      if (res.ok) await refreshBalance(tok);
-    } catch { /* ignore */ }
-  };
-
   const featured = games?.[0];
 
   return (
@@ -187,15 +177,15 @@ export default function Lobby() {
                     {username ?? 'Player'}
                   </div>
                   <div className="text-base sm:text-lg font-bold text-bet-400 tabular-nums">
-                    {balanceMinor == null ? '—' : fromMinor(balanceMinor, 'KES')}
+                    {balanceMinor == null ? '—' : fromMinor(balanceMinor, currency)}
                   </div>
                 </div>
                 <button
-                  onClick={deposit}
+                  onClick={() => setDepositOpen(true)}
                   className="text-[11px] font-bold text-space-950 bg-brand-500 hover:bg-brand-400 transition px-3 py-2 rounded-lg"
-                  title="Add KSh 50 of play credit"
+                  title="Deposit to your wallet"
                 >
-                  + KSh 50
+                  Deposit
                 </button>
               </div>
               <button
@@ -253,6 +243,128 @@ export default function Lobby() {
       </footer>
 
       {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSuccess={onAuthSuccess} />}
+      {depositOpen && token && (
+        <DepositModal
+          token={token}
+          currency={currency}
+          onClose={() => setDepositOpen(false)}
+          onCredited={() => { const t = readToken(); if (t) refreshBalance(t); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ─── Deposit modal ────────────────────────────────────────────────────────────
+// Deposits are async: POST kicks off an M-PESA STK push, the player approves on
+// their phone, and Maplerad's webhook credits the wallet moments later. So we
+// show a "check your phone" pending state and poll /me until the balance rises.
+type DepositPhase = 'form' | 'pending' | 'credited' | 'error';
+
+function DepositModal({
+  token, currency, onClose, onCredited,
+}: {
+  token: string; currency: string; onClose: () => void; onCredited: () => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [phase, setPhase] = useState<DepositPhase>('form');
+  const [message, setMessage] = useState<string | null>(null);
+  const sym = symbolFor(currency);
+
+  const submit = async () => {
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0) { setMessage('Enter an amount greater than zero.'); return; }
+    let amountMinor: number;
+    try { amountMinor = toMinor(value, currency); } catch { setMessage('That amount is too large.'); return; }
+    setMessage(null);
+    try {
+      const res = await fetch('/api/lobby/deposit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ amountMinor }),
+      });
+      const j = (await res.json().catch(() => ({}))) as { message?: string; error?: { message?: string } };
+      if (!res.ok) { setPhase('error'); setMessage(j?.error?.message ?? 'Could not start the deposit. Try again.'); return; }
+      setPhase('pending');
+      setMessage(j?.message ?? 'Check your phone to approve the prompt.');
+    } catch {
+      setPhase('error');
+      setMessage('Network error — please try again.');
+    }
+  };
+
+  // While pending, poll the balance until the webhook credits it (~up to 3 min).
+  useEffect(() => {
+    if (phase !== 'pending') return;
+    let cancelled = false;
+    let start: number | null = null;
+    const deadline = Date.now() + 3 * 60_000;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/lobby/me', { headers: { Authorization: `Bearer ${token}` } });
+        if (res.ok) {
+          const j = (await res.json()) as { balanceMinor?: number };
+          const bal = j.balanceMinor ?? 0;
+          if (start == null) start = bal;
+          else if (bal > start) { if (!cancelled) { setPhase('credited'); onCredited(); } return; }
+        }
+      } catch { /* keep polling */ }
+      if (!cancelled && Date.now() < deadline) setTimeout(poll, 4000);
+    };
+    const id = setTimeout(poll, 4000);
+    return () => { cancelled = true; clearTimeout(id); };
+  }, [phase, token, onCredited]);
+
+  return (
+    <div className="fixed inset-0 z-40 grid place-items-center bg-space-950/70 backdrop-blur-sm p-4" onClick={onClose}>
+      <div
+        className="w-full max-w-sm rounded-panel border border-white/10 bg-space-900 p-6"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display font-extrabold text-lg">Deposit</h3>
+          <button onClick={onClose} className="text-neutral-400 hover:text-white text-xl leading-none">×</button>
+        </div>
+
+        {phase === 'credited' ? (
+          <div className="text-center py-4">
+            <div className="text-3xl mb-2">✓</div>
+            <p className="text-sm text-neutral-200">Your wallet has been topped up.</p>
+            <button onClick={onClose} className="mt-5 w-full py-2.5 rounded-control font-bold bg-brand-500 text-space-950 hover:bg-brand-400 transition">Done</button>
+          </div>
+        ) : phase === 'pending' ? (
+          <div className="text-center py-4">
+            <div className="w-8 h-8 mx-auto mb-3 rounded-full border-2 border-brand-500/30 border-t-brand-500 animate-spin" />
+            <p className="text-sm text-neutral-200">{message}</p>
+            <p className="text-xs text-neutral-500 mt-2">Waiting for confirmation — this window updates automatically.</p>
+            <button onClick={onClose} className="mt-5 w-full py-2.5 rounded-control font-bold bg-space-800 border border-white/10 text-neutral-200 hover:text-white transition">Close</button>
+          </div>
+        ) : (
+          <>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 mb-2">Amount ({currency})</label>
+            <div className="flex items-center gap-2 rounded-control bg-space-950 border border-white/10 px-3 focus-within:border-brand-500/60 transition">
+              <span className="text-neutral-400 text-sm">{sym.trim()}</span>
+              <input
+                autoFocus
+                type="number" min="0" step="any" inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+                placeholder="0.00"
+                className="flex-1 bg-transparent py-3 text-lg font-bold tabular-nums outline-none placeholder:text-neutral-600"
+              />
+            </div>
+            {message && <p className="text-xs text-loss-500 mt-2">{message}</p>}
+            <button
+              onClick={submit}
+              className="mt-5 w-full py-3 rounded-control font-black bg-brand-500 text-space-950 hover:bg-brand-400 transition"
+            >
+              Continue
+            </button>
+            <p className="text-[11px] text-neutral-500 mt-3 text-center">You'll approve the payment prompt on your phone.</p>
+          </>
+        )}
+      </div>
     </div>
   );
 }

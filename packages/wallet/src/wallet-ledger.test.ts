@@ -33,6 +33,19 @@ describe('WalletLedger', () => {
     expect(await ledger.balance(pid)).toBe(7500);
   });
 
+  it('I1: deposits with the same reference credit exactly once (idempotent replay/crash-safety)', async () => {
+    const pid = await makePlayer();
+    const ref = 'game-dep-xyz-1';
+    expect(await ledger.deposit(pid, 5000, 'KES', ref)).toBe(5000);
+    // Replay the identical credit (webhook retry / crash-then-retry): no-op.
+    expect(await ledger.deposit(pid, 5000, 'KES', ref)).toBe(5000);
+    expect(await ledger.balance(pid)).toBe(5000);
+    // A null ref is never deduped — distinct top-ups still stack.
+    await ledger.deposit(pid, 100, 'KES', null);
+    await ledger.deposit(pid, 100, 'KES', null);
+    expect(await ledger.balance(pid)).toBe(5200);
+  });
+
   it('bet reduces balance and win increases it', async () => {
     const pid = await makePlayer();
     await ledger.deposit(pid, 10_000);
