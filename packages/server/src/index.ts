@@ -25,6 +25,8 @@ import type { OperatorLedgerSource } from '@crash/wallet';
 import { scheduleDailyReconciliation } from './reconciliation/scheduler';
 import { initThemeLoader, getActiveTheme } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
+import { createSimulateRouter } from './http/simulate';
+import { createStoreEconomy } from './simulate/economy';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
 import { PgOperatorAudit } from './http/operator-audit-pg';
@@ -209,6 +211,11 @@ async function notifyBalance(playerId: string, balanceMinor: number, currency: s
 }
 
 app.use('/api/webhooks', createMapleradWebhookRouter({ maplerad, deposits, wallet, notifyBalance }));
+
+// ─── Simulate game (harvested odds + provably-fair RNG) ─────────────────────
+// Play-money casino game: build a bet slip from real harvested fixtures and
+// simulate the outcome. Mounted BEFORE registerPublicRoutes (SPA * fallback).
+app.use('/api/simulate', createSimulateRouter({ economy: createStoreEconomy() }));
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache, games });

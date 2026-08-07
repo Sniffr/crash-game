@@ -1,0 +1,4 @@
+# Odds harvester service deps.
+# OddsHarvester is the upstream scraper (jordantete/OddsHarvester) published to PyPI.
+oddsharvester>=0.1.0
+boto3>=1.34.0

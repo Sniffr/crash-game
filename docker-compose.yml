@@ -30,6 +30,19 @@ services:
       retries: 3
       start_period: 20s
 
+  # Odds harvester for the Simulate game. Scrapes upcoming odds with
+  # OddsHarvester, normalizes them, and uploads the fixtures feed to S3 (the
+  # app reads simulate/fixtures/latest.json). One-shot by default; set
+  # HARVEST_INTERVAL_SEC>0 in .env to loop, or drive it on a schedule instead.
+  harvester:
+    build:
+      context: .
+      dockerfile: services/harvester/Dockerfile
+    image: crash-harvester
+    restart: "no"
+    env_file: .env          # S3_* + HARVEST_* (see .env.example)
+    profiles: ["harvester"] # opt-in: `docker compose --profile harvester up harvester`
+
   caddy:
     image: caddy:2
     restart: unless-stopped

@@ -219,22 +219,26 @@ export default function Lobby() {
           </div>
         )}
 
-        {games == null ? (
-          <GridSkeleton />
-        ) : games.length === 0 && !loadError ? (
-          <EmptyState />
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
-            {games.map((g, i) => (
-              <GameCard
-                key={g.gameId}
-                game={g}
-                accent={accents[g.gameId] ?? FALLBACK_GRADIENTS[i % FALLBACK_GRADIENTS.length]!}
-                onDemo={() => playDemo(g.gameId)}
-                onReal={() => playReal(g.gameId)}
-              />
-            ))}
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
+          {/* Simulate — a different engine (sports bet slip + provably-fair RNG),
+              always available and deployed alongside the crash games. */}
+          <SimulateCard onPlay={() => { window.location.href = '/simulate'; }} />
+
+          {games == null
+            ? Array.from({ length: 5 }).map((_, i) => <CardSkeleton key={`sk-${i}`} />)
+            : games.map((g, i) => (
+                <GameCard
+                  key={g.gameId}
+                  game={g}
+                  accent={accents[g.gameId] ?? FALLBACK_GRADIENTS[i % FALLBACK_GRADIENTS.length]!}
+                  onDemo={() => playDemo(g.gameId)}
+                  onReal={() => playReal(g.gameId)}
+                />
+              ))}
+        </div>
+
+        {games && games.length === 0 && !loadError && (
+          <p className="mt-4 text-xs text-neutral-500">More crash games appear here once published from the Creator.</p>
         )}
       </main>
 
@@ -518,32 +522,54 @@ function GameCard({
   );
 }
 
-// ─── Empty / loading / logo ─────────────────────────────────────────────────
-function EmptyState() {
+// ─── Simulate card (distinct engine — links to the /simulate SPA) ────────────
+function SimulateCard({ onPlay }: { onPlay: () => void }) {
   return (
-    <div className="rounded-panel border border-dashed border-white/10 bg-space-800/50 px-6 py-16 text-center">
-      <RocketGlyph className="w-10 h-10 mx-auto mb-3 text-brand-400" />
-      <h3 className="font-display font-extrabold text-lg text-neutral-200">No games yet</h3>
-      <p className="text-sm text-neutral-500 mt-1">Publish one from the Creator to see it here.</p>
+    <div className="group rounded-panel border border-white/10 bg-space-800/70 overflow-hidden flex flex-col transition duration-200 hover:border-bet-400/50 hover:-translate-y-1 hover:shadow-2xl hover:shadow-bet-400/10">
+      <button
+        onClick={onPlay}
+        className="aspect-[16/10] relative flex items-start justify-between p-3 overflow-hidden text-left"
+        style={{ background: 'linear-gradient(135deg, hsl(211 90% 45%), hsl(139 65% 38%))' }}
+      >
+        <div aria-hidden className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-out bg-gradient-to-r from-transparent via-white/15 to-transparent" />
+        <div className="absolute inset-0 bg-gradient-to-t from-space-950/80 via-transparent to-transparent" />
+        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-[0.14em] bg-bet-400 text-space-950">Sports</span>
+        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] bg-space-950/50 backdrop-blur-sm border border-white/10 text-white">simulate</span>
+        <div aria-hidden className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition duration-200">
+          <span className="grid place-items-center w-14 h-14 rounded-full bg-space-950/60 backdrop-blur-sm border border-white/20 scale-90 group-hover:scale-100 transition">
+            <svg viewBox="0 0 24 24" className="w-6 h-6 text-white translate-x-0.5" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+          </span>
+        </div>
+        <h3 className="absolute z-10 bottom-2.5 left-3 right-3 font-display font-extrabold text-lg tracking-tight truncate drop-shadow">Simulate Bets</h3>
+      </button>
+      <div className="p-3.5 flex items-center gap-2">
+        <span className="mr-auto inline-flex items-center gap-1.5 text-[10px] font-semibold text-neutral-400">
+          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-bet-400" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
+          Real odds · provably fair
+        </span>
+        <button
+          onClick={onPlay}
+          className="rounded-control px-4 py-2 text-xs font-bold uppercase tracking-wide bg-brand-500 text-space-950 hover:bg-brand-400 transition"
+        >
+          Play
+        </button>
+      </div>
     </div>
   );
 }
 
-function GridSkeleton() {
+// ─── Loading card skeleton ───────────────────────────────────────────────────
+function CardSkeleton() {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
-      {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="rounded-panel border border-white/5 bg-space-800/60 overflow-hidden">
-          <div className="h-36 bg-space-700/60 animate-pulse" />
-          <div className="p-4 flex flex-col gap-3">
-            <div className="h-4 w-2/3 rounded bg-space-700/70 animate-pulse" />
-            <div className="grid grid-cols-2 gap-2">
-              <div className="h-9 rounded bg-space-700/70 animate-pulse" />
-              <div className="h-9 rounded bg-space-700/70 animate-pulse" />
-            </div>
-          </div>
+    <div className="rounded-panel border border-white/5 bg-space-800/60 overflow-hidden">
+      <div className="h-36 bg-space-700/60 animate-pulse" />
+      <div className="p-4 flex flex-col gap-3">
+        <div className="h-4 w-2/3 rounded bg-space-700/70 animate-pulse" />
+        <div className="grid grid-cols-2 gap-2">
+          <div className="h-9 rounded bg-space-700/70 animate-pulse" />
+          <div className="h-9 rounded bg-space-700/70 animate-pulse" />
         </div>
-      ))}
+      </div>
     </div>
   );
 }

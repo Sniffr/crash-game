@@ -1,0 +1,26 @@
+{
+  "feedVersion": 1,
+  "generatedAt": "2026-08-07T06:00:00Z",
+  "source": "sample",
+  "sport": "football",
+  "fixtures": [
+    {
+      "eventId": "arsenal-chelsea-SAMPLE01",
+      "sport": "football",
+      "league": "England Premier League",
+      "home": "Arsenal",
+      "away": "Chelsea",
+      "kickoff": "2026-08-07T17:30:00Z",
+      "markets": { "1x2": { "home": 2.1, "draw": 3.4, "away": 3.35 } }
+    },
+    {
+      "eventId": "real-madrid-barcelona-SAMPLE02",
+      "sport": "football",
+      "league": "Spain LaLiga",
+      "home": "Real Madrid",
+      "away": "Barcelona",
+      "kickoff": "2026-08-08T19:00:00Z",
+      "markets": { "1x2": { "home": 2.35, "draw": 3.5, "away": 2.9 } }
+    }
+  ]
+}
