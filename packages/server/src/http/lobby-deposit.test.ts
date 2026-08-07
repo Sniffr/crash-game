@@ -70,7 +70,7 @@ describe('lobby-deposit router', () => {
       currency: 'KES',
       amountMinor: 5000,
       phone,
-      bankCode: '1291',
+      bankCode: '1271',
       reference: res.body.reference,
     });
   });
