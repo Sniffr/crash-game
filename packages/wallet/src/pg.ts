@@ -87,15 +87,37 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       player_id    uuid NOT NULL REFERENCES players(player_id),
       currency     text NOT NULL DEFAULT 'KES',
       amount_minor bigint NOT NULL,                     -- +credit / -debit
-      kind         text NOT NULL,                       -- 'deposit'|'bet'|'win'|'adjust'
+      kind         text NOT NULL,                       -- 'deposit'|'bet'|'win'|'adjust'|'withdraw'|'refund'
       ref          text,
       created_at   timestamptz NOT NULL DEFAULT now(),
-      CHECK (kind IN ('deposit','bet','win','adjust'))
+      CHECK (kind IN ('deposit','bet','win','adjust','withdraw','refund'))
     );
     CREATE INDEX IF NOT EXISTS idx_wallet_player ON wallet_ledger(player_id, currency);
-    -- One credit per deposit reference (idempotent webhook replay + crash-safety).
-    -- Partial so it only constrains deposit rows; bet/win/adjust reuse refs freely.
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_deposit_ref ON wallet_ledger(ref) WHERE kind = 'deposit';
+    -- Widen the kind CHECK on pre-existing tables (payout adds withdraw/refund).
+    -- Name-agnostic + runs the validation scan only on the upgrade boot: find
+    -- the CHECK governing kind; if it does not already allow withdraw, drop it
+    -- (by its real name) and re-add the widened one.
+    DO $$
+    DECLARE c record;
+    BEGIN
+      SELECT conname, pg_get_constraintdef(oid) AS def INTO c
+        FROM pg_constraint
+       WHERE conrelid = 'wallet_ledger'::regclass AND contype = 'c'
+         AND pg_get_constraintdef(oid) ILIKE '%kind%'
+       LIMIT 1;
+      IF c.conname IS NULL OR c.def NOT ILIKE '%withdraw%' THEN
+        IF c.conname IS NOT NULL THEN
+          EXECUTE 'ALTER TABLE wallet_ledger DROP CONSTRAINT ' || quote_ident(c.conname);
+        END IF;
+        ALTER TABLE wallet_ledger ADD CONSTRAINT wallet_ledger_kind_check
+          CHECK (kind IN ('deposit','bet','win','adjust','withdraw','refund'));
+      END IF;
+    END $$;
+    -- One row per money-path reference (idempotent webhook replay + crash-safety).
+    -- Partial so each only constrains its own kind; bet/win/adjust reuse refs freely.
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_deposit_ref  ON wallet_ledger(ref) WHERE kind = 'deposit';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_withdraw_ref ON wallet_ledger(ref) WHERE kind = 'withdraw';
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_refund_ref   ON wallet_ledger(ref) WHERE kind = 'refund';
 
     -- ── Wave B: B2B ledger + control plane (ported from SQLite) ──────────────
     CREATE TABLE IF NOT EXISTS operators (
@@ -216,5 +238,18 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       updated_at   timestamptz NOT NULL DEFAULT now(),
       CHECK (status IN ('pending','settled','failed'))
     );
+
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      reference    text PRIMARY KEY,
+      player_id    uuid NOT NULL REFERENCES players(player_id),
+      currency     text NOT NULL,
+      amount_minor bigint NOT NULL,
+      maplerad_id  text,                                  -- Maplerad transfer id (webhook correlation)
+      status       text NOT NULL DEFAULT 'pending',
+      created_at   timestamptz NOT NULL DEFAULT now(),
+      updated_at   timestamptz NOT NULL DEFAULT now(),
+      CHECK (status IN ('pending','settled','failed'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_withdrawals_maplerad ON withdrawals(maplerad_id);
   `);
 }

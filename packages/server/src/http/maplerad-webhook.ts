@@ -1,24 +1,31 @@
 import { Router } from 'express';
 import type { WalletLedger } from '@crash/wallet/wallet-ledger';
 import type { PgDepositsRepo } from '@crash/wallet/deposits-repo';
+import type { PgWithdrawalsRepo } from '@crash/wallet/withdrawals-repo';
 
 // ---------------------------------------------------------------------------
-// `POST /maplerad` — Maplerad's signed collections webhook (shared account).
+// `POST /maplerad` — Maplerad's signed webhook (shared account).
 //
-// The Maplerad account backing this integration is shared across unrelated
-// products, so this endpoint will receive events that have nothing to do with
-// game deposits (foreign `reference`s) — those are ignored (still 200, so
-// Svix stops retrying). For a real game deposit, the transaction is
-// re-verified server-side (never trust the payload alone) before the wallet
-// is credited, and crediting is idempotent on the deposit `reference`
-// (`deposits.markSettled` only flips a *pending* row, so a replayed event is
-// a harmless no-op).
+// The Maplerad account is shared across unrelated products, so this endpoint
+// receives events that aren't ours (foreign `reference`s) — those are ignored
+// (still 200, so Svix stops retrying). We handle two families:
+//
+//   collection.successful|failed  → pay-in  (deposits, ref `game-dep-…`)
+//   transfer.successful|failed    → pay-out (withdrawals, ref `game-wd-…`)
+//
+// Every value-giving branch RE-VERIFIES the transaction server-side via
+// verifyTransaction and binds it to OUR record's reference+amount+currency
+// (the C1 gate) — never trusting the payload alone. This applies to the
+// withdrawal *refund* path too: a forged transfer.failed must not refund a
+// payout that actually went through. All state flips are idempotent CAS, so
+// replayed events are harmless no-ops.
 // ---------------------------------------------------------------------------
 
 /** Minimal shape this router needs from MapleradClient — kept structural so tests can stub it. */
 export interface MapleradWebhookVerifier {
   verifyWebhookSignature(svixId: string, svixTimestamp: string, rawBody: string, sigHeader: string): boolean;
-  verifyTransaction(id: string): Promise<Record<string, unknown>>;
+  verifyTransaction(id: string): Promise<Record<string, unknown>>; // collections (pay-in)
+  verifyTransfer(id: string): Promise<Record<string, unknown>>;    // transfers (pay-out)
 }
 
 export type NotifyBalance = (playerId: string, balanceMinor: number, currency: string) => void;
@@ -26,9 +33,12 @@ export type NotifyBalance = (playerId: string, balanceMinor: number, currency: s
 export interface MapleradWebhookRouterDeps {
   maplerad: MapleradWebhookVerifier;
   deposits: PgDepositsRepo;
+  withdrawals: PgWithdrawalsRepo;
   wallet: WalletLedger;
   notifyBalance?: NotifyBalance;
 }
+
+interface VerifiedTxn { status?: unknown; reference?: unknown; amount?: unknown; currency?: unknown }
 
 export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Router {
   const router = Router();
@@ -53,60 +63,103 @@ export function createMapleradWebhookRouter(deps: MapleradWebhookRouterDeps): Ro
       return;
     }
 
-    const reference = evt?.data?.reference ?? '';
-    if (!/^game-dep-/.test(reference)) {
-      // Foreign event on the shared Maplerad account — not ours, ignore.
-      res.status(200).end();
-      return;
+    const event = evt.event ?? '';
+    const dataRef = evt?.data?.reference ?? '';
+    const dataId = evt?.data?.id ?? '';
+
+    if (event === 'collection.successful' || event === 'collection.failed') {
+      await handleCollection(deps, event, dataRef, dataId);
+    } else if (event === 'transfer.successful' || event === 'transfer.failed') {
+      await handleTransfer(deps, event, dataRef, dataId);
     }
-
-    const dep = await deps.deposits.get(reference);
-    if (!dep) {
-      res.status(200).end();
-      return;
-    }
-
-    if (evt.event === 'collection.successful') {
-      // Always re-verify server-side — never trust the webhook payload alone.
-      const verified = await deps.maplerad.verifyTransaction(evt.data?.id ?? '');
-      const v = verified as { status?: unknown; reference?: unknown; amount?: unknown; currency?: unknown };
-
-      // PRIMARY hard gate: the verified transaction's reference must be THIS
-      // deposit's reference. Our reference is unique per collection, so this
-      // proves the confirmed txn is the one we initiated for this deposit —
-      // without it, a forged webhook could point at an unrelated (but real,
-      // successfully-verified) transaction to credit a different deposit's
-      // amount. Best-effort amount/currency checks add defense in depth.
-      const statusOk = v?.status === 'success';
-      const referenceOk = String(v?.reference ?? '') === reference;
-      const amountOk = v?.amount === undefined || v?.amount === null || Number(v.amount) === dep.amountMinor;
-      const currencyOk = v?.currency === undefined || v?.currency === null || String(v.currency) === dep.currency;
-      const ok = statusOk && referenceOk && amountOk && currencyOk;
-
-      if (!ok) {
-        console.warn(
-          `[maplerad-webhook] verification did not match deposit ${reference}: ` +
-            `status=${String(v?.status)} reference=${String(v?.reference)} amount=${String(v?.amount)} currency=${String(v?.currency)}`,
-        );
-      }
-
-      if (ok) {
-        // Credit FIRST — idempotent on the reference (partial unique index),
-        // so a replay is a harmless no-op and a crash before markSettled loses
-        // nothing (the retry re-credits into the same no-op, then settles).
-        await deps.wallet.deposit(dep.playerId, dep.amountMinor, dep.currency, reference);
-        // markSettled only flips pending→settled once, so notify exactly once.
-        if (await deps.deposits.markSettled(reference)) {
-          const balanceMinor = await deps.wallet.balance(dep.playerId, dep.currency);
-          deps.notifyBalance?.(dep.playerId, balanceMinor, dep.currency);
-        }
-      }
-    } else if (evt.event === 'collection.failed') {
-      await deps.deposits.markFailed(reference);
-    }
+    // Anything else (or a foreign/unknown reference) falls through to 200.
 
     res.status(200).end();
   });
 
   return router;
+}
+
+// ── Pay-in (deposits) ────────────────────────────────────────────────────────
+async function handleCollection(
+  deps: MapleradWebhookRouterDeps, event: string, reference: string, id: string,
+): Promise<void> {
+  if (!/^gd-/.test(reference)) return; // foreign event — not ours
+  const dep = await deps.deposits.get(reference);
+  if (!dep) return;
+
+  if (event === 'collection.failed') {
+    await deps.deposits.markFailed(reference);
+    return;
+  }
+
+  // collection.successful — always re-verify, then bind to THIS deposit.
+  const v = (await deps.maplerad.verifyTransaction(id)) as VerifiedTxn;
+  if (!matches(v, reference, dep.amountMinor, dep.currency)) {
+    warnMismatch('deposit', reference, v);
+    return;
+  }
+  // Credit FIRST — idempotent on the reference (partial unique index), so a
+  // replay is a no-op and a crash before markSettled loses nothing.
+  await deps.wallet.deposit(dep.playerId, dep.amountMinor, dep.currency, reference);
+  if (await deps.deposits.markSettled(reference)) {
+    const balanceMinor = await deps.wallet.balance(dep.playerId, dep.currency);
+    deps.notifyBalance?.(dep.playerId, balanceMinor, dep.currency);
+  }
+}
+
+// ── Pay-out (withdrawals) ─────────────────────────────────────────────────────
+async function handleTransfer(
+  deps: MapleradWebhookRouterDeps, event: string, reference: string, id: string,
+): Promise<void> {
+  // The transfer webhook may not echo our reference — correlate by it when
+  // present, else by the stored Maplerad transfer id.
+  let wd = /^gw-/.test(reference) ? await deps.withdrawals.get(reference) : null;
+  if (!wd && id) wd = await deps.withdrawals.getByMapleradId(id);
+  if (!wd) return; // foreign transfer — not ours
+
+  // Re-verify (via /transfers/{id}) and bind to THIS withdrawal (same C1 gate as
+  // deposits). Guards BOTH the settle and the refund: a forged transfer.failed
+  // must not refund a payout that genuinely succeeded, and vice-versa.
+  const v = (await deps.maplerad.verifyTransfer(id)) as VerifiedTxn;
+  const succeeded = String(v?.status ?? '').toLowerCase() === 'success'; // API returns 'SUCCESS'
+  const boundToUs = String(v?.reference ?? '') === wd.reference
+    && (v?.amount === undefined || v?.amount === null || Number(v.amount) === wd.amountMinor)
+    && (v?.currency === undefined || v?.currency === null || String(v.currency) === wd.currency);
+  if (!boundToUs) {
+    warnMismatch('withdrawal', wd.reference, v);
+    return;
+  }
+
+  if (event === 'transfer.successful') {
+    if (!succeeded) { warnMismatch('withdrawal(success)', wd.reference, v); return; }
+    // Funds were already debited at reserve time — just finalise.
+    if (await deps.withdrawals.markSettled(wd.reference)) {
+      const balanceMinor = await deps.wallet.balance(wd.playerId, wd.currency);
+      deps.notifyBalance?.(wd.playerId, balanceMinor, wd.currency);
+    }
+  } else {
+    // transfer.failed — the verified txn must genuinely NOT be a success before
+    // we hand the money back, or a spoofed failure could double-pay.
+    if (succeeded) { warnMismatch('withdrawal(failed?)', wd.reference, v); return; }
+    if (await deps.withdrawals.markFailed(wd.reference)) {
+      await deps.wallet.refund(wd.playerId, wd.amountMinor, wd.reference, wd.currency);
+      const balanceMinor = await deps.wallet.balance(wd.playerId, wd.currency);
+      deps.notifyBalance?.(wd.playerId, balanceMinor, wd.currency);
+    }
+  }
+}
+
+function matches(v: VerifiedTxn, reference: string, amountMinor: number, currency: string): boolean {
+  return String(v?.status ?? '').toLowerCase() === 'success'
+    && String(v?.reference ?? '') === reference
+    && (v?.amount === undefined || v?.amount === null || Number(v.amount) === amountMinor)
+    && (v?.currency === undefined || v?.currency === null || String(v.currency) === currency);
+}
+
+function warnMismatch(kind: string, reference: string, v: VerifiedTxn): void {
+  console.warn(
+    `[maplerad-webhook] verification did not match ${kind} ${reference}: ` +
+      `status=${String(v?.status)} reference=${String(v?.reference)} amount=${String(v?.amount)} currency=${String(v?.currency)}`,
+  );
 }

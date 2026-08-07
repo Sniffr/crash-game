@@ -46,6 +46,35 @@ describe('WalletLedger', () => {
     expect(await ledger.balance(pid)).toBe(5200);
   });
 
+  it('reserve debits (overdraw-guarded) and is idempotent per reference', async () => {
+    const pid = await makePlayer();
+    await ledger.deposit(pid, 10_000);
+    const ref = 'game-wd-abc-1';
+
+    // Reserves the amount once.
+    expect(await ledger.reserve(pid, 4000, ref)).toBe(6000);
+    // Re-tried request with the same reference is a no-op (no double debit).
+    expect(await ledger.reserve(pid, 4000, ref)).toBe(6000);
+    expect(await ledger.balance(pid)).toBe(6000);
+
+    // Overdraw is rejected and leaves the balance untouched.
+    await expect(ledger.reserve(pid, 999_999, 'game-wd-abc-2')).rejects.toBeInstanceOf(InsufficientFundsError);
+    expect(await ledger.balance(pid)).toBe(6000);
+  });
+
+  it('refund credits back exactly once per reference (idempotent replay)', async () => {
+    const pid = await makePlayer();
+    await ledger.deposit(pid, 5000);
+    const ref = 'game-wd-def-1';
+    await ledger.reserve(pid, 5000, ref);
+    expect(await ledger.balance(pid)).toBe(0);
+
+    expect(await ledger.refund(pid, 5000, ref)).toBe(5000);
+    // Replayed transfer.failed webhook — must not double-refund.
+    expect(await ledger.refund(pid, 5000, ref)).toBe(5000);
+    expect(await ledger.balance(pid)).toBe(5000);
+  });
+
   it('bet reduces balance and win increases it', async () => {
     const pid = await makePlayer();
     await ledger.deposit(pid, 10_000);

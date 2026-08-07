@@ -60,7 +60,7 @@ describe('lobby-deposit router', () => {
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('pending');
     expect(typeof res.body.reference).toBe('string');
-    expect(res.body.reference.startsWith('game-dep-')).toBe(true);
+    expect(res.body.reference.startsWith('gd-')).toBe(true);
 
     const dep = await deposits.get(res.body.reference);
     expect(dep).toEqual({ playerId: player.playerId, currency: 'KES', amountMinor: 5000, status: 'pending' });

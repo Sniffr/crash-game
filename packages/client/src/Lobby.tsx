@@ -46,6 +46,7 @@ export default function Lobby() {
 
   const [authOpen, setAuthOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
   // Where to go once auth succeeds (a "Real" launch the user attempted while logged out).
   const [pendingGameId, setPendingGameId] = useState<string | null>(null);
 
@@ -180,13 +181,22 @@ export default function Lobby() {
                     {balanceMinor == null ? '—' : fromMinor(balanceMinor, currency)}
                   </div>
                 </div>
-                <button
-                  onClick={() => setDepositOpen(true)}
-                  className="text-[11px] font-bold text-space-950 bg-brand-500 hover:bg-brand-400 transition px-3 py-2 rounded-lg"
-                  title="Deposit to your wallet"
-                >
-                  Deposit
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => setDepositOpen(true)}
+                    className="text-[11px] font-bold text-space-950 bg-brand-500 hover:bg-brand-400 transition px-3 py-2 rounded-lg"
+                    title="Deposit to your wallet"
+                  >
+                    Deposit
+                  </button>
+                  <button
+                    onClick={() => setWithdrawOpen(true)}
+                    className="text-[11px] font-bold text-neutral-200 bg-space-800 border border-white/10 hover:text-white hover:bg-space-600/60 transition px-3 py-2 rounded-lg"
+                    title="Withdraw to your M-PESA"
+                  >
+                    Withdraw
+                  </button>
+                </div>
               </div>
               <button
                 onClick={logout}
@@ -249,6 +259,14 @@ export default function Lobby() {
           currency={currency}
           onClose={() => setDepositOpen(false)}
           onCredited={() => { const t = readToken(); if (t) refreshBalance(t); }}
+        />
+      )}
+      {withdrawOpen && token && (
+        <WithdrawModal
+          token={token}
+          currency={currency}
+          onClose={() => setWithdrawOpen(false)}
+          onChanged={() => { const t = readToken(); if (t) refreshBalance(t); }}
         />
       )}
     </div>
@@ -362,6 +380,101 @@ function DepositModal({
               Continue
             </button>
             <p className="text-[11px] text-neutral-500 mt-3 text-center">You'll approve the payment prompt on your phone.</p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Withdraw modal ───────────────────────────────────────────────────────────
+// Payouts are async too: POST reserves the funds (balance drops immediately) and
+// initiates an M-PESA transfer; the webhook confirms it moments later. We poll
+// /me until the balance settles, and if the transfer fails the webhook refunds
+// (balance climbs back) — either way the chip stays truthful.
+type WithdrawPhase = 'form' | 'sent' | 'error';
+
+function WithdrawModal({
+  token, currency, onClose, onChanged,
+}: {
+  token: string; currency: string; onClose: () => void; onChanged: () => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [phase, setPhase] = useState<WithdrawPhase>('form');
+  const [message, setMessage] = useState<string | null>(null);
+  const sym = symbolFor(currency);
+
+  const submit = async () => {
+    const value = Number(amount);
+    if (!Number.isFinite(value) || value <= 0) { setMessage('Enter an amount greater than zero.'); return; }
+    let amountMinor: number;
+    try { amountMinor = toMinor(value, currency); } catch { setMessage('That amount is too large.'); return; }
+    setMessage(null);
+    try {
+      const res = await fetch('/api/lobby/withdraw', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ amountMinor }),
+      });
+      const j = (await res.json().catch(() => ({}))) as { message?: string; error?: { message?: string } };
+      if (!res.ok) { setMessage(j?.error?.message ?? 'Could not start the withdrawal.'); return; }
+      setPhase('sent');
+      setMessage(j?.message ?? 'Your withdrawal is on its way.');
+      onChanged(); // balance already debited by the reserve — refresh the chip
+    } catch {
+      setMessage('Network error — please try again.');
+    }
+  };
+
+  // After a successful request, keep the chip fresh as the webhook settles or
+  // refunds (a failed transfer restores the balance).
+  useEffect(() => {
+    if (phase !== 'sent') return;
+    let cancelled = false;
+    const deadline = Date.now() + 3 * 60_000;
+    const tick = () => { if (!cancelled) { onChanged(); if (Date.now() < deadline) setTimeout(tick, 5000); } };
+    const id = setTimeout(tick, 5000);
+    return () => { cancelled = true; clearTimeout(id); };
+  }, [phase, onChanged]);
+
+  return (
+    <div className="fixed inset-0 z-40 grid place-items-center bg-space-950/70 backdrop-blur-sm p-4" onClick={onClose}>
+      <div className="w-full max-w-sm rounded-panel border border-white/10 bg-space-900 p-6" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="font-display font-extrabold text-lg">Withdraw</h3>
+          <button onClick={onClose} className="text-neutral-400 hover:text-white text-xl leading-none">×</button>
+        </div>
+
+        {phase === 'sent' ? (
+          <div className="text-center py-4">
+            <div className="text-3xl mb-2">↗</div>
+            <p className="text-sm text-neutral-200">{message}</p>
+            <p className="text-xs text-neutral-500 mt-2">Paid to your registered M-PESA number.</p>
+            <button onClick={onClose} className="mt-5 w-full py-2.5 rounded-control font-bold bg-brand-500 text-space-950 hover:bg-brand-400 transition">Done</button>
+          </div>
+        ) : (
+          <>
+            <label className="block text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 mb-2">Amount ({currency})</label>
+            <div className="flex items-center gap-2 rounded-control bg-space-950 border border-white/10 px-3 focus-within:border-brand-500/60 transition">
+              <span className="text-neutral-400 text-sm">{sym.trim()}</span>
+              <input
+                autoFocus
+                type="number" min="0" step="any" inputMode="decimal"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+                placeholder="0.00"
+                className="flex-1 bg-transparent py-3 text-lg font-bold tabular-nums outline-none placeholder:text-neutral-600"
+              />
+            </div>
+            {message && <p className="text-xs text-loss-500 mt-2">{message}</p>}
+            <button
+              onClick={submit}
+              className="mt-5 w-full py-3 rounded-control font-black bg-brand-500 text-space-950 hover:bg-brand-400 transition"
+            >
+              Withdraw
+            </button>
+            <p className="text-[11px] text-neutral-500 mt-3 text-center">Sent to the M-PESA number on your account.</p>
           </>
         )}
       </div>

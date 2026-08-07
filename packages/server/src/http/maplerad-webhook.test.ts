@@ -5,6 +5,7 @@ import express from 'express';
 import { makeTestDb, type TestDb } from '@crash/wallet/pg-test-support';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { PgDepositsRepo } from '@crash/wallet/deposits-repo';
+import { PgWithdrawalsRepo } from '@crash/wallet/withdrawals-repo';
 import { PlayersRepo } from '@crash/wallet/players-repo';
 import { MapleradClient } from '../maplerad/client.js';
 import { createMapleradWebhookRouter } from './maplerad-webhook.js';
@@ -24,6 +25,7 @@ const TS = '1700000000';
 let db: TestDb;
 let app: express.Application;
 let deposits: PgDepositsRepo;
+let withdrawals: PgWithdrawalsRepo;
 let wallet: WalletLedger;
 let players: PlayersRepo;
 let verifyTransactionResult: Record<string, unknown>;
@@ -33,6 +35,7 @@ beforeAll(async () => {
   db = await makeTestDb();
   wallet = new WalletLedger(db.pool);
   deposits = new PgDepositsRepo(db.pool);
+  withdrawals = new PgWithdrawalsRepo(db.pool);
   players = new PlayersRepo(db.pool);
 
   const realClient = new MapleradClient({ baseUrl: 'x', secretKey: 'y', webhookSecret: SECRET });
@@ -41,6 +44,7 @@ beforeAll(async () => {
     verifyWebhookSignature: (svixId: string, svixTs: string, rawBody: string, sigHeader: string) =>
       realClient.verifyWebhookSignature(svixId, svixTs, rawBody, sigHeader),
     verifyTransaction: async (_id: string) => verifyTransactionResult,
+    verifyTransfer: async (_id: string) => verifyTransactionResult,
   };
 
   notifyCalls = [];
@@ -59,7 +63,7 @@ beforeAll(async () => {
       next();
     },
   );
-  app.use('/webhooks', createMapleradWebhookRouter({ maplerad, deposits, wallet, notifyBalance }));
+  app.use('/webhooks', createMapleradWebhookRouter({ maplerad, deposits, withdrawals, wallet, notifyBalance }));
 });
 
 afterAll(async () => {
@@ -78,7 +82,7 @@ describe('maplerad webhook router', () => {
   it('credits a game deposit once on collection.successful, and a replay does not double-credit', async () => {
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    const reference = `gd-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 5000 });
     verifyTransactionResult = { id: 'tx1', reference, amount: 5000, currency: 'KES', status: 'success' };
 
@@ -117,7 +121,7 @@ describe('maplerad webhook router', () => {
   it('does not credit when server-side re-verification does not confirm success (spoofed payload)', async () => {
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    const reference = `gd-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 4200 });
     // The webhook payload claims success, but the re-verify call (the source
     // of truth) says otherwise — the handler must trust verifyTransaction,
@@ -147,7 +151,7 @@ describe('maplerad webhook router', () => {
     // verified transaction's own reference does not match B — must not credit.
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    const reference = `gd-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 500_000 }); // large pending deposit
     // verifyTransaction resolves to a genuinely successful txn, but for a
     // DIFFERENT reference (the attacker's small real deposit).
@@ -171,7 +175,7 @@ describe('maplerad webhook router', () => {
   it('C1: does not credit when the verified transaction amount does not match the deposit (reference matches but amount is smaller)', async () => {
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    const reference = `gd-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 500_000 }); // large pending deposit
     // Reference matches, but the verified amount is the attacker's tiny real
     // deposit amount, not the large pending deposit's amount — must not credit.
@@ -193,7 +197,7 @@ describe('maplerad webhook router', () => {
   });
 
   it('returns 200 and does not credit for a game-dep- reference with no matching deposit row', async () => {
-    const reference = `game-dep-unknown-${randomUUID()}`;
+    const reference = `gd-unknown-${randomUUID()}`;
     const raw = JSON.stringify({
       event: 'collection.successful',
       data: { reference, amount: 1000, status: 'success', id: 'tx6' },
@@ -208,7 +212,7 @@ describe('maplerad webhook router', () => {
   it('marks a pending deposit failed on collection.failed (no credit)', async () => {
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    const reference = `gd-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 3000 });
 
     const raw = JSON.stringify({ event: 'collection.failed', data: { reference, id: 'tx3' } });
@@ -224,7 +228,7 @@ describe('maplerad webhook router', () => {
   it('rejects a bad/absent signature with 400 and does not credit', async () => {
     const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES' });
     const playerId = player.playerId;
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    const reference = `gd-${randomUUID()}`;
     await deposits.createPending({ reference, playerId, currency: 'KES', amountMinor: 7000 });
 
     const raw = JSON.stringify({
@@ -241,5 +245,86 @@ describe('maplerad webhook router', () => {
     expect(resBadSig.status).toBe(400);
 
     expect(await wallet.balance(playerId, 'KES')).toBe(0);
+  });
+
+  // ── Pay-out (withdrawals) ────────────────────────────────────────────────
+  // Sets up a player who has requested a withdrawal: funded, reserved (debited),
+  // with a pending withdrawal row correlated to a Maplerad transfer id.
+  async function pendingWithdrawal(deposited: number, amount: number, txId: string) {
+    const player = await players.create(`t_${randomUUID()}`, 'hash', { currency: 'KES', phone: '254700000000' });
+    const playerId = player.playerId;
+    await wallet.deposit(playerId, deposited, 'KES');
+    const reference = `gw-${randomUUID()}`;
+    await wallet.reserve(playerId, amount, reference, 'KES');
+    await withdrawals.createPending({ reference, playerId, currency: 'KES', amountMinor: amount });
+    await withdrawals.setMapleradId(reference, txId);
+    return { playerId, reference };
+  }
+
+  function post(event: string, data: Record<string, unknown>, svixId: string) {
+    const raw = JSON.stringify({ event, data });
+    const sig = sign(SECRET, svixId, TS, raw);
+    return postWebhook(raw, { 'svix-id': svixId, 'svix-timestamp': TS, 'svix-signature': sig });
+  }
+
+  it('settles a withdrawal on transfer.successful and does not double-settle on replay', async () => {
+    const { playerId, reference } = await pendingWithdrawal(10_000, 4000, 'wtx1');
+    // The real /transfers/{id} returns status 'SUCCESS' (uppercase) — the handler must accept it.
+    verifyTransactionResult = { id: 'wtx1', reference, amount: 4000, currency: 'KES', status: 'SUCCESS' };
+    const n0 = notifyCalls.length;
+
+    const res1 = await post('transfer.successful', { reference, id: 'wtx1', status: 'success' }, 'w1');
+    expect(res1.status).toBe(200);
+    expect((await withdrawals.get(reference))?.status).toBe('settled');
+    expect(await wallet.balance(playerId, 'KES')).toBe(6000); // already debited at reserve
+    expect(notifyCalls.length).toBe(n0 + 1);
+
+    const res2 = await post('transfer.successful', { reference, id: 'wtx1', status: 'success' }, 'w1');
+    expect(res2.status).toBe(200);
+    expect(await wallet.balance(playerId, 'KES')).toBe(6000);
+    expect(notifyCalls.length).toBe(n0 + 1); // no second notify
+  });
+
+  it('correlates a transfer by Maplerad id when the webhook omits our reference', async () => {
+    const { playerId, reference } = await pendingWithdrawal(5000, 5000, 'wtx1b');
+    verifyTransactionResult = { id: 'wtx1b', reference, amount: 5000, currency: 'KES', status: 'success' };
+
+    const res = await post('transfer.successful', { reference: null, id: 'wtx1b' }, 'w1b');
+    expect(res.status).toBe(200);
+    expect((await withdrawals.get(reference))?.status).toBe('settled');
+    expect(await wallet.balance(playerId, 'KES')).toBe(0);
+  });
+
+  it('refunds the reserved amount on transfer.failed (idempotent — no double refund)', async () => {
+    const { playerId, reference } = await pendingWithdrawal(10_000, 5000, 'wtx2');
+    expect(await wallet.balance(playerId, 'KES')).toBe(5000);
+    verifyTransactionResult = { id: 'wtx2', reference, amount: 5000, currency: 'KES', status: 'failed' };
+
+    const res1 = await post('transfer.failed', { reference, id: 'wtx2', status: 'failed' }, 'w2');
+    expect(res1.status).toBe(200);
+    expect((await withdrawals.get(reference))?.status).toBe('failed');
+    expect(await wallet.balance(playerId, 'KES')).toBe(10_000); // refunded
+
+    const res2 = await post('transfer.failed', { reference, id: 'wtx2', status: 'failed' }, 'w2');
+    expect(res2.status).toBe(200);
+    expect(await wallet.balance(playerId, 'KES')).toBe(10_000); // not double-refunded
+  });
+
+  it('C1: does NOT refund on a transfer.failed the re-verify reports as actually successful (forged failure)', async () => {
+    const { playerId, reference } = await pendingWithdrawal(8000, 3000, 'wtx3');
+    expect(await wallet.balance(playerId, 'KES')).toBe(5000);
+    // The payout genuinely succeeded; a spoofed transfer.failed must not hand the money back too.
+    verifyTransactionResult = { id: 'wtx3', reference, amount: 3000, currency: 'KES', status: 'success' };
+
+    const res = await post('transfer.failed', { reference, id: 'wtx3' }, 'w3');
+    expect(res.status).toBe(200);
+    expect(await wallet.balance(playerId, 'KES')).toBe(5000); // NOT refunded
+    expect((await withdrawals.get(reference))?.status).toBe('pending');
+  });
+
+  it('ignores a transfer with no matching withdrawal (foreign) with 200', async () => {
+    verifyTransactionResult = { status: 'success' };
+    const res = await post('transfer.successful', { reference: 'gw-nobody', id: 'zzz' }, 'w4');
+    expect(res.status).toBe(200);
   });
 });

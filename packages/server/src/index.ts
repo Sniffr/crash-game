@@ -15,10 +15,11 @@ import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { createLobbyRouter } from './http/lobby';
 import { createLobbyPlayRouter } from './http/lobby-play';
 import { createLobbyDepositRouter } from './http/lobby-deposit';
+import { createLobbyWithdrawRouter } from './http/lobby-withdraw';
 import { createMapleradWebhookRouter } from './http/maplerad-webhook';
 import { MapleradClient } from './maplerad/client';
 import { MapleradFx } from './maplerad/fx';
-import { PgDepositsRepo } from '@crash/wallet';
+import { PgDepositsRepo, PgWithdrawalsRepo } from '@crash/wallet';
 import { createAssetsRouter } from './http/assets';
 import { setLobbyWiringDeps } from './game/lobby-deps';
 import type { OperatorLedgerSource } from '@crash/wallet';
@@ -75,8 +76,11 @@ const maplerad = new MapleradClient({
   baseUrl: process.env.MAPLERAD_BASE_URL ?? 'https://api.maplerad.com/v1',
   secretKey: process.env.MAPLERAD_SECRET_KEY ?? '',
   webhookSecret: process.env.MAPLERAD_WEBHOOK_SECRET ?? '',
+  // House KYC block required on KES MoMo payouts (meta.sender). JSON in env.
+  payoutSender: process.env.MAPLERAD_PAYOUT_SENDER ? JSON.parse(process.env.MAPLERAD_PAYOUT_SENDER) : undefined,
 });
 const deposits = new PgDepositsRepo(pool);
+const withdrawals = new PgWithdrawalsRepo(pool);
 const fx = new MapleradFx(async (from) => {
   const rates = JSON.parse(process.env.FX_RATES ?? '{}');
   const r = rates[from];
@@ -187,6 +191,7 @@ app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, 
 app.use('/api/lobby', createLobbyRouter({ players, wallet }));
 app.use('/api/lobby', createLobbyPlayRouter({ games, players, wallet }));
 app.use('/api/lobby', createLobbyDepositRouter({ players, deposits, maplerad, wallet }));
+app.use('/api/lobby', createLobbyWithdrawRouter({ players, withdrawals, maplerad, wallet }));
 app.use('/api/assets', createAssetsRouter());
 
 // ─── Maplerad webhook (Svix-signed collection events) ───────────────────────
@@ -208,7 +213,7 @@ async function notifyBalance(playerId: string, balanceMinor: number, currency: s
   }
 }
 
-app.use('/api/webhooks', createMapleradWebhookRouter({ maplerad, deposits, wallet, notifyBalance }));
+app.use('/api/webhooks', createMapleradWebhookRouter({ maplerad, deposits, withdrawals, wallet, notifyBalance }));
 
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache, games });

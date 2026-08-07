@@ -63,7 +63,8 @@ export function createLobbyDepositRouter(deps: LobbyDepositRouterDeps): Router {
       return;
     }
 
-    const reference = `game-dep-${playerId}-${randomUUID()}`;
+    // Short ref (Maplerad rejects long references); uniqueness from the uuid.
+    const reference = `gd-${randomUUID()}`;
     await deps.deposits.createPending({ reference, playerId, currency: player.currency, amountMinor });
     await deps.maplerad.collect({
       currency: player.currency,
