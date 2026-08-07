@@ -10,9 +10,9 @@ export type Rail = {
 // isPayoutable() is false and withdrawals return WITHDRAW_UNAVAILABLE.
 // ZMW/ZAR/NGN likewise stay gated until their codes are populated.
 export const RAILS: Record<string, Rail> = {
-  // LIVE M-PESA institution code is 1271 for both pay-in (MOMOCOLLECTION) and
-  // pay-out (MOMO). (Sandbox uses 187 for the MOMO payout — do not use in prod.)
-  KES: { currency: 'KES', country: 'KE', decimals: 2, payIn: { method: 'momo', institutionCode: '1271' }, payOut: { type: 'MOMO', institutionCode: '1271', scheme: 'MOBILEMONEY' }, contact: 'phone' },
+  // LIVE M-PESA institution codes differ by direction: pay-IN (MOMOCOLLECTION)
+  // MPESA = 1291; pay-OUT (MOMO) MPESA = 1271. (Sandbox payout uses 187.)
+  KES: { currency: 'KES', country: 'KE', decimals: 2, payIn: { method: 'momo', institutionCode: '1291' }, payOut: { type: 'MOMO', institutionCode: '1271', scheme: 'MOBILEMONEY' }, contact: 'phone' },
   ZMW: { currency: 'ZMW', country: 'ZM', decimals: 2, payIn: { method: 'momo' }, payOut: { type: 'MOMO', scheme: 'MOBILEMONEY' }, contact: 'phone' },
   ZAR: { currency: 'ZAR', country: 'ZA', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'WALLET' }, contact: 'email' },
   NGN: { currency: 'NGN', country: 'NG', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'NUBAN' }, contact: 'email' },
