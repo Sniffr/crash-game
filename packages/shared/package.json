@@ -9,9 +9,11 @@
     "./types": "./src/types.ts",
     "./config": "./src/config.ts",
     "./curve": "./src/curve.ts",
+    "./football": "./src/football.ts",
     "./simulate": "./src/simulate.ts"
   },
   "scripts": {
+    "build": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
     "rtp:audit": "tsx scripts/rtp-audit.ts"

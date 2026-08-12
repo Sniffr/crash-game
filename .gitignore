@@ -6,3 +6,6 @@ dist/
 data/
 
 .playwright-mcp/
+
+# Scratch output from the interface-design tooling, not a deliverable.
+.interface-design/

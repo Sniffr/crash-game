@@ -156,5 +156,10 @@ export async function getFixtures(
       out.push({ ...fx, window: w });
     }
   }
+  // The feed arrives in the scraper's league order. Sort by kickoff so callers
+  // (the listing groups by day, then shows a bare clock time) read in time
+  // order. Kickoffs are fixed-width ISO-8601 with a Z suffix, so lexical order
+  // is chronological order — no Date parsing needed.
+  out.sort((a, b) => a.kickoff.localeCompare(b.kickoff));
   return out;
 }

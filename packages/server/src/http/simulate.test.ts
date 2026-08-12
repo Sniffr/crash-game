@@ -129,6 +129,23 @@ describe('GET /api/simulate/fixtures', () => {
   });
 });
 
+describe('GET /api/simulate/fixtures/:eventId/markets', () => {
+  it('prices the full catalogue for one fixture, with 1x2 straight from the feed', async () => {
+    const res = await request(app).get('/api/simulate/fixtures/arsenal-chelsea-T1/markets');
+    expect(res.status).toBe(200);
+    expect(res.body.eventId).toBe('arsenal-chelsea-T1');
+    expect(res.body.markets.length).toBeGreaterThan(1);
+    const m = res.body.markets.find((g: any) => g.market === '1x2');
+    expect(m.options.map((o: any) => o.odds)).toEqual([2.1, 3.4, 3.35]);
+  });
+
+  it('404s on an unknown event', async () => {
+    const res = await request(app).get('/api/simulate/fixtures/nope/markets');
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('UNKNOWN_EVENT');
+  });
+});
+
 describe('POST /api/simulate/session', () => {
   it('creates a play-money session', async () => {
     const res = await request(app).post('/api/simulate/session').send({});
@@ -222,6 +239,17 @@ describe('POST /api/simulate/play', () => {
     expect(res.body.error.code).toBe('INSUFFICIENT_FUNDS');
   });
 
+  it('rejects an oversized slip before resolving any odds', async () => {
+    // No session, and every eventId is unknown: if the cap did not fire first
+    // the handler would run a Poisson fit per selection and answer 404/400.
+    const selections = Array.from({ length: CONFIG.maxLegs + 1 }, (_, i) => ({ eventId: `e${i}`, pick: 'home' }));
+    const res = await request(app)
+      .post('/api/simulate/play')
+      .send({ sessionId: 'does-not-exist', stake: 10, selections });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('INVALID_SLIP');
+  });
+
   it('rejects an unknown session', async () => {
     const res = await request(app)
       .post('/api/simulate/play')
@@ -274,6 +302,15 @@ describe('integration — real sample feed', () => {
       expect(new Date(fx.kickoff).getTime()).toBeGreaterThan(Date.now());
       expect(fx.markets[0].options).toHaveLength(3);
     }
+  });
+
+  it('returns fixtures in kickoff order', async () => {
+    // The sample feed is authored in league order and reschedules today's
+    // already-started games, so unsorted output is genuinely out of order.
+    const res = await request(realApp).get('/api/simulate/fixtures?window=all');
+    const kickoffs = res.body.fixtures.map((f: any) => f.kickoff);
+    expect(kickoffs.length).toBeGreaterThan(1);
+    expect([...kickoffs].sort()).toEqual(kickoffs);
   });
 
   it('plays a real sample slip end-to-end and settles', async () => {

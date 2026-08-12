@@ -20,6 +20,7 @@ vi.mock('../store.js', () => ({
   recordBet: vi.fn().mockResolvedValue({ bets: 1, wins: 0, losses: 0, totalWagered: 100, totalWon: 0, netProfit: -100, biggestCashout: 0, biggestWin: 0, currentStreak: -1, bestStreak: 0 }),
   recordWin: vi.fn().mockResolvedValue({ bets: 1, wins: 1, losses: 0, totalWagered: 100, totalWon: 200, netProfit: 100, biggestCashout: 2.0, biggestWin: 100, currentStreak: 1, bestStreak: 1 }),
   recordLoss: vi.fn().mockResolvedValue(undefined),
+  recordStatsSafely: vi.fn(async (fn: () => Promise<unknown>) => { try { return await fn(); } catch { return undefined; } }),
   setBalance: vi.fn().mockResolvedValue(undefined),
   getStats: vi.fn().mockResolvedValue({ bets: 0, wins: 0, losses: 0, totalWagered: 0, totalWon: 0, netProfit: 0, biggestCashout: 0, biggestWin: 0, currentStreak: 0, bestStreak: 0 }),
   getSession: vi.fn(),
@@ -41,10 +42,11 @@ import type { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { handleMessage } from './handlers.js';
 import { setLobbyWiringDeps } from '../game/lobby-deps.js';
 import { _internal__setCurrentRoundForTesting } from '../game/round.js';
-import { getSession, checkRateLimit } from '../store.js';
+import { getSession, checkRateLimit, recordBet } from '../store.js';
 import { safeSend } from './hub.js';
 
 const mockGetSession = vi.mocked(getSession);
+const mockRecordBet = vi.mocked(recordBet);
 const mockSafeSend = vi.mocked(safeSend);
 
 const noop = (_sid: string) => {};
@@ -155,6 +157,77 @@ describe('handlePlaceLobbyBet — MAX_STAKE enforced in KES via FX', () => {
       fakeWs,
       expect.objectContaining({ type: 'bet_placed' }),
     );
+  });
+
+  it('records lobby stats in MINOR units tagged with the session currency, and ships them on bet_placed', async () => {
+    // Regression: money sessions recorded no stats at all, so the in-game panel
+    // sat at zero forever. They must record in minor units + currency — writing
+    // a minor amount without the tag would render as a 100x major-unit figure.
+    const wallet = makeWalletMock();
+    setLobbyWiringDeps({ wallet, fx: stubFx });
+
+    const sessionId = 'lobby-session-stats';
+    const round = makeBettingRound(21);
+    _internal__setCurrentRoundForTesting(round);
+
+    mockGetSession.mockResolvedValueOnce({
+      sessionId,
+      displayName: 'Stat Falcon',
+      balance: 0,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+      lobbyPlayerId: 'lp-stats',
+      currency: 'NGN',
+    });
+
+    await handleMessage(
+      fakeWs,
+      { type: 'place_bet', data: { sessionId, amountMinor: 100_000 } },
+      noop,
+    );
+
+    expect(mockRecordBet).toHaveBeenCalledWith(sessionId, 100_000, 'NGN');
+    expect(mockSafeSend).toHaveBeenCalledWith(
+      fakeWs,
+      expect.objectContaining({
+        type: 'bet_placed',
+        data: expect.objectContaining({ stats: expect.objectContaining({ bets: 1 }) }),
+      }),
+    );
+  });
+
+  it('a stats-store outage does not fail a bet whose wallet debit already succeeded', async () => {
+    const wallet = makeWalletMock();
+    setLobbyWiringDeps({ wallet, fx: stubFx });
+    mockRecordBet.mockRejectedValueOnce(new Error('store offline'));
+
+    const sessionId = 'lobby-session-stats-down';
+    const round = makeBettingRound(22);
+    _internal__setCurrentRoundForTesting(round);
+
+    mockGetSession.mockResolvedValueOnce({
+      sessionId,
+      displayName: 'Resilient Falcon',
+      balance: 0,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 3_600_000,
+      lobbyPlayerId: 'lp-down',
+      currency: 'NGN',
+    });
+
+    await handleMessage(
+      fakeWs,
+      { type: 'place_bet', data: { sessionId, amountMinor: 100_000 } },
+      noop,
+    );
+
+    // The bet stands and the player is told so — just without a stats field.
+    expect(wallet.bet).toHaveBeenCalledWith('lp-down', 100_000, expect.any(String), 'NGN');
+    expect(round.bets).toHaveLength(1);
+    const frame = mockSafeSend.mock.calls.map((c) => c[1]).find((f) => f?.type === 'bet_placed');
+    expect(frame).toBeTruthy();
+    expect(frame.data.stats).toBeUndefined();
+    expect(mockSafeSend).not.toHaveBeenCalledWith(fakeWs, expect.objectContaining({ type: 'error' }));
   });
 
   it('M2: an FX outage (toKesMinor throws) rejects the bet gracefully instead of throwing out of the handler', async () => {

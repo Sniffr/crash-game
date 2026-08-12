@@ -8,6 +8,7 @@ import {
   checkRateLimit,
   adjustBalance,
   recordBet,
+  recordStatsSafely,
   appendHistory,
   setBalance,
   StoreOfflineError,
@@ -293,10 +294,21 @@ export async function handlePlaceOperatorBet(
     attachSession(sessionId);
     sessionMeta.set(sessionId, { displayName: session.displayName });
 
+    // Stats are best-effort and recorded in MINOR units for money sessions. The
+    // wallet debit has already succeeded by this point, so a stats-store failure
+    // must never surface as a failed bet.
+    const stats = await recordStatsSafely(() =>
+      recordBet(sessionId, amountMinor, placeResult.currency ?? session.currency!));
+
     // Include post-debit balanceMinor so the iframe header updates live
     safeSend(ws, {
       type: 'bet_placed',
-      data: { bet, isOperator: true, balanceMinor: placeResult.balanceMinor, currency: placeResult.currency },
+      data: {
+        bet, isOperator: true,
+        balanceMinor: placeResult.balanceMinor,
+        currency: placeResult.currency,
+        ...(stats ? { stats } : {}),
+      },
     });
     broadcast({
       type: 'new_bet',
@@ -398,7 +410,18 @@ export async function handlePlaceLobbyBet(
     currentRound.bets.push(bet);
     attachSession(sessionId);
 
-    safeSend(ws, { type: 'bet_placed', data: { bet, isOperator: true, balanceMinor, currency: session.currency ?? DEFAULT_CURRENCY } });
+    // Best-effort, minor units — the wallet debit already succeeded above.
+    const stats = await recordStatsSafely(() =>
+      recordBet(sessionId, amountMinor, session.currency ?? DEFAULT_CURRENCY));
+
+    safeSend(ws, {
+      type: 'bet_placed',
+      data: {
+        bet, isOperator: true, balanceMinor,
+        currency: session.currency ?? DEFAULT_CURRENCY,
+        ...(stats ? { stats } : {}),
+      },
+    });
     broadcast({
       type: 'new_bet',
       data: {

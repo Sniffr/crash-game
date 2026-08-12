@@ -38,9 +38,20 @@ function slug(s: string): string {
 }
 
 export function buildSampleFeed(nowMs: number): FixturesFeed {
+  // Today's fixed hours fall into the past once the day is old enough (the
+  // 17:00/19:00 UTC pair is gone by evening), which would leave the `today`
+  // window empty and contradict this file's promise above. Any today fixture
+  // that has already kicked off is pushed to a staggered slot shortly from
+  // now, so today always has something simulatable.
+  let rescheduled = 0;
+
   const fixtures: Fixture[] = SAMPLE.map((m) => {
     const d = new Date(nowMs + m.dayOffset * 86_400_000);
     d.setUTCHours(m.hour, 0, 0, 0);
+    if (m.dayOffset === 0 && d.getTime() <= nowMs) {
+      rescheduled += 1;
+      d.setTime(nowMs + rescheduled * 45 * 60_000);
+    }
     const kickoff = d.toISOString().replace(/\.\d{3}Z$/, 'Z');
     return {
       eventId: `${slug(m.home)}-${slug(m.away)}-SAMPLE`,

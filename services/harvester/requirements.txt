@@ -1,4 +1,8 @@
 # Odds harvester service deps.
-# OddsHarvester is the upstream scraper (jordantete/OddsHarvester) published to PyPI.
-oddsharvester>=0.1.0
+#
+# We drive Playwright directly (see oddsportal_listing.py) rather than using the
+# `oddsharvester` package: its selectors no longer match OddsPortal's listing
+# markup, so it returns zero rows for every date. Pin playwright to the base
+# image's tag so the bundled browsers match the driver.
+playwright==1.62.0
 boto3>=1.34.0

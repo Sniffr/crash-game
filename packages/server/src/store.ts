@@ -317,32 +317,49 @@ export async function getStats(sessionId: string): Promise<SessionStats> {
   return s ?? { ...ZERO_STATS };
 }
 
-async function mutateStats(sessionId: string, fn: (s: SessionStats) => void): Promise<SessionStats> {
+/**
+ * `currency` marks the record as money-session stats, whose monetary fields are
+ * integer minor units. It is stamped on the first write and never changed — a
+ * session's type is fixed at creation, so a record can't legitimately switch
+ * scales, and refusing to overwrite keeps a stray call from corrupting one.
+ */
+async function mutateStats(
+  sessionId: string,
+  fn: (s: SessionStats) => void,
+  currency?: string,
+): Promise<SessionStats> {
   return withLock(`${sessionId}:stats`, async () => {
     const s = (await jget<SessionStats>(statsKey(sessionId))) ?? { ...ZERO_STATS };
+    if (currency && !s.currency) s.currency = currency;
     fn(s);
-    // quantize all monetary fields
-    s.totalWagered = quantize(s.totalWagered);
-    s.totalWon = quantize(s.totalWon);
-    s.netProfit = quantize(s.netProfit);
-    s.biggestWin = quantize(s.biggestWin);
+    // Minor units are integers already; quantizing them to 2dp is meaningless
+    // and loses precision on large values. Demo credits stay at 2dp.
+    const norm = s.currency ? Math.round : quantize;
+    s.totalWagered = norm(s.totalWagered);
+    s.totalWon = norm(s.totalWon);
+    s.netProfit = norm(s.netProfit);
+    s.biggestWin = norm(s.biggestWin);
     await jput(statsKey(sessionId), s);
     return s;
   });
 }
 
-export async function recordBet(sessionId: string, stake: number): Promise<SessionStats> {
+/**
+ * @param stake  demo: decimal credits. Money session: integer minor units.
+ * @param currency  set for money sessions; omit for the legacy demo path.
+ */
+export async function recordBet(sessionId: string, stake: number, currency?: string): Promise<SessionStats> {
   ensureOnline();
   return mutateStats(sessionId, (s) => {
     s.bets += 1;
     s.totalWagered += stake;
     s.netProfit -= stake;
-  });
+  }, currency);
 }
 
 /** Cashout: player gets back `payout` (= stake × multiplier). Adjusts stats accordingly. */
 export async function recordWin(
-  sessionId: string, stake: number, payout: number, multiplier: number,
+  sessionId: string, stake: number, payout: number, multiplier: number, currency?: string,
 ): Promise<SessionStats> {
   ensureOnline();
   return mutateStats(sessionId, (s) => {
@@ -354,16 +371,35 @@ export async function recordWin(
     s.biggestWin = Math.max(s.biggestWin, payout - stake);
     s.currentStreak = s.currentStreak >= 0 ? s.currentStreak + 1 : 1;
     s.bestStreak = Math.max(s.bestStreak, s.currentStreak);
-  });
+  }, currency);
 }
 
-export async function recordLoss(sessionId: string): Promise<SessionStats> {
+/**
+ * Run a stats mutation without letting it break a money flow.
+ *
+ * Stats are a display convenience; the wallet ledger is the record of truth. A
+ * store outage must never turn an already-settled bet or credit into a
+ * user-visible failure, so this swallows the error and the frame simply ships
+ * without a `stats` field (the client leaves its last values in place).
+ */
+export async function recordStatsSafely(
+  fn: () => Promise<SessionStats>,
+): Promise<SessionStats | undefined> {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error('[stats] record failed (non-fatal — money flow already settled):', err);
+    return undefined;
+  }
+}
+
+export async function recordLoss(sessionId: string, currency?: string): Promise<SessionStats> {
   ensureOnline();
   return mutateStats(sessionId, (s) => {
     s.losses += 1;
     s.currentStreak = s.currentStreak <= 0 ? s.currentStreak - 1 : -1;
     // netProfit already decremented in recordBet — nothing more to subtract
-  });
+  }, currency);
 }
 
 // ─── Rate limiting (in-memory) ───────────────────────────────────────────────

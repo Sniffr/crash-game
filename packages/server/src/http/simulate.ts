@@ -13,7 +13,8 @@
  *
  * Endpoints:
  *   POST /session              → { sessionId, balance, currency:'CREDITS' }
- *   GET  /fixtures?window=      → { window, fixtures:[...] }
+ *   GET  /fixtures?window=      → { window, fixtures:[...] } (1x2 only)
+ *   GET  /fixtures/:id/markets  → { eventId, markets:[...] } (full catalogue)
  *   POST /play                  → simulate a slip, settle the wallet, reveal seed
  *   GET  /config                → { rtp, maxStake, startingBalance }
  */
@@ -29,9 +30,17 @@ import {
   type SimulateConfig,
 } from '@crash/shared/simulate';
 import {
+  impliedFrom1x2,
+  fitGoalRates,
+  priceMarkets,
+  type GoalRates,
+  type PricedMarket,
+} from '@crash/shared/football';
+import {
   getFeed as defaultGetFeed,
   getFixtures as defaultGetFixtures,
   type Fixture,
+  type FixturesFeed,
   type FixtureWindow,
 } from '../simulate/fixtures.js';
 
@@ -94,18 +103,63 @@ export interface SimulateRouterDeps {
 // Helpers
 // ---------------------------------------------------------------------------
 
-type Pick1x2 = 'home' | 'draw' | 'away';
+/**
+ * Priced market catalogue + fitted goal rates for one fixture.
+ *
+ * The feed only carries 1x2 (that is all the listing scrape exposes), so every
+ * other market is priced from a Poisson model fitted to those real odds — the
+ * same model that later draws the scoreline, which is what keeps the two
+ * consistent. See packages/shared/src/football.ts.
+ *
+ * Fitting is a grid search, so results are memoised per fixture. The key
+ * includes the odds, so a re-harvest with moved prices invalidates naturally.
+ */
+interface FixtureMarkets {
+  markets: PricedMarket[];
+  goalRates: GoalRates;
+}
 
-const PICK_LABEL: Record<Pick1x2, string> = { home: '1', draw: 'X', away: '2' };
+const marketCache = new Map<string, FixtureMarkets>();
+
+// Dropped wholesale whenever the feed is replaced, which bounds the cache at
+// one entry per live fixture. A count bound protected nothing: on a feed bigger
+// than the bound, walking eventIds in order misses every time — and the
+// odds-in-key scheme kept entries for departed fixtures forever.
+let marketCacheFeedAt = '';
+function noteFeed(feed: FixturesFeed): void {
+  if (feed.generatedAt === marketCacheFeedAt) return;
+  marketCacheFeedAt = feed.generatedAt;
+  marketCache.clear();
+}
+
+function marketsFor(fx: Fixture): FixtureMarkets | null {
+  const m = fx.markets['1x2'];
+  if (!m) return null;
+
+  const key = `${fx.eventId}:${m.home}:${m.draw}:${m.away}`;
+  const hit = marketCache.get(key);
+  if (hit) return hit;
+
+  const { probs, overround } = impliedFrom1x2(m);
+  const goalRates = fitGoalRates(probs);
+  const value: FixtureMarkets = {
+    goalRates,
+    markets: priceMarkets(goalRates, overround, { real1x2: m }),
+  };
+
+  marketCache.set(key, value);
+  return value;
+}
 
 /** Resolve the SERVER-side odds for a (fixture, market, pick). Null if absent. */
 function oddsFor(fx: Fixture, market: string, pick: string): number | null {
-  if (market === '1x2') {
-    const m = fx.markets['1x2'];
-    if (!m) return null;
-    if (pick === 'home') return m.home;
-    if (pick === 'draw') return m.draw;
-    if (pick === 'away') return m.away;
+  const priced = marketsFor(fx);
+  if (!priced) return null;
+  for (const group of priced.markets) {
+    if (group.market !== market) continue;
+    for (const o of group.outcomes) {
+      if (o.pick === pick) return o.odds;
+    }
   }
   return null;
 }
@@ -149,6 +203,12 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
     try {
       const list = await getFixtures(window, now());
       const fixtures = list.map((fx) => {
+        // Only 1x2 here, and straight from the feed: pricing the rest costs a
+        // grid-search fit per fixture (measured 7ms; 265 fixtures = 1.9s), which
+        // on a full feed blocks the event loop — and this process also runs the
+        // live crash game. The
+        // listing renders 1x2 only; the rest load per fixture from
+        // GET /fixtures/:eventId/markets when a row is expanded.
         const m = fx.markets['1x2'];
         return {
           eventId: fx.eventId,
@@ -158,25 +218,50 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
           away: fx.away,
           kickoff: fx.kickoff,
           window: fx.window,
-          markets: m
-            ? [
-                {
-                  market: '1x2',
-                  name: 'Match Result',
-                  options: (['home', 'draw', 'away'] as Pick1x2[]).map((pick) => ({
-                    pick,
-                    label: PICK_LABEL[pick],
-                    odds: m[pick],
-                  })),
-                },
-              ]
-            : [],
+          markets: m ? [{ market: '1x2', name: 'Match Result', options: [
+            { pick: 'home', label: '1', odds: m.home },
+            { pick: 'draw', label: 'X', odds: m.draw },
+            { pick: 'away', label: '2', odds: m.away },
+          ] }] : [],
         };
       });
       res.json({ window, count: fixtures.length, fixtures });
     } catch (err) {
       res.status(503).json({ error: { code: 'FEED_UNAVAILABLE', message: (err as Error).message } });
     }
+  });
+
+  // ── GET /fixtures/:eventId/markets ────────────────────────────────────────
+  // The full priced catalogue for ONE fixture — the expensive part of the
+  // listing, deferred until a player actually expands a row.
+  router.get('/fixtures/:eventId/markets', async (req, res) => {
+    const eventId = String(req.params.eventId);
+    let feed;
+    try {
+      feed = await getFeed(now());
+    } catch (err) {
+      res.status(503).json({ error: { code: 'FEED_UNAVAILABLE', message: (err as Error).message } });
+      return;
+    }
+    noteFeed(feed);
+    const fx = feed.fixtures.find((f) => f.eventId === eventId);
+    if (!fx) {
+      res.status(404).json({ error: { code: 'UNKNOWN_EVENT', message: `event not in feed: ${eventId}` } });
+      return;
+    }
+    const priced = marketsFor(fx);
+    res.json({
+      eventId,
+      markets: (priced?.markets ?? []).map((g) => ({
+        market: g.market,
+        name: g.name,
+        options: g.outcomes.map((o) => ({
+          pick: o.pick,
+          label: o.label,
+          odds: o.odds,
+        })),
+      })),
+    });
   });
 
   // ── POST /play ────────────────────────────────────────────────────────────
@@ -209,6 +294,32 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
       res.status(400).json({ error: { code: 'EMPTY_SLIP', message: 'at least one selection required' } });
       return;
     }
+    // simulateSlip would reject this too, but only after the resolution loop
+    // below has run a Poisson fit per selection (measured 5-19ms each,
+    // synchronous, depending on JIT warmth) — an oversized slip must never buy
+    // that work. Same code + wording as assertValidSlip so the client sees no
+    // difference.
+    // ponytail: the cap bounds it, it doesn't remove it — a maxLegs slip landing
+    // on a cold cache is ~90ms of blocked event loop, shared with the live crash
+    // engine. Prefit the feed in noteFeed, or move fitting off-thread, if the
+    // multiplier broadcast starts stuttering after a feed refresh.
+    if (body.selections.length > config.maxLegs) {
+      res.status(400).json({ error: { code: 'INVALID_SLIP', message: `slip may not exceed ${config.maxLegs} legs` } });
+      return;
+    }
+
+    // Funds are checked BEFORE any odds resolution for the same reason: an
+    // anonymous caller with a made-up sessionId must not be able to spend the
+    // event loop (this process also runs the live crash game) on fitting.
+    const balance = await deps.economy.balanceOf(sessionId);
+    if (balance == null) {
+      res.status(404).json({ error: { code: 'SESSION_NOT_FOUND', message: 'unknown or expired session' } });
+      return;
+    }
+    if (balance < stake) {
+      res.status(402).json({ error: { code: 'INSUFFICIENT_FUNDS', message: 'balance too low for this stake' } });
+      return;
+    }
 
     // Resolve odds server-side from the current feed (never trust client odds).
     let feed;
@@ -218,6 +329,7 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
       res.status(503).json({ error: { code: 'FEED_UNAVAILABLE', message: (err as Error).message } });
       return;
     }
+    noteFeed(feed);
     const byId = new Map(feed.fixtures.map((f) => [f.eventId, f]));
 
     const selections: Selection[] = [];
@@ -245,18 +357,11 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
         pick,
         odds,
         label: `${fx.home} v ${fx.away} — ${pick}`,
+        // Drives the simulated scoreline. Server-side only: the client never
+        // supplies these, and they are echoed in the reveal so the player can
+        // recompute the same playthrough.
+        goalRates: marketsFor(fx)?.goalRates,
       });
-    }
-
-    // Check funds, then debit the stake.
-    const balance = await deps.economy.balanceOf(sessionId);
-    if (balance == null) {
-      res.status(404).json({ error: { code: 'SESSION_NOT_FOUND', message: 'unknown or expired session' } });
-      return;
-    }
-    if (balance < stake) {
-      res.status(402).json({ error: { code: 'INSUFFICIENT_FUNDS', message: 'balance too low for this stake' } });
-      return;
     }
 
     // Provably-fair draw.
@@ -305,19 +410,36 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
       payout,
       profit: round2(payout - stake),
       balance: round2(newBalance),
-      legs: result.legs.map((l) => ({
-        eventId: l.eventId,
-        market: l.market,
-        pick: l.pick,
-        odds: l.odds,
-        won: l.won,
-      })),
+      legs: result.legs.map((l) => {
+        const fx = byId.get(l.eventId);
+        return {
+          eventId: l.eventId,
+          market: l.market,
+          pick: l.pick,
+          odds: l.odds,
+          won: l.won,
+          // Names so the client can render "Liverpool 3 - 2 Man City".
+          home: fx?.home,
+          away: fx?.away,
+          // The simulated match behind the result.
+          score: l.score,
+          halfTimeScore: l.halfTimeScore,
+          timeline: l.timeline,
+        };
+      }),
       // Provably-fair reveal — client can recompute with verifySlip().
       fair: {
         serverSeed,
         commit: result.commit,
         nonce: result.nonce,
-        selections: selections.map((s) => ({ eventId: s.eventId, market: s.market, pick: s.pick, odds: s.odds })),
+        selections: selections.map((s) => ({
+          eventId: s.eventId,
+          market: s.market,
+          pick: s.pick,
+          odds: s.odds,
+          // Needed to recompute the scoreline, so it must be revealed too.
+          goalRates: s.goalRates,
+        })),
         rtp: config.rtp,
       },
     });

@@ -66,6 +66,24 @@ export default {
       borderRadius: {
         'panel': '16px',
         'control': '10px',
+        // Terminal scale — tighter than the game HUD's. Concentric: a btn (8)
+        // inside a card (12) with 4px padding lines up exactly.
+        'card': '12px',
+        'btn': '8px',
+        'chip': '6px',
+      },
+      // Edges are the ONLY depth strategy in the lobby/simulate chrome: no
+      // shadows (they don't read on near-black), no surface gradients. Low-alpha
+      // white so a border defines an edge without becoming a visible line.
+      borderColor: {
+        'edge': 'rgb(255 255 255 / 0.08)',
+        'edge-soft': 'rgb(255 255 255 / 0.05)',
+        'edge-strong': 'rgb(255 255 255 / 0.14)',
+      },
+      transitionTimingFunction: {
+        // Entering / interactive. Never ease-in — it stalls the first frame,
+        // which is the frame the user is watching.
+        'snap': 'cubic-bezier(0.23, 1, 0.32, 1)',
       },
     },
   },

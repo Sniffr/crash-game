@@ -126,7 +126,20 @@ export interface Session {
   lobbyPlayerId?: string;
 }
 
-/** Per-session lifetime stats. All counters are non-negative. */
+/**
+ * Per-session lifetime stats. All counters are non-negative.
+ *
+ * MONETARY UNITS ARE DISCRIMINATED BY `currency`:
+ *   currency set     → totalWagered / totalWon / netProfit / biggestWin are
+ *                      INTEGER MINOR UNITS of that currency (money sessions:
+ *                      operator-backed and personal-lobby real-money).
+ *   currency absent  → decimal major-unit credits (legacy anonymous demo
+ *                      sessions, and any record written before money sessions
+ *                      recorded stats at all).
+ *
+ * Mixing the two is a 100x error, so never format these without checking
+ * `currency` first. `biggestCashout` is a multiplier and is unitless either way.
+ */
 export interface SessionStats {
   bets: number;
   wins: number;
@@ -134,10 +147,12 @@ export interface SessionStats {
   totalWagered: number;
   totalWon: number;
   netProfit: number;
-  biggestCashout: number;   // largest cashout multiplier reached
+  biggestCashout: number;   // largest cashout multiplier reached (unitless)
   biggestWin: number;       // largest single payout
   currentStreak: number;    // positive = consecutive wins, negative = consecutive losses
   bestStreak: number;       // longest run of consecutive wins
+  /** ISO-4217 code. Present ⇒ the monetary fields above are integer minor units. */
+  currency?: string;
 }
 
 export const ZERO_STATS: SessionStats = {

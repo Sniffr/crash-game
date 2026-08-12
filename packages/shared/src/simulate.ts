@@ -33,7 +33,13 @@
  */
 
 import { createHmac } from 'crypto';
-import { commitSeed, generateServerSeed } from './rng';
+import { commitSeed } from './rng';
+import {
+  findOutcome,
+  scoreGrid,
+  type GoalRates,
+  type Score,
+} from './football';
 
 // Re-export the seed helpers so callers can `import { ... } from '@crash/shared/simulate'`.
 export { commitSeed, generateServerSeed, verifyCommit } from './rng';
@@ -73,6 +79,28 @@ export interface Selection {
   odds: number;
   /** Optional human labels, carried through untouched for display/audit. */
   label?: string;
+  /**
+   * Fitted Poisson goal rates for this fixture, used to draw the scoreline
+   * shown in the playthrough. Part of the provably-fair inputs: it is echoed
+   * in the reveal so a player can recompute the exact same scoreline.
+   *
+   * Omitted ⇒ no playthrough is generated for this leg (the leg still settles
+   * normally). See {@link DEFAULT_GOAL_RATES}.
+   */
+  goalRates?: GoalRates;
+}
+
+/** Fallback rates (~league-average) when a fixture has none attached. */
+export const DEFAULT_GOAL_RATES: GoalRates = { home: 1.45, away: 1.15 };
+
+/** One goal in the simulated playthrough. */
+export interface GoalEvent {
+  /** Minute of the goal, 1..90. */
+  minute: number;
+  /** Which side scored. */
+  team: 'home' | 'away';
+  /** Running score immediately after this goal. */
+  score: Score;
 }
 
 /** Per-leg simulation outcome. */
@@ -87,6 +115,16 @@ export interface LegResult {
   winProbability: number;
   /** True iff `u < winProbability`. */
   won: boolean;
+  /**
+   * Final score of the simulated match, drawn CONDITIONAL on `won` so the
+   * scoreline always explains the result. Absent when the leg's market isn't
+   * settled by a scoreline (unknown market token).
+   */
+  score?: Score;
+  /** Goal-by-goal playthrough that produces `score`. */
+  timeline?: GoalEvent[];
+  /** Score at half time, derived from `timeline`. */
+  halfTimeScore?: Score;
 }
 
 /** Full slip resolution. */
@@ -114,6 +152,115 @@ export function legUniform(serverSeed: string, nonce: string, index: number, sel
   const hmac = createHmac('sha256', serverSeed).update(message).digest('hex');
   const intVal = parseInt(hmac.slice(0, 13), 16);
   return intVal / 2 ** 52;
+}
+
+/**
+ * Extra uniform draws for a leg, domain-separated by `tag` so the scoreline
+ * and goal minutes never reuse the bits that decided win/loss.
+ */
+function auxUniform(serverSeed: string, nonce: string, index: number, tag: string): number {
+  const hmac = createHmac('sha256', serverSeed).update(`${nonce}:${index}:${tag}`).digest('hex');
+  return parseInt(hmac.slice(0, 13), 16) / 2 ** 52;
+}
+
+// ---------------------------------------------------------------------------
+// Playthrough: a scoreline that agrees with the leg's result
+// ---------------------------------------------------------------------------
+
+/**
+ * Draw a final score consistent with `won` for the given market/pick.
+ *
+ * The RTP engine decides win/loss FIRST (that is what keeps RTP exact — see
+ * the header maths). Only then do we pick a scoreline, sampling from the
+ * fixture's Poisson grid restricted to the scores that settle the selection
+ * the way it actually landed. So the payout maths is untouched, and the
+ * scoreline is a faithful narrative of it rather than an independent draw
+ * that might contradict the result.
+ *
+ * Returns null when the market has no score-based settlement rule.
+ */
+export function drawScore(
+  serverSeed: string,
+  nonce: string,
+  index: number,
+  sel: Selection,
+  won: boolean,
+): Score | null {
+  const outcome = findOutcome(sel.market, sel.pick);
+  if (!outcome) return null;
+
+  const grid = scoreGrid(sel.goalRates ?? DEFAULT_GOAL_RATES);
+
+  // Keep only the scorelines matching how this leg settled.
+  const candidates: Array<{ score: Score; p: number }> = [];
+  let total = 0;
+  for (let h = 0; h < grid.length; h++) {
+    for (let a = 0; a < grid[h]!.length; a++) {
+      const score: Score = { home: h, away: a };
+      if (outcome.settles(score) !== won) continue;
+      const p = grid[h]![a]!;
+      if (p <= 0) continue;
+      candidates.push({ score, p });
+      total += p;
+    }
+  }
+  // Degenerate market (always/never settles) — nothing consistent to show.
+  if (!candidates.length || total <= 0) return null;
+
+  const u = auxUniform(serverSeed, nonce, index, 'score');
+  let acc = 0;
+  const target = u * total;
+  for (const c of candidates) {
+    acc += c.p;
+    if (target < acc) return c.score;
+  }
+  return candidates[candidates.length - 1]!.score;
+}
+
+/**
+ * Spread a final score across 90 minutes as an ordered list of goals.
+ *
+ * Minutes are drawn per goal and then sorted, so the running score always ends
+ * at `score`. Ties are nudged forward so the order reads sensibly, though the
+ * 90' cap means a late cluster can still share a minute — as real ones do.
+ */
+export function buildTimeline(
+  serverSeed: string,
+  nonce: string,
+  index: number,
+  score: Score,
+): GoalEvent[] {
+  const raw: Array<{ minute: number; team: 'home' | 'away' }> = [];
+  for (let i = 0; i < score.home; i++) {
+    raw.push({ minute: 1 + Math.floor(auxUniform(serverSeed, nonce, index, `gh${i}`) * 90), team: 'home' });
+  }
+  for (let i = 0; i < score.away; i++) {
+    raw.push({ minute: 1 + Math.floor(auxUniform(serverSeed, nonce, index, `ga${i}`) * 90), team: 'away' });
+  }
+  raw.sort((x, y) => x.minute - y.minute || (x.team === y.team ? 0 : x.team === 'home' ? -1 : 1));
+
+  const running: Score = { home: 0, away: 0 };
+  let last = 0;
+  return raw.map((g) => {
+    // Non-decreasing minutes, capped at 90 — the cap wins over the nudge, so a
+    // late cluster can share a minute (~0.1% of timelines).
+    const minute = Math.min(90, Math.max(g.minute, last + 1));
+    last = minute;
+    if (g.team === 'home') running.home += 1;
+    else running.away += 1;
+    return { minute, team: g.team, score: { ...running } };
+  });
+}
+
+/** Score as at 45 minutes, from a timeline. */
+export function halfTimeFrom(timeline: GoalEvent[]): Score {
+  const ht: Score = { home: 0, away: 0 };
+  for (const g of timeline) {
+    if (g.minute > 45) break;
+    if (g.team === 'home') ht.home += 1;
+    else ht.away += 1;
+  }
+  return ht;
 }
 
 // ---------------------------------------------------------------------------
@@ -200,15 +347,27 @@ export function simulateSlip(
   const legs: LegResult[] = selections.map((sel, i) => {
     const u = legUniform(serverSeed, nonce, i, sel);
     const winProbability = Math.min(1, Math.max(0, perLegHold / sel.odds));
-    return {
+    const won = u < winProbability;
+
+    const leg: LegResult = {
       eventId: sel.eventId,
       market: sel.market,
       pick: sel.pick,
       odds: sel.odds,
       u,
       winProbability,
-      won: u < winProbability,
+      won,
     };
+
+    // Narrate the result as a scoreline where the market allows it.
+    const score = drawScore(serverSeed, nonce, i, sel, won);
+    if (score) {
+      const timeline = buildTimeline(serverSeed, nonce, i, score);
+      leg.score = score;
+      leg.timeline = timeline;
+      leg.halfTimeScore = halfTimeFrom(timeline);
+    }
+    return leg;
   });
 
   const won = legs.every((l) => l.won);
@@ -259,8 +418,31 @@ export function verifySlip(
     return { ok: false, reason: 'payout multiplier does not match recomputation' };
   }
   for (let i = 0; i < recomputed.legs.length; i++) {
-    if (recomputed.legs[i]!.won !== reported.legs[i]?.won) {
+    const mine = recomputed.legs[i]!;
+    const theirs = reported.legs[i];
+    if (mine.won !== theirs?.won) {
       return { ok: false, reason: `leg ${i} outcome does not match recomputation` };
+    }
+    // The scoreline is part of what the server committed to, so it has to
+    // recompute too — otherwise a server could show a flattering playthrough.
+    const a = mine.score;
+    const b = theirs.score;
+    if ((a == null) !== (b == null)) {
+      return { ok: false, reason: `leg ${i} scoreline presence does not match recomputation` };
+    }
+    if (a && b && (a.home !== b.home || a.away !== b.away)) {
+      return { ok: false, reason: `leg ${i} scoreline does not match recomputation` };
+    }
+    // ...and so are the two fields the client actually renders as evidence: a
+    // matching final score says nothing about the goals shown getting there.
+    // ponytail: string compare relies on both sides building these with the
+    // helpers above (same key order); walk the fields if a third-party
+    // verifier ever serialises them differently.
+    if (JSON.stringify(mine.timeline) !== JSON.stringify(theirs.timeline)) {
+      return { ok: false, reason: `leg ${i} timeline does not match recomputation` };
+    }
+    if (JSON.stringify(mine.halfTimeScore) !== JSON.stringify(theirs.halfTimeScore)) {
+      return { ok: false, reason: `leg ${i} half-time score does not match recomputation` };
     }
   }
   return { ok: true };

@@ -173,10 +173,21 @@ export class GameEngine {
     // wallet_ledger (already debited at placement); demo → RocksDB.
     for (const bet of this.round.bets) {
       if (!bet.cashedOut) bet.profit = -bet.amount;
-      if (bet.isBot || bet.cashedOut || bet.operatorId || bet.lobbyPlayerId) continue;
+      if (bet.isBot || bet.cashedOut) continue;
       const sessionId = bet.playerId;
-      void recordLoss(sessionId).catch(() => {});
-      void appendHistory(sessionId, { kind: 'crashed', roundNumber: this.roundNumber, amount: bet.amount, crashPoint, serverSeed: this.serverSeed, at: Date.now() } satisfies HistoryEntry).catch(() => {});
+      const isMoneyBet = !!(bet.operatorId || bet.lobbyPlayerId);
+
+      if (isMoneyBet) {
+        // Money bets were debited at placement, so nothing settles here — but
+        // the loss still belongs in the session's stats, which previously
+        // skipped these bets entirely and left every real-money player looking
+        // at a permanently empty panel. The session audit log stays on the demo
+        // path: it records `amount` in decimal credits and would mix units.
+        void recordLoss(sessionId, bet.currency).catch(() => {});
+      } else {
+        void recordLoss(sessionId).catch(() => {});
+        void appendHistory(sessionId, { kind: 'crashed', roundNumber: this.roundNumber, amount: bet.amount, crashPoint, serverSeed: this.serverSeed, at: Date.now() } satisfies HistoryEntry).catch(() => {});
+      }
       void getStats(sessionId).then((stats) => sendToSession(sessionId, { type: 'stats_update', data: { stats } })).catch(() => {});
     }
 

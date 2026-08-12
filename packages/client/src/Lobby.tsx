@@ -1,6 +1,23 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AuthModal, { type AuthSuccess } from './components/AuthModal';
+import CrashRail, { tierColor, tierTextColor } from './components/CrashRail';
+import {
+  AppBar, BallGlyph, Button, CheckIcon, Chip, Eyebrow, LogOutIcon, Modal, Panel,
+  PlusIcon, Readout, RocketGlyph, Spinner, Stat, TextInput, Wordmark,
+} from './components/ui';
+import { useHistories, type GameFeed } from './lib/histories';
 import { fromMinor, symbolFor, toMinor } from './lib/money';
+
+/**
+ * The lobby, built as an instrument rather than a poster wall.
+ *
+ * The player's question on arrival is "is anything worth playing right now?",
+ * and this product can actually answer it — every game's real round history is
+ * public at /api/history. So the page leads with one focal readout (the
+ * featured table's last crash point) plus its rail of recent rounds, and
+ * demotes everything else to a dense, scannable list. Colour is spent only
+ * where it means something; there are no decorative gradients.
+ */
 
 const TOKEN_KEY = 'casino_player_token';
 const USERNAME_KEY = 'casino_player_username';
@@ -11,20 +28,10 @@ interface Game {
   gameType: 'sprite' | 'gif' | string;
 }
 
-interface GameAccents {
-  from: string;
-  to: string;
-}
-
-/** Fallback banner gradients when a game's own theme can't be fetched — vivid,
- *  game-y variety (indexed by card position). */
-const FALLBACK_GRADIENTS: GameAccents[] = [
-  { from: 'hsl(21 97% 53%)', to: 'hsl(37 91% 55%)' },  // orange → amber
-  { from: 'hsl(139 65% 38%)', to: 'hsl(211 90% 45%)' }, // green → blue
-  { from: 'hsl(358 75% 59%)', to: 'hsl(21 97% 53%)' },  // red → orange
-  { from: 'hsl(211 90% 45%)', to: 'hsl(187 71% 49%)' }, // blue → teal
-  { from: 'hsl(263 82% 58%)', to: 'hsl(358 75% 59%)' }, // purple → red
-  { from: 'hsl(37 91% 55%)', to: 'hsl(358 75% 59%)' },  // amber → red
+/** Fallback tile colours when a game's own theme can't be fetched. */
+const FALLBACK_ACCENTS = [
+  '#fb6514', 'hsl(211 90% 45%)', 'hsl(138 61% 47%)',
+  'hsl(37 91% 55%)', 'hsl(263 62% 58%)', 'hsl(187 71% 44%)',
 ];
 
 function readToken(): string | null {
@@ -37,7 +44,7 @@ function readUsername(): string | null {
 export default function Lobby() {
   const [games, setGames] = useState<Game[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [accents, setAccents] = useState<Record<string, GameAccents>>({});
+  const [accents, setAccents] = useState<Record<string, string>>({});
 
   const [token, setToken] = useState<string | null>(() => readToken());
   const [username, setUsername] = useState<string | null>(() => readUsername());
@@ -46,7 +53,7 @@ export default function Lobby() {
 
   const [authOpen, setAuthOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
-  // Where to go once auth succeeds (a "Real" launch the user attempted while logged out).
+  // Where to go once auth succeeds (a "real" launch attempted while logged out).
   const [pendingGameId, setPendingGameId] = useState<string | null>(null);
 
   // ─── Load the games catalogue ──────────────────────────────────────────────
@@ -66,34 +73,30 @@ export default function Lobby() {
     return () => { cancelled = true; };
   }, []);
 
-  // ─── Lazily fetch per-game accent colors for card previews ──────────────────
+  // ─── Per-game accent, from each game's own published theme ──────────────────
   useEffect(() => {
     if (!games) return;
     let cancelled = false;
     games.forEach((g) => {
       fetch(`/api/theme?game=${encodeURIComponent(g.gameId)}`)
         .then((r) => (r.ok ? r.json() : null))
-        .then((theme: { colors?: { accent?: string; accent2?: string } } | null) => {
+        .then((theme: { colors?: { accent?: string } } | null) => {
           if (cancelled || !theme?.colors?.accent) return;
-          setAccents((prev) => ({
-            ...prev,
-            [g.gameId]: {
-              from: theme.colors!.accent2 ?? theme.colors!.accent!,
-              to: theme.colors!.accent!,
-            },
-          }));
+          setAccents((prev) => ({ ...prev, [g.gameId]: theme.colors!.accent! }));
         })
-        .catch(() => { /* fall back to a stock gradient */ });
+        .catch(() => { /* fall back to a stock colour */ });
     });
     return () => { cancelled = true; };
   }, [games]);
 
+  // ─── Live round history, the thing the whole page is built around ───────────
+  const gameIds = useMemo(() => (games ?? []).map((g) => g.gameId), [games]);
+  const feeds = useHistories(gameIds);
+
   // ─── Balance (only when logged in) ──────────────────────────────────────────
   const refreshBalance = useCallback(async (tok: string) => {
     try {
-      const res = await fetch('/api/lobby/me', {
-        headers: { Authorization: `Bearer ${tok}` },
-      });
+      const res = await fetch('/api/lobby/me', { headers: { Authorization: `Bearer ${tok}` } });
       if (res.status === 401) { logout(); return; }
       if (!res.ok) return;
       const j = (await res.json()) as { balanceMinor: number; currency?: string };
@@ -143,107 +146,112 @@ export default function Lobby() {
     window.location.href = `/play?game=${encodeURIComponent(gameId)}&mode=real`;
   };
 
-  const featured = games?.[0];
+  const featured = games?.[0] ?? null;
+  const rest = games ? games.slice(1) : [];
 
   return (
-    <div className="min-h-screen text-neutral-100 relative overflow-x-hidden">
-      {/* Ambient background — soft brand glow, sits behind everything */}
-      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10">
-        <div className="absolute -top-40 -left-32 w-[38rem] h-[38rem] rounded-full bg-brand-500/10 blur-[120px]" />
-        <div className="absolute top-1/3 -right-40 w-[34rem] h-[34rem] rounded-full bg-bet-400/10 blur-[130px]" />
-      </div>
-
-      {/* ─── Header ──────────────────────────────────────────────────────────── */}
-      <header className="sticky top-0 z-20 flex items-center justify-between px-4 sm:px-6 h-16 border-b border-white/5 bg-space-950/60 backdrop-blur-xl">
-        <div className="flex items-center gap-3 min-w-0">
-          <LobbyLogo />
-          <div className="flex flex-col min-w-0 leading-none">
-            <h1 className="font-display font-extrabold text-lg tracking-tight">
-              <span className="text-brand-500">Nova</span>
-              <span className="ml-1 text-white">Casino</span>
-            </h1>
-            <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-neutral-500 mt-1">
-              Provably-fair crash games
-            </span>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-2 sm:gap-3">
-          {token ? (
+    <div className="min-h-screen bg-space-950 text-neutral-100">
+      <AppBar
+        left={<Wordmark caption="Provably-fair crash games" />}
+        right={
+          token ? (
             <>
-              <div className="flex items-center gap-3 bg-space-900/70 border border-white/5 rounded-control pl-3 pr-1.5 py-1.5">
-                <div className="leading-tight">
-                  <div className="text-[9px] font-semibold uppercase tracking-[0.18em] text-neutral-500">
-                    {username ?? 'Player'}
-                  </div>
-                  <div className="text-base sm:text-lg font-bold text-bet-400 tabular-nums">
-                    {balanceMinor == null ? '—' : fromMinor(balanceMinor, currency)}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setDepositOpen(true)}
-                  className="text-[11px] font-bold text-space-950 bg-brand-500 hover:bg-brand-400 transition px-3 py-2 rounded-lg"
-                  title="Deposit to your wallet"
-                >
-                  Deposit
-                </button>
-              </div>
-              <button
-                onClick={logout}
-                className="text-xs font-bold text-neutral-300 hover:text-white transition px-3.5 py-2.5 rounded-control bg-space-900/70 border border-white/5"
-              >
-                Log out
-              </button>
+              <Readout label={username ?? 'Player'} value={balanceMinor == null ? '—' : fromMinor(balanceMinor, currency)} />
+              <Button variant="secondary" onClick={() => setDepositOpen(true)} title="Top up your wallet">
+                <PlusIcon className="h-4 w-4" />
+                <span className="hidden sm:inline">Deposit</span>
+              </Button>
+              {/* Text where there's room, glyph where there isn't — a 320px
+                  viewport can't hold wordmark + balance + deposit + "Log out". */}
+              <Button variant="ghost" size="sm" onClick={logout} className="hidden sm:inline-flex">Log out</Button>
+              <Button variant="ghost" size="sm" onClick={logout} aria-label="Log out" className="px-2 sm:hidden">
+                <LogOutIcon className="h-4 w-4" />
+              </Button>
             </>
           ) : (
-            <button
-              onClick={() => { setPendingGameId(null); setAuthOpen(true); }}
-              className="text-sm px-5 py-2.5 rounded-control font-bold bg-brand-500 text-space-950 hover:bg-brand-400 transition"
-            >
+            <Button variant="primary" onClick={() => { setPendingGameId(null); setAuthOpen(true); }}>
               Log in
-            </button>
-          )}
-        </div>
-      </header>
+            </Button>
+          )
+        }
+      />
 
-      {/* ─── Body ────────────────────────────────────────────────────────────── */}
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
-        {/* Hero */}
-        {featured && <Hero game={featured} onPlay={() => playDemo(featured.gameId)} />}
-
-        <SectionEyebrow>Games</SectionEyebrow>
-
+      <main className="mx-auto max-w-[1080px] px-4 pb-16 pt-6 sm:px-6 sm:pt-8">
         {loadError && (
-          <div className="mb-6 text-xs text-loss-500 bg-loss-500/10 border border-loss-500/30 rounded-control px-4 py-3">
+          <div className="mb-6 rounded-card border border-loss-500/30 bg-loss-500/10 px-4 py-3 text-[13px] text-loss-400">
             {loadError}
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-5">
-          {/* Simulate — a different engine (sports bet slip + provably-fair RNG),
-              always available and deployed alongside the crash games. */}
-          <SimulateCard onPlay={() => { window.location.href = '/simulate'; }} />
-
-          {games == null
-            ? Array.from({ length: 5 }).map((_, i) => <CardSkeleton key={`sk-${i}`} />)
-            : games.map((g, i) => (
-                <GameCard
-                  key={g.gameId}
-                  game={g}
-                  accent={accents[g.gameId] ?? FALLBACK_GRADIENTS[i % FALLBACK_GRADIENTS.length]!}
-                  onDemo={() => playDemo(g.gameId)}
-                  onReal={() => playReal(g.gameId)}
-                />
-              ))}
-        </div>
-
-        {games && games.length === 0 && !loadError && (
-          <p className="mt-4 text-xs text-neutral-500">More crash games appear here once published from the Creator.</p>
+        {games == null ? (
+          <FeaturedSkeleton />
+        ) : featured ? (
+          <Featured
+            game={featured}
+            feed={feeds[featured.gameId]}
+            accent={accents[featured.gameId] ?? FALLBACK_ACCENTS[0]!}
+            onReal={() => playReal(featured.gameId)}
+            onDemo={() => playDemo(featured.gameId)}
+          />
+        ) : (
+          <Panel className="px-6 py-14 text-center">
+            <h2 className="text-[15px] font-semibold text-neutral-200">No crash games are published yet</h2>
+            <p className="mx-auto mt-1.5 max-w-sm text-[13px] text-neutral-500">
+              Publish one from the Creator and it will appear here. Simulate is playable in the meantime.
+            </p>
+          </Panel>
         )}
+
+        {/* ─── The rest of the floor ─────────────────────────────────────── */}
+        <section className="mt-10">
+          <div className="mb-3 flex items-baseline justify-between gap-3 px-0.5">
+            <Eyebrow>More games</Eyebrow>
+            <span className="text-[11px] tabular-nums text-neutral-600">
+              {games == null ? '' : `${rest.length + 1} available`}
+            </span>
+          </div>
+
+          <Panel className="overflow-hidden">
+            <ul className="divide-y divide-white/[0.05]">
+              {games == null
+                ? Array.from({ length: 3 }).map((_, i) => <RowSkeleton key={`sk-${i}`} />)
+                : rest.map((g, i) => (
+                    <GameRow
+                      key={g.gameId}
+                      game={g}
+                      feed={feeds[g.gameId]}
+                      accent={accents[g.gameId] ?? FALLBACK_ACCENTS[(i + 1) % FALLBACK_ACCENTS.length]!}
+                      onReal={() => playReal(g.gameId)}
+                      onDemo={() => playDemo(g.gameId)}
+                    />
+                  ))}
+              <SimulateRow onPlay={() => { window.location.href = '/simulate'; }} />
+            </ul>
+          </Panel>
+        </section>
+
+        {/* Three facts, stated once, quietly — not six badges shouting. */}
+        <ul className="mt-8 grid gap-3 sm:grid-cols-3">
+          {[
+            ['Provably fair', 'Every crash point is derived from a seed you can verify yourself.'],
+            ['Instant cash-out', 'Take the multiplier the moment you want it — settlement is immediate.'],
+            ['Demo needs no account', 'Play any table for free first. Real stakes only when you say so.'],
+          ].map(([title, body]) => (
+            <li key={title} className="rounded-card border border-edge-soft px-4 py-3.5">
+              <div className="flex items-center gap-2">
+                <CheckIcon className="h-3.5 w-3.5 shrink-0 text-bet-400" />
+                <span className="text-[13px] font-semibold text-neutral-200">{title}</span>
+              </div>
+              <p className="mt-1.5 text-[12px] leading-relaxed text-neutral-500">{body}</p>
+            </li>
+          ))}
+        </ul>
       </main>
 
-      <footer className="text-center py-5 text-[11px] text-neutral-500 border-t border-white/5 bg-space-950/60 mt-10">
-        Nova Casino · simulation only · no real wagers, no real money.
+      <footer className="border-t border-edge-soft">
+        <div className="mx-auto max-w-[1080px] px-4 py-5 text-[11px] text-neutral-600 sm:px-6">
+          Nova · simulation only · no real wagers, no real money.
+        </div>
       </footer>
 
       {authOpen && <AuthModal onClose={() => setAuthOpen(false)} onSuccess={onAuthSuccess} />}
@@ -259,11 +267,180 @@ export default function Lobby() {
   );
 }
 
+// ─── Featured table ──────────────────────────────────────────────────────────
+// The one focal point on the page. It wins on size (a 44px figure against a
+// page of 11–15px text), on colour (the only tier-coloured number here), and on
+// the space around it — not by being wrapped in decoration.
+
+function Featured({
+  game, feed, accent, onReal, onDemo,
+}: {
+  game: Game; feed: GameFeed | undefined; accent: string; onReal: () => void; onDemo: () => void;
+}) {
+  const entries = feed?.entries ?? [];
+  const last = entries.length > 0 ? entries[entries.length - 1]! : null;
+  const window20 = entries.slice(-20);
+  const avg = window20.length > 0
+    ? window20.reduce((a, e) => a + e.crashPoint, 0) / window20.length
+    : null;
+  const best = entries.length > 0 ? Math.max(...entries.map((e) => e.crashPoint)) : null;
+
+  return (
+    <Panel className="animate-rise p-5 sm:p-7">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="grid h-6 w-6 shrink-0 place-items-center rounded-chip" style={{ backgroundColor: accent }}>
+          <RocketGlyph className="h-3.5 w-3.5 text-black" />
+        </span>
+        <h1 className="text-[15px] font-semibold tracking-tight text-neutral-100">{game.name}</h1>
+        {feed?.live ? <Chip tone="up"><span className="mr-0.5 inline-block h-1.5 w-1.5 animate-pulse-dot rounded-full bg-bet-400" />Live</Chip> : null}
+        <Chip className="ml-auto">Provably fair</Chip>
+      </div>
+
+      {/* The figure sizes to its content and the rail takes every remaining
+          pixel — a fixed-width rail parked at the far edge leaves a dead gap
+          that reads as an unfinished layout, not as breathing room. */}
+      <div className="mt-6 grid items-end gap-x-8 gap-y-5 sm:grid-cols-[auto_minmax(0,1fr)]">
+        <div className="min-w-0">
+          <Eyebrow>Last crash</Eyebrow>
+          <div
+            className="mt-1 text-[40px] font-bold leading-none tracking-[-0.03em] tabular-nums sm:text-[52px]"
+            style={{ color: last ? tierTextColor(last.crashPoint) : undefined }}
+          >
+            {last ? (
+              <>{last.crashPoint.toFixed(2)}<span className="ml-0.5 text-[0.5em] font-semibold opacity-60">×</span></>
+            ) : (
+              <span className="text-neutral-700">—</span>
+            )}
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="mb-2 flex items-baseline justify-between gap-3">
+            <Eyebrow>Recent rounds</Eyebrow>
+            <span className="text-[11px] text-neutral-600">
+              {entries.length > 0 ? 'newest →' : 'no rounds yet'}
+            </span>
+          </div>
+          <CrashRail history={entries} bars={44} height={52} stretch />
+        </div>
+      </div>
+
+      <div className="mt-6 grid grid-cols-3 gap-px overflow-hidden rounded-btn bg-white/[0.06]">
+        {[
+          { label: 'Avg last 20', value: avg ? `${avg.toFixed(2)}×` : '—' },
+          { label: 'Best on record', value: best ? `${best.toFixed(2)}×` : '—', tone: 'up' as const },
+          { label: 'Rounds played', value: entries.length > 0 ? entries.length.toLocaleString() : '—' },
+        ].map((s) => (
+          <div key={s.label} className="bg-space-850 px-3.5 py-3">
+            <Stat label={s.label} value={s.value} tone={entries.length > 0 ? (s.tone ?? 'default') : 'default'} />
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-6 flex flex-wrap items-center gap-3">
+        <Button variant="primary" size="lg" onClick={onReal} className="flex-1 sm:flex-none">Play for real</Button>
+        <Button variant="secondary" size="lg" onClick={onDemo} className="flex-1 sm:flex-none">Try the demo</Button>
+        <span className="w-full text-[11px] text-neutral-600 sm:w-auto">Demo needs no account.</span>
+      </div>
+    </Panel>
+  );
+}
+
+// ─── Game row ────────────────────────────────────────────────────────────────
+
+function GameRow({
+  game, feed, accent, onReal, onDemo,
+}: {
+  game: Game; feed: GameFeed | undefined; accent: string; onReal: () => void; onDemo: () => void;
+}) {
+  const entries = feed?.entries ?? [];
+  const last = entries.length > 0 ? entries[entries.length - 1]! : null;
+
+  return (
+    <li className="flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 ease-snap hover:bg-white/[0.03] sm:gap-4 sm:px-4">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-btn" style={{ backgroundColor: accent }}>
+        <RocketGlyph className="h-4 w-4 text-black" />
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="truncate text-[13px] font-semibold text-neutral-100">{game.name}</span>
+          {feed?.live && <span className="h-1.5 w-1.5 shrink-0 animate-pulse-dot rounded-full bg-bet-400" title="Rounds are running" />}
+        </div>
+        <div className="truncate text-[11px] text-neutral-500">Crash · {game.gameType}</div>
+      </div>
+
+      <CrashRail history={entries} bars={10} height={20} className="hidden md:flex" />
+
+      <div className="hidden w-[62px] text-right sm:block">
+        <div
+          className="text-[13px] font-semibold tabular-nums"
+          style={{ color: last ? tierColor(last.crashPoint) : undefined }}
+        >
+          {last ? `${last.crashPoint.toFixed(2)}×` : <span className="text-neutral-700">—</span>}
+        </div>
+        <div className="text-[10px] text-neutral-600">last</div>
+      </div>
+
+      <Button variant="quiet" size="sm" onClick={onDemo}>Demo</Button>
+      <Button variant="primary" onClick={onReal}>Play</Button>
+    </li>
+  );
+}
+
+/** Simulate is a different engine (real odds, bet slip) — it says so plainly. */
+function SimulateRow({ onPlay }: { onPlay: () => void }) {
+  return (
+    <li className="flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 ease-snap hover:bg-white/[0.03] sm:gap-4 sm:px-4">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-btn bg-bet-500">
+        <BallGlyph className="h-4 w-4 text-black" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-semibold text-neutral-100">Simulate Bets</div>
+        <div className="truncate text-[11px] text-neutral-500">Football · real harvested odds</div>
+      </div>
+      <Chip tone="up" className="hidden sm:inline-flex">Sports</Chip>
+      <Button variant="primary" onClick={onPlay}>Play</Button>
+    </li>
+  );
+}
+
+// ─── Loading states ──────────────────────────────────────────────────────────
+
+function FeaturedSkeleton() {
+  return (
+    <Panel className="p-5 sm:p-7">
+      <div className="h-6 w-40 animate-pulse rounded bg-white/[0.06]" />
+      <div className="mt-6 h-12 w-44 animate-pulse rounded bg-white/[0.06]" />
+      <div className="mt-6 h-14 animate-pulse rounded-btn bg-white/[0.04]" />
+      <div className="mt-6 flex gap-3">
+        <div className="h-12 w-40 animate-pulse rounded-btn bg-white/[0.06]" />
+        <div className="h-12 w-36 animate-pulse rounded-btn bg-white/[0.04]" />
+      </div>
+    </Panel>
+  );
+}
+
+function RowSkeleton() {
+  return (
+    <li className="flex items-center gap-4 px-4 py-2.5">
+      <div className="h-9 w-9 shrink-0 animate-pulse rounded-btn bg-white/[0.06]" />
+      <div className="flex-1">
+        <div className="h-3 w-32 animate-pulse rounded bg-white/[0.06]" />
+        <div className="mt-1.5 h-2.5 w-20 animate-pulse rounded bg-white/[0.04]" />
+      </div>
+      <div className="h-10 w-16 animate-pulse rounded-btn bg-white/[0.04]" />
+    </li>
+  );
+}
+
 // ─── Deposit modal ────────────────────────────────────────────────────────────
 // Deposits are async: POST kicks off an M-PESA STK push, the player approves on
 // their phone, and Maplerad's webhook credits the wallet moments later. So we
 // show a "check your phone" pending state and poll /me until the balance rises.
 type DepositPhase = 'form' | 'pending' | 'credited' | 'error';
+
+const QUICK_AMOUNTS = [100, 500, 1000, 5000];
 
 function DepositModal({
   token, currency, onClose, onCredited,
@@ -272,8 +449,9 @@ function DepositModal({
 }) {
   const [amount, setAmount] = useState('');
   const [phase, setPhase] = useState<DepositPhase>('form');
+  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const sym = symbolFor(currency);
+  const sym = symbolFor(currency).trim();
 
   const submit = async () => {
     const value = Number(amount);
@@ -281,6 +459,7 @@ function DepositModal({
     let amountMinor: number;
     try { amountMinor = toMinor(value, currency); } catch { setMessage('That amount is too large.'); return; }
     setMessage(null);
+    setBusy(true);
     try {
       const res = await fetch('/api/lobby/deposit', {
         method: 'POST',
@@ -294,6 +473,8 @@ function DepositModal({
     } catch {
       setPhase('error');
       setMessage('Network error — please try again.');
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -319,277 +500,73 @@ function DepositModal({
     return () => { cancelled = true; clearTimeout(id); };
   }, [phase, token, onCredited]);
 
-  return (
-    <div className="fixed inset-0 z-40 grid place-items-center bg-space-950/70 backdrop-blur-sm p-4" onClick={onClose}>
-      <div
-        className="w-full max-w-sm rounded-panel border border-white/10 bg-space-900 p-6"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-display font-extrabold text-lg">Deposit</h3>
-          <button onClick={onClose} className="text-neutral-400 hover:text-white text-xl leading-none">×</button>
-        </div>
-
-        {phase === 'credited' ? (
-          <div className="text-center py-4">
-            <div className="text-3xl mb-2">✓</div>
-            <p className="text-sm text-neutral-200">Your wallet has been topped up.</p>
-            <button onClick={onClose} className="mt-5 w-full py-2.5 rounded-control font-bold bg-brand-500 text-space-950 hover:bg-brand-400 transition">Done</button>
-          </div>
-        ) : phase === 'pending' ? (
-          <div className="text-center py-4">
-            <div className="w-8 h-8 mx-auto mb-3 rounded-full border-2 border-brand-500/30 border-t-brand-500 animate-spin" />
-            <p className="text-sm text-neutral-200">{message}</p>
-            <p className="text-xs text-neutral-500 mt-2">Waiting for confirmation — this window updates automatically.</p>
-            <button onClick={onClose} className="mt-5 w-full py-2.5 rounded-control font-bold bg-space-800 border border-white/10 text-neutral-200 hover:text-white transition">Close</button>
-          </div>
-        ) : (
-          <>
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.16em] text-neutral-500 mb-2">Amount ({currency})</label>
-            <div className="flex items-center gap-2 rounded-control bg-space-950 border border-white/10 px-3 focus-within:border-brand-500/60 transition">
-              <span className="text-neutral-400 text-sm">{sym.trim()}</span>
-              <input
-                autoFocus
-                type="number" min="0" step="any" inputMode="decimal"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
-                placeholder="0.00"
-                className="flex-1 bg-transparent py-3 text-lg font-bold tabular-nums outline-none placeholder:text-neutral-600"
-              />
-            </div>
-            {message && <p className="text-xs text-loss-500 mt-2">{message}</p>}
-            <button
-              onClick={submit}
-              className="mt-5 w-full py-3 rounded-control font-black bg-brand-500 text-space-950 hover:bg-brand-400 transition"
-            >
-              Continue
-            </button>
-            <p className="text-[11px] text-neutral-500 mt-3 text-center">You'll approve the payment prompt on your phone.</p>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Hero band ──────────────────────────────────────────────────────────────
-function Hero({ game, onPlay }: { game: Game; onPlay: () => void }) {
-  return (
-    <div className="relative overflow-hidden rounded-panel mb-6 border border-white/10 bg-gradient-to-br from-space-800 to-space-900">
-      {/* gradient mesh accents */}
-      <div aria-hidden className="pointer-events-none absolute inset-0">
-        <div className="absolute -top-24 right-10 w-96 h-96 rounded-full bg-brand-500/20 blur-[90px]" />
-        <div className="absolute -bottom-28 -left-10 w-96 h-96 rounded-full bg-bet-400/15 blur-[90px]" />
-      </div>
-
-      <div className="relative grid md:grid-cols-[1.2fr_1fr] gap-6 p-6 sm:p-9 items-center">
-        <div className="max-w-xl">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-500/15 text-brand-300 text-[10px] font-extrabold uppercase tracking-[0.16em] px-2.5 py-1 mb-4 ring-1 ring-brand-500/25">
-            <RocketGlyph className="w-3 h-3" /> Featured · {game.name}
+  if (phase === 'credited') {
+    return (
+      <Modal title="Deposit" onClose={onClose}>
+        <div className="py-4 text-center">
+          <span className="mx-auto grid h-11 w-11 place-items-center rounded-full bg-bet-500/15 text-bet-400">
+            <CheckIcon className="h-5 w-5" />
           </span>
-          <h2 className="font-display font-black text-4xl sm:text-5xl leading-[1.02] tracking-tight">
-            Cash out before<br className="hidden sm:block" /> it <span className="text-brand-400">crashes.</span>
-          </h2>
-          <p className="text-sm text-neutral-300/90 mt-3 leading-relaxed">
-            Watch the multiplier climb and grab it in time. Every round is provably fair — verify the seed yourself.
+          <p className="mt-4 text-[15px] font-semibold text-neutral-100">Wallet topped up</p>
+          <p className="mt-1 text-[13px] text-neutral-500">Your new balance is ready to play with.</p>
+          <Button variant="primary" size="lg" onClick={onClose} className="mt-6 w-full">Done</Button>
+        </div>
+      </Modal>
+    );
+  }
+
+  if (phase === 'pending') {
+    return (
+      <Modal title="Check your phone" onClose={onClose}>
+        <div className="py-4 text-center">
+          <Spinner className="mx-auto h-8 w-8 text-brand-500" />
+          <p className="mt-4 text-[13px] text-neutral-200">{message}</p>
+          <p className="mt-2 text-[12px] text-neutral-500">
+            Waiting for confirmation — this window updates on its own.
           </p>
-          <div className="flex flex-wrap items-center gap-3 mt-6">
-            <button
-              onClick={onPlay}
-              className="px-6 py-3 rounded-control font-black text-space-950 bg-brand-500 hover:bg-brand-400 transition shadow-lg shadow-brand-500/20"
-            >
-              Play free
-            </button>
-            <span className="text-xs text-neutral-400 font-semibold">No signup for demo</span>
-          </div>
-          <div className="flex flex-wrap gap-x-5 gap-y-2 mt-6 text-[11px] font-semibold text-neutral-400">
-            <TrustChip>Provably fair</TrustChip>
-            <TrustChip>Instant cash-out</TrustChip>
-            <TrustChip>Live multiplayer</TrustChip>
-          </div>
+          <Button variant="secondary" size="lg" onClick={onClose} className="mt-6 w-full">Close</Button>
         </div>
+      </Modal>
+    );
+  }
 
-        {/* Animated multiplier motif */}
-        <div className="hidden md:flex items-center justify-center">
-          <HeroMultiplier />
-        </div>
+  return (
+    <Modal
+      title="Deposit"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="primary" size="lg" onClick={submit} disabled={busy} className="w-full">
+            {busy ? <><Spinner /> Starting…</> : 'Continue'}
+          </Button>
+          <p className="mt-3 text-center text-[11px] text-neutral-600">
+            You will approve the payment prompt on your phone.
+          </p>
+        </>
+      }
+    >
+      <TextInput
+        label={`Amount (${currency})`}
+        prefix={sym}
+        autoFocus
+        type="number"
+        min="0"
+        step="any"
+        inputMode="decimal"
+        value={amount}
+        onChange={(e) => setAmount(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+        placeholder="0.00"
+        className="tabular-nums"
+      />
+      <div className="mt-3 grid grid-cols-4 gap-2">
+        {QUICK_AMOUNTS.map((v) => (
+          <Button key={v} size="sm" onClick={() => setAmount(String(v))} className="tabular-nums">
+            {v.toLocaleString()}
+          </Button>
+        ))}
       </div>
-    </div>
-  );
-}
-
-function TrustChip({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-bet-400" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
-      {children}
-    </span>
-  );
-}
-
-// A looping climb-then-reset multiplier — a tiny live taste of the game.
-function HeroMultiplier() {
-  const [m, setM] = useState(1.0);
-  useEffect(() => {
-    let raf = 0, t0 = performance.now(), cap = 2 + Math.random() * 8;
-    const tick = (now: number) => {
-      const t = (now - t0) / 1000;
-      const v = Math.pow(Math.E, 0.14 * t);
-      if (v >= cap) { t0 = now; cap = 2 + Math.random() * 8; setM(1.0); }
-      else setM(v);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
-  const col = m >= 5 ? '#fbbf24' : m >= 2 ? '#22d3ee' : '#34d399';
-  return (
-    <div className="relative w-full max-w-xs aspect-video rounded-2xl border border-white/10 bg-space-950/60 grid place-items-center overflow-hidden">
-      <div aria-hidden className="absolute inset-0 opacity-40" style={{ background: `radial-gradient(circle at 50% 60%, ${col}22, transparent 60%)` }} />
-      <div className="relative text-5xl font-black tabular-nums tracking-tight" style={{ color: col, textShadow: `0 0 24px ${col}66` }}>
-        {m.toFixed(2)}x
-      </div>
-    </div>
-  );
-}
-
-// ─── Section eyebrow ─────────────────────────────────────────────────────────
-function SectionEyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-2 mb-4">
-      <span className="grid place-items-center w-6 h-6 rounded-lg bg-brand-500/15 text-brand-400">
-        <RocketGlyph className="w-3.5 h-3.5" />
-      </span>
-      <h2 className="font-display text-xl font-extrabold tracking-tight">{children}</h2>
-    </div>
-  );
-}
-
-// ─── Game card ────────────────────────────────────────────────────────────────
-function GameCard({
-  game, accent, onDemo, onReal,
-}: {
-  game: Game; accent: GameAccents; onDemo: () => void; onReal: () => void;
-}) {
-  return (
-    <div className="group rounded-panel border border-white/10 bg-space-800/70 overflow-hidden flex flex-col transition duration-200 hover:border-brand-500/50 hover:-translate-y-1 hover:shadow-2xl hover:shadow-brand-500/10">
-      {/* Preview banner painted with the game's own theme accents (real identity) */}
-      <div
-        className="aspect-[16/10] relative flex items-start justify-between p-3 overflow-hidden"
-        style={{ background: `linear-gradient(135deg, ${accent.from}, ${accent.to})` }}
-      >
-        {/* gloss sweep on hover */}
-        <div aria-hidden className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-out bg-gradient-to-r from-transparent via-white/15 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-t from-space-950/80 via-transparent to-transparent" />
-        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-[0.14em] bg-brand-500 text-space-950">
-          New
-        </span>
-        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] bg-space-950/50 backdrop-blur-sm border border-white/10 text-white">
-          {game.gameType}
-        </span>
-        {/* hover play affordance */}
-        <div aria-hidden className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition duration-200">
-          <span className="grid place-items-center w-14 h-14 rounded-full bg-space-950/60 backdrop-blur-sm border border-white/20 scale-90 group-hover:scale-100 transition">
-            <svg viewBox="0 0 24 24" className="w-6 h-6 text-white translate-x-0.5" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
-          </span>
-        </div>
-        {/* game name over the banner */}
-        <h3 className="absolute z-10 bottom-2.5 left-3 right-3 font-display font-extrabold text-lg tracking-tight truncate drop-shadow" title={game.name}>
-          {game.name}
-        </h3>
-      </div>
-
-      <div className="p-3.5 flex items-center gap-2">
-        <span className="mr-auto inline-flex items-center gap-1.5 text-[10px] font-semibold text-neutral-400">
-          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-bet-400" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
-          Provably fair
-        </span>
-        <button
-          onClick={onDemo}
-          className="rounded-control px-4 py-2 text-xs font-bold uppercase tracking-wide bg-space-900/80 border border-white/10 text-neutral-200 hover:bg-space-600/60 hover:text-white transition"
-        >
-          Demo
-        </button>
-        <button
-          onClick={onReal}
-          className="rounded-control px-4 py-2 text-xs font-bold uppercase tracking-wide bg-brand-500 text-space-950 hover:bg-brand-400 transition"
-        >
-          Real
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Simulate card (distinct engine — links to the /simulate SPA) ────────────
-function SimulateCard({ onPlay }: { onPlay: () => void }) {
-  return (
-    <div className="group rounded-panel border border-white/10 bg-space-800/70 overflow-hidden flex flex-col transition duration-200 hover:border-bet-400/50 hover:-translate-y-1 hover:shadow-2xl hover:shadow-bet-400/10">
-      <button
-        onClick={onPlay}
-        className="aspect-[16/10] relative flex items-start justify-between p-3 overflow-hidden text-left"
-        style={{ background: 'linear-gradient(135deg, hsl(211 90% 45%), hsl(139 65% 38%))' }}
-      >
-        <div aria-hidden className="absolute inset-0 -translate-x-full group-hover:translate-x-full transition-transform duration-700 ease-out bg-gradient-to-r from-transparent via-white/15 to-transparent" />
-        <div className="absolute inset-0 bg-gradient-to-t from-space-950/80 via-transparent to-transparent" />
-        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-[0.14em] bg-bet-400 text-space-950">Sports</span>
-        <span className="relative z-10 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 text-[9px] font-bold uppercase tracking-[0.14em] bg-space-950/50 backdrop-blur-sm border border-white/10 text-white">simulate</span>
-        <div aria-hidden className="absolute inset-0 grid place-items-center opacity-0 group-hover:opacity-100 transition duration-200">
-          <span className="grid place-items-center w-14 h-14 rounded-full bg-space-950/60 backdrop-blur-sm border border-white/20 scale-90 group-hover:scale-100 transition">
-            <svg viewBox="0 0 24 24" className="w-6 h-6 text-white translate-x-0.5" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
-          </span>
-        </div>
-        <h3 className="absolute z-10 bottom-2.5 left-3 right-3 font-display font-extrabold text-lg tracking-tight truncate drop-shadow">Simulate Bets</h3>
-      </button>
-      <div className="p-3.5 flex items-center gap-2">
-        <span className="mr-auto inline-flex items-center gap-1.5 text-[10px] font-semibold text-neutral-400">
-          <svg viewBox="0 0 24 24" className="w-3.5 h-3.5 text-bet-400" fill="none" stroke="currentColor" strokeWidth={2.4} strokeLinecap="round" strokeLinejoin="round"><path d="M20 6L9 17l-5-5" /></svg>
-          Real odds · provably fair
-        </span>
-        <button
-          onClick={onPlay}
-          className="rounded-control px-4 py-2 text-xs font-bold uppercase tracking-wide bg-brand-500 text-space-950 hover:bg-brand-400 transition"
-        >
-          Play
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Loading card skeleton ───────────────────────────────────────────────────
-function CardSkeleton() {
-  return (
-    <div className="rounded-panel border border-white/5 bg-space-800/60 overflow-hidden">
-      <div className="h-36 bg-space-700/60 animate-pulse" />
-      <div className="p-4 flex flex-col gap-3">
-        <div className="h-4 w-2/3 rounded bg-space-700/70 animate-pulse" />
-        <div className="grid grid-cols-2 gap-2">
-          <div className="h-9 rounded bg-space-700/70 animate-pulse" />
-          <div className="h-9 rounded bg-space-700/70 animate-pulse" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LobbyLogo() {
-  return (
-    <div className="w-10 h-10 rounded-control bg-space-900 border border-white/10 grid place-items-center">
-      <RocketGlyph className="w-5 h-5 text-brand-500" />
-    </div>
-  );
-}
-
-// A single on-brand glyph reused across the lobby (rocket = the crash climb).
-function RocketGlyph({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z" />
-      <path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z" />
-      <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
-      <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
-    </svg>
+      {message && <p className="mt-3 text-[12px] text-loss-400">{message}</p>}
+    </Modal>
   );
 }

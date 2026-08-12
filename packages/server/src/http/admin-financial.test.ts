@@ -34,6 +34,7 @@ vi.mock('../store.js', () => ({
   adjustBalance: vi.fn(),
   appendHistory: vi.fn(),
   recordBet: vi.fn(),
+  recordStatsSafely: vi.fn(async (fn: () => Promise<unknown>) => { try { return await fn(); } catch { return undefined; } }),
   recordWin: vi.fn(),
   recordLoss: vi.fn(),
   checkRateLimit: vi.fn(async () => true),
@@ -717,8 +718,14 @@ describe('POST /admin/v1/financial/settlement/:period/invoice — spec §8.3', (
     // BTC should NOT appear in op-a's invoice
     expect(body.totals['BTC']).toBeUndefined();
 
-    // Audit row was written
-    const auditRows = await adminAudit.listFiltered({ action: 'financial.invoice.generated' }, { limit: 10 });
+    // Audit row was written. The admin router records audit rows via fire-and-forget
+    // `record()` (it returns void without awaiting the INSERT), so poll instead of
+    // racing the in-flight write — same reason as waitForAudit in admin-auth.test.ts.
+    let auditRows = await adminAudit.listFiltered({ action: 'financial.invoice.generated' }, { limit: 10 });
+    for (let i = 0; i < 100 && auditRows.rows.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      auditRows = await adminAudit.listFiltered({ action: 'financial.invoice.generated' }, { limit: 10 });
+    }
     const auditRow = auditRows.rows.find((row) => row.action === 'financial.invoice.generated');
     expect(auditRow).toBeDefined();
     expect(auditRow!.target).toBe('operator:op-a:period:2026-04');

@@ -1,5 +1,27 @@
 import { describe, it, expect } from 'vitest';
-import { formatBalance, toMinor, fromMinor } from './money';
+import { formatBalance, formatCredits, toMinor, fromMinor } from './money';
+
+describe('formatCredits', () => {
+  it('renders demo-path decimal credits in the default currency', () => {
+    expect(formatCredits(1000)).toBe('KSh 1000.00');
+    expect(formatCredits(0)).toBe('KSh 0.00');
+    expect(formatCredits(-12.5)).toBe('KSh -12.50');
+  });
+
+  it('is the same formatter formatBalance uses for a demo session', () => {
+    // SessionStats are produced only by the server's demo path (recordBet /
+    // recordWin) and are decimal credits — the same units as the demo balance.
+    // If these ever diverge, the stats panel is showing the wrong scale.
+    expect(formatCredits(1000)).toBe(formatBalance(1000, {}));
+  });
+
+  it('is NOT interchangeable with fromMinor — the units differ by 100x', () => {
+    // Guards the bug this replaced: stats formatted as if they were minor units
+    // (or a money balance formatted as credits) is a 100x display error.
+    expect(formatCredits(50)).toBe('KSh 50.00');
+    expect(fromMinor(50, 'KES')).toBe('KSh 0.50');
+  });
+});
 
 describe('formatBalance', () => {
   it('lobby real-money session (balanceMinor, no operatorId) renders dollars, not raw minor', () => {
