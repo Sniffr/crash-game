@@ -265,6 +265,23 @@ def _calibrate_offset(
     return timedelta(minutes=best)
 
 
+def _wait_for_prices(page: Page, timeout_ms: int) -> None:
+    """Block until the listing's price cells have actually filled in.
+
+    Rows render before their odds: the cells sit at "-" for a second or two
+    after `game-row` appears, and a row read at that moment carries no prices,
+    so `_parse_row` discards it as "not a 1x2 row". Waiting on the row selector
+    alone is what made this scrape return zero fixtures for every date — the
+    thing the blind 8s sleep it replaced had been quietly covering.
+    """
+    page.wait_for_function(
+        """(sel) => [...document.querySelectorAll(sel)]
+             .some((r) => (r.innerText.match(/\\d+\\.\\d+/g) || []).length >= 3)""",
+        arg=GAME_ROW,
+        timeout=timeout_ms,
+    )
+
+
 def scrape_date(
     page: Page,
     sport: str,
@@ -289,21 +306,32 @@ def scrape_date(
         page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
         try:
             page.wait_for_selector(GAME_ROW, timeout=nav_timeout_ms)
+            _wait_for_prices(page, nav_timeout_ms)
         except PlaywrightTimeout:
             # A date with no fixtures at all is a normal outcome, not a failure.
-            log.info("%s: no rows on the listing", date_yyyymmdd)
+            log.info("%s: no priced rows on the listing", date_yyyymmdd)
             return [], offset
-        # The listing lazy-renders; scroll until the row count settles.
-        previous = -1
+
+        # The listing lazy-renders AND virtualises: rows recycle as you scroll,
+        # dropping their prices on the way out. Reading once at the end loses
+        # every row that has already scrolled past, so harvest what is on
+        # screen at each step and keep the first priced sighting of each match.
+        seen: dict[str, dict[str, Any]] = {}
+        previous = prev_seen = -1
         for _ in range(12):
+            for rec in _row_records(page):
+                row = _parse_row(rec)
+                if row:
+                    seen.setdefault(row["href"], row)
             count = len(page.query_selector_all(GAME_ROW))
-            if count == previous:
+            # Stop once neither the list nor our haul is still growing.
+            if count == previous and len(seen) == prev_seen:
                 break
-            previous = count
+            previous, prev_seen = count, len(seen)
             page.mouse.wheel(0, 5_000)
             page.wait_for_timeout(800)
 
-        parsed = [r for r in (_parse_row(rec) for rec in _row_records(page)) if r]
+        parsed = list(seen.values())
     except Exception as e:  # noqa: BLE001 — one bad date must not kill the run
         log.warning("scrape failed for %s: %s: %s", date_yyyymmdd, type(e).__name__, e)
         return [], offset
