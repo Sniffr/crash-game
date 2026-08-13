@@ -424,9 +424,13 @@ function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, 
   onDelete: (gameId: string) => void; currentGameId: string;
   advanced: boolean; onToggleAdvanced: () => void; admin: string | null; onLogout: () => void;
 }) {
-  const canDelete = games.some((g) => g.gameId === currentGameId);
+  // <details> stays open after a click; collapse it so the menu isn't left
+  // hanging over the confirm dialog.
+  const closeMenu = (e: React.MouseEvent) => e.currentTarget.closest('details')?.removeAttribute('open');
   return (
-    <header className="flex items-center justify-between px-5 py-3 border-b border-ink-500/40 bg-ink-950/80 backdrop-blur-xl">
+    // relative z-40: backdrop-blur-xl makes this a stacking context, so without
+    // an explicit z-index the Games dropdown paints *under* the editor below.
+    <header className="relative z-40 flex items-center justify-between px-5 py-3 border-b border-ink-500/40 bg-ink-950/80 backdrop-blur-xl">
       <div className="flex items-center gap-3">
         <div className="w-8 h-8 rounded-control bg-gradient-to-br from-fuchsia-600 via-indigo-700 to-cyan-600 flex items-center justify-center border border-ink-500/50">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -462,26 +466,45 @@ function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, 
         >
           + New
         </button>
-        <select
-          value=""
-          onChange={(e) => { const v = e.target.value; e.target.value = ''; onOpen(v); }}
-          className="text-xs px-2 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 focus:outline-none focus:border-cyan-500/60 uppercase tracking-wider font-semibold max-w-[10rem]"
-          title="Open a published game to edit"
-        >
-          <option value="" disabled>{games.length ? 'Open game…' : 'No games yet'}</option>
-          {games.map((g) => (
-            <option key={g.gameId} value={g.gameId}>{g.name} ({g.gameId})</option>
-          ))}
-        </select>
-        {canDelete && (
-          <button
-            onClick={() => onDelete(currentGameId)}
-            className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-rose-500/40 text-rose-300 hover:bg-rose-500/15 hover:text-rose-200 transition uppercase tracking-wider font-semibold"
-            title={`Delete "${currentGameId}"`}
+        {/* Games menu — open or delete ANY published game. Previously this was a
+            <select> to open, plus a Delete button that only appeared once the
+            game was already open, so deleting meant opening it first. A <select>
+            can't host a per-row delete control; <details> gives the open/close
+            behaviour (Esc included) with no popover state or outside-click handler. */}
+        <details className="relative">
+          <summary
+            className="list-none [&::-webkit-details-marker]:hidden cursor-pointer whitespace-nowrap text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
+            title="Open or delete a published game"
           >
-            Delete
-          </button>
-        )}
+            Games ({games.length})
+          </summary>
+          <div className="absolute right-0 mt-1 z-30 w-72 max-h-80 overflow-y-auto rounded-control border border-ink-500/50 bg-ink-900/95 backdrop-blur-xl shadow-xl p-1">
+            {games.length === 0 ? (
+              <p className="px-2 py-2 text-[11px] text-slate-500">No published games yet.</p>
+            ) : games.map((g) => (
+              <div key={g.gameId} className="flex items-center gap-1 rounded-control hover:bg-ink-800/80">
+                <button
+                  onClick={(e) => { closeMenu(e); onOpen(g.gameId); }}
+                  className="flex-1 min-w-0 text-left px-2 py-1.5"
+                  title={`Open "${g.gameId}" to edit`}
+                >
+                  <span className="block truncate text-xs text-slate-200">{g.name}</span>
+                  <span className="block truncate text-[10px] text-slate-500">
+                    {g.gameId}{g.gameId === currentGameId ? ' · open' : ''}
+                  </span>
+                </button>
+                <button
+                  onClick={(e) => { closeMenu(e); onDelete(g.gameId); }}
+                  className="shrink-0 px-2 py-1.5 text-rose-400/70 hover:text-rose-300 transition"
+                  title={`Delete "${g.gameId}"`}
+                  aria-label={`Delete ${g.name}`}
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </details>
         <button
           onClick={onImportClick}
           className="text-xs px-3 py-1.5 rounded-control bg-ink-800/80 border border-ink-500/50 text-slate-300 hover:bg-ink-700 hover:text-white transition uppercase tracking-wider font-semibold"
