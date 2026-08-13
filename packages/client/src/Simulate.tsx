@@ -14,7 +14,7 @@ import {
  * the fixtures and odds stay real. Play-money only.
  *
  * Laid out as a betting terminal: fixtures are one dense divided list (grouped
- * by kickoff day), and the slip is a sticky instrument whose focal readout is
+ * by league), and the slip is a sticky instrument whose focal readout is
  * the potential payout — the number the player is actually here for. On phones
  * the slip collapses to a bottom bar that opens as a sheet, so the fixture list
  * keeps the full screen while you build.
@@ -81,7 +81,7 @@ const WINDOWS: { key: WindowKey; label: string }[] = [
 
 const STAKE_STEPS = [10, 50, 100, 500];
 
-/** Time only — the day is carried by the group header above the row. */
+/** Time only — paired with fmtDay on the row, since groups are leagues. */
 function fmtTime(iso: string): string {
   try {
     return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
@@ -90,7 +90,7 @@ function fmtTime(iso: string): string {
   }
 }
 
-/** "Today" / "Tomorrow" / "Sat 14 Sep" — the header for a run of fixtures. */
+/** "Today" / "Tomorrow" / "Sat 14 Sep" — the day shown on each fixture row. */
 function fmtDay(iso: string): string {
   try {
     const d = new Date(iso);
@@ -114,7 +114,6 @@ function fmtCredits(n: number): string {
 export default function Simulate() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [balance, setBalance] = useState<number | null>(null);
-  const [rtp, setRtp] = useState<number>(0.95);
   const [maxStake, setMaxStake] = useState<number>(1000);
 
   const [win, setWin] = useState<WindowKey>('all');
@@ -141,7 +140,6 @@ export default function Simulate() {
         if (cancelled) return;
         setSessionId(s.sessionId);
         setBalance(s.balance);
-        if (typeof c.rtp === 'number') setRtp(c.rtp);
         if (typeof c.maxStake === 'number') setMaxStake(c.maxStake);
       } catch {
         if (!cancelled) setLoadError('Could not start a Simulate session — is the server running?');
@@ -221,18 +219,21 @@ export default function Simulate() {
     setPlaying(false);
   };
 
-  // Fixtures arrive flat; grouping by kickoff day turns the list into something
-  // you can scan by time rather than one undifferentiated wall of matches.
+  // Fixtures arrive flat and kickoff-ordered. Group by league — the way a
+  // sportsbook reads — rather than by day: the window tabs already scope the
+  // time range, so league is the axis left worth scanning. A Map (not the
+  // run-length trick a sorted key allows) because leagues interleave in
+  // kickoff order; insertion order then puts the soonest league first, and
+  // each row carries its own day since a league can span the window.
   const groups = useMemo(() => {
     if (!fixtures) return null;
-    const out: { day: string; items: Fixture[] }[] = [];
+    const byLeague = new Map<string, Fixture[]>();
     for (const fx of fixtures) {
-      const day = fmtDay(fx.kickoff);
-      const tail = out[out.length - 1];
-      if (tail && tail.day === day) tail.items.push(fx);
-      else out.push({ day, items: [fx] });
+      const items = byLeague.get(fx.league);
+      if (items) items.push(fx);
+      else byLeague.set(fx.league, [fx]);
     }
-    return out;
+    return [...byLeague].map(([league, items]) => ({ league, items }));
   }, [fixtures]);
 
   const slipPanel = (
@@ -246,7 +247,6 @@ export default function Simulate() {
       playing={playing}
       playError={playError}
       disabled={!sessionId}
-      rtp={rtp}
       onRemove={removeLeg}
       onClear={clearSlip}
       onPlay={play}
@@ -302,10 +302,10 @@ export default function Simulate() {
           ) : (
             <div className="flex flex-col gap-5">
               {groups.map((group) => (
-                <div key={group.day}>
-                  <div className="mb-2 flex items-baseline justify-between px-0.5">
-                    <Eyebrow>{group.day}</Eyebrow>
-                    <span className="text-[11px] tabular-nums text-neutral-600">{group.items.length}</span>
+                <div key={group.league}>
+                  <div className="mb-2 flex items-baseline justify-between gap-3 px-0.5">
+                    <Eyebrow className="min-w-0 truncate">{group.league}</Eyebrow>
+                    <span className="shrink-0 text-[11px] tabular-nums text-neutral-600">{group.items.length}</span>
                   </div>
                   <Panel className="overflow-hidden">
                     <ul className="divide-y divide-white/[0.05]">
@@ -391,7 +391,6 @@ export default function Simulate() {
               playing={playing}
               playError={playError}
               disabled={!sessionId}
-              rtp={rtp}
               onRemove={removeLeg}
               onClear={() => { clearSlip(); setSheetOpen(false); }}
               onPlay={play}
@@ -507,7 +506,8 @@ function FixtureRow({ fx, selectedKey, onToggle }: {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-[11px] text-neutral-500">
-            <span className="truncate">{fx.league}</span>
+            {/* League is the section header now, so the row carries the day. */}
+            <span className="truncate">{fmtDay(fx.kickoff)}</span>
             <span className="h-0.5 w-0.5 shrink-0 rounded-full bg-white/25" aria-hidden />
             <span className="shrink-0 tabular-nums">{fmtTime(fx.kickoff)}</span>
           </div>
@@ -584,7 +584,7 @@ function FixtureRow({ fx, selectedKey, onToggle }: {
 // legs, combined odds, stake — is deliberately 11–13px supporting detail.
 
 function SlipPanel({
-  slip, stake, onStake, maxStake, combined, potential, playing, playError, disabled, rtp,
+  slip, stake, onStake, maxStake, combined, potential, playing, playError, disabled,
   onRemove, onClear, onPlay, bare = false,
 }: {
   slip: SlipLeg[];
@@ -596,7 +596,6 @@ function SlipPanel({
   playing: boolean;
   playError: string | null;
   disabled: boolean;
-  rtp: number;
   onRemove: (eventId: string) => void;
   onClear: () => void;
   onPlay: () => void;
@@ -698,9 +697,6 @@ function SlipPanel({
             >
               {playing ? <><Spinner /> Simulating…</> : `Simulate ${slip.length} ${slip.length === 1 ? 'pick' : 'picks'}`}
             </Button>
-            <p className="mt-2.5 text-center text-[11px] text-neutral-600">
-              Outcome is RNG-drawn at {Math.round(rtp * 100)}% RTP — not the real match.
-            </p>
           </div>
         </>
       )}
