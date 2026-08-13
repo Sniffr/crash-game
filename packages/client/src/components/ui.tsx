@@ -96,7 +96,7 @@ export function Wordmark({ caption }: { caption?: string }) {
       <span className="grid h-7 w-7 shrink-0 place-items-center rounded-btn bg-brand-500">
         <RocketGlyph className="h-4 w-4 text-black" />
       </span>
-      <span className="text-[15px] font-bold tracking-tight text-neutral-100">Nova</span>
+      <span className="whitespace-nowrap text-[15px] font-bold tracking-tight text-neutral-100">Game Hub</span>
       {caption && (
         <>
           <span className="hidden h-4 w-px shrink-0 bg-white/10 sm:block" aria-hidden />

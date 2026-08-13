@@ -250,7 +250,7 @@ export default function Lobby() {
 
       <footer className="border-t border-edge-soft">
         <div className="mx-auto max-w-[1080px] px-4 py-5 text-[11px] text-neutral-600 sm:px-6">
-          Nova · simulation only · no real wagers, no real money.
+          Game Hub · real odds, provably fair · let's roll, win big.
         </div>
       </footer>
 

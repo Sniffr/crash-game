@@ -783,7 +783,7 @@ export default function App() {
 
       <footer className="border-t border-edge-soft">
         <div className="mx-auto max-w-[1500px] px-4 py-4 text-[11px] text-neutral-600">
-          {theme.brandName || 'Galaxy Crash'} · simulation only · no real wagers, no real money.
+          {theme.brandName || 'Galaxy Crash'} · provably fair, every round verifiable · let's roll, win big.
         </div>
       </footer>
 
