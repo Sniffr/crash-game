@@ -12,6 +12,7 @@ it('exposes the KES momo rail and 0dp UGX; unknown currencies have no rail', () 
   expect(decimalsFor('KES')).toBe(2);
 });
 
-it('only lists Eastern/Southern African currencies', () => {
-  expect(SUPPORTED_CURRENCIES).toEqual(['KES', 'UGX', 'TZS', 'ZMW', 'ZAR']);
+it('lists the Eastern/Southern African currencies plus NGN', () => {
+  expect(SUPPORTED_CURRENCIES).toEqual(['KES', 'UGX', 'TZS', 'ZMW', 'ZAR', 'NGN']);
+  expect(railFor('NGN')?.contact).toBe('email'); // bank rail — no phone collected
 });

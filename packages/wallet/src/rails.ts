@@ -1,5 +1,6 @@
-// Pay-in / pay-out rails, keyed by currency. Eastern & Southern African
-// currencies only.
+// Pay-in / pay-out rails, keyed by currency: Eastern & Southern African, plus
+// NGN (Fincra is Nigeria-based and NGN is the best-proven corridor on the
+// account).
 //
 // `payIn.institutionCode` is Maplerad's momo institution code (from live
 // GET /institutions) — a momo rail without one cannot be collected on
@@ -19,6 +20,7 @@ export const RAILS: Record<string, Rail> = {
   TZS: { currency: 'TZS', country: 'TZ', decimals: 2, payIn: { method: 'momo' }, payOut: { type: 'MOMO' }, contact: 'phone' },
   ZMW: { currency: 'ZMW', country: 'ZM', decimals: 2, payIn: { method: 'momo' }, payOut: { type: 'MOMO' }, contact: 'phone' },
   ZAR: { currency: 'ZAR', country: 'ZA', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'WALLET' }, contact: 'email' },
+  NGN: { currency: 'NGN', country: 'NG', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'NUBAN' }, contact: 'email' },
 };
 
 export const SUPPORTED_CURRENCIES = Object.keys(RAILS);

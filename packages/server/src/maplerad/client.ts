@@ -54,6 +54,8 @@ export class MapleradClient implements PayInProvider {
   async collect(input: CollectInput): Promise<CollectResult> {
     const bankCode = railFor(input.currency)?.payIn.institutionCode;
     if (!bankCode) throw providerRejected(`Maplerad has no institution code for ${input.currency}`);
+    // Momo collections are keyed on the payer's phone — never call out without one.
+    if (!input.phone) throw providerRejected(`Maplerad needs a phone number to collect ${input.currency}`);
     const rawName = input.payerName?.trim();
     const name = rawName && rawName.length > 0 ? rawName : 'Customer';
     const space = name.indexOf(' ');

@@ -41,6 +41,8 @@ describe('FincraClient', () => {
     expect(c.supports('ZAR')).toBe(true); // checkout is currency-gated, not momo-gated
     expect(c.supports('EUR')).toBe(false);
 
+    expect(c.supports('NGN')).toBe(true); // Fincra's home currency
+
     const narrowed = makeClient(undefined, { currencies: ['KES'] });
     expect(narrowed.supports('KES')).toBe(true);
     expect(narrowed.supports('ZMW')).toBe(false);
@@ -84,6 +86,17 @@ describe('FincraClient', () => {
       redirectUrl: 'https://game.example/lobby',
     });
     expect(result).toEqual({ redirectUrl: 'https://checkout.fincra.com/pay/fcr-p-1' });
+  });
+
+  it('omits phoneNumber entirely when the player has none (email rails)', async () => {
+    let init: RequestInit | undefined;
+    const fetchImpl = (async (_u: string | URL, i?: RequestInit) => {
+      init = i;
+      return { ok: true, status: 200, json: async () => ({ success: true, data: { link: 'https://checkout.fincra.com/pay/x' } }) } as Response;
+    }) as unknown as typeof fetch;
+
+    await makeClient(fetchImpl).collect({ currency: 'NGN', amountMinor: 50_000, reference: 'r', description: 'd', payerEmail: 'ngn@example.com' });
+    expect(JSON.parse(init?.body as string).customer).toEqual({ name: 'Game Player', email: 'ngn@example.com' });
   });
 
   it('treats a link-less checkout response as a rejection', async () => {

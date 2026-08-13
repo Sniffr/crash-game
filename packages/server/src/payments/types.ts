@@ -8,7 +8,8 @@ export interface CollectInput {
   currency: string;
   /** Minor units. Processors that bill in major units convert internally. */
   amountMinor: number;
-  phone: string;
+  /** Absent for email-contact rails (NGN/ZAR) — momo processors require it. */
+  phone?: string;
   /** OUR merchant reference — the idempotency key the webhook is matched on. */
   reference: string;
   description: string;

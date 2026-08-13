@@ -60,7 +60,7 @@ export function createLobbyDepositRouter(deps: LobbyDepositRouterDeps): Router {
     const input = {
       currency: player.currency,
       amountMinor,
-      phone: player.phone!,
+      ...(player.phone ? { phone: player.phone } : {}),
       reference,
       description: 'Game deposit',
       payerName: player.username,

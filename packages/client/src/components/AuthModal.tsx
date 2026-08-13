@@ -28,6 +28,7 @@ const CURRENCY_OPTIONS: { code: string; country: string; contact: ContactKind }[
   { code: 'TZS', country: 'Tanzania', contact: 'phone' },
   { code: 'ZMW', country: 'Zambia', contact: 'phone' },
   { code: 'ZAR', country: 'South Africa', contact: 'email' },
+  { code: 'NGN', country: 'Nigeria', contact: 'email' },
 ];
 
 /**

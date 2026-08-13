@@ -23,11 +23,11 @@ let calls: Array<{ provider: string; input: CollectInput }>;
 /** Per-provider failure injection: undefined = succeed. */
 let failWith: Record<string, Error | undefined>;
 
-/** Stub processor: KES + ZMW capable, records every collect it is handed. */
+/** Stub processor: KES + ZMW + NGN capable, records every collect it is handed. */
 function stubProvider(name: string, redirectUrl?: string): PayInProvider {
   return {
     name,
-    supports: (currency: string) => currency === 'KES' || currency === 'ZMW',
+    supports: (currency: string) => currency === 'KES' || currency === 'ZMW' || currency === 'NGN',
     collect: async (input: CollectInput) => {
       calls.push({ provider: name, input });
       const err = failWith[name];
@@ -129,6 +129,17 @@ describe('lobby-deposit router', () => {
 
     expect(res.status).toBe(502);
     expect(calls.map((c) => c.provider)).toEqual(['maplerad', 'fincra']);
+  });
+
+  it('collects for an email-rail currency (NGN) with no phone on file', async () => {
+    // NGN/ZAR players never give a phone. The redirect processors don't need
+    // one, so the deposit must go through with `phone` simply absent.
+    const { res } = await depositAs({ currency: 'NGN', email: 'ngn@example.com' });
+
+    expect(res.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.input.phone).toBeUndefined();
+    expect(calls[0]!.input.payerEmail).toBe('ngn@example.com');
   });
 
   it('rejects a non-positive amountMinor (400 INVALID_AMOUNT)', async () => {

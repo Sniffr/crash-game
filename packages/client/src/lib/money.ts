@@ -12,6 +12,7 @@ export const DECIMALS_BY_CURRENCY: Record<string, number> = {
   KES: 2,
   UGX: 0,
   TZS: 2,
+  NGN: 2,
   ZMW: 2,
   ZAR: 2,
   BTC: 8,
@@ -31,6 +32,7 @@ export function symbolFor(currency: string | undefined): string {
     case 'KES': return 'KSh ';
     case 'UGX': return 'USh ';
     case 'TZS': return 'TSh ';
+    case 'NGN': return '₦';
     case 'ZMW': return 'K';
     case 'ZAR': return 'R';
     case 'BTC': return '₿';
