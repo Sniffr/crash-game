@@ -7,5 +7,10 @@ data/
 
 .playwright-mcp/
 
+# The k8s deployment repo is checked out here for local context only — it is a
+# separate repo and carries cluster admin credentials. Never commit it.
+STdiox-K8s/
+kubectl.exe
+
 # Scratch output from the interface-design tooling, not a deliverable.
 .interface-design/

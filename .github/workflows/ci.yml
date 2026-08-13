@@ -65,6 +65,9 @@ jobs:
   # with a clear message if the secret is absent.
   publish:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Gate on the suite: without this, publish races `test` and a red build can
+    # still overwrite :latest, which Keel then rolls straight into production.
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -85,3 +88,12 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/stdiox-labs/crash-game:latest
+      # Odds harvester for Simulate. Run in-cluster as a CronJob; it uploads
+      # simulate/fixtures/latest.json to S3, which the app reads.
+      - if: steps.guard.outputs.ready == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/harvester/Dockerfile
+          push: true
+          tags: ghcr.io/stdiox-labs/crash-harvester:latest
