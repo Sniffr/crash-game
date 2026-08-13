@@ -36,6 +36,8 @@ let deposits: PgDepositsRepo;
 let wallet: WalletLedger;
 let players: PlayersRepo;
 let verifyResult: VerifiedTxn;
+/** Swap one provider's verifyTransaction; returns a restore fn. */
+let swapVerify: (name: string, impl: () => Promise<VerifiedTxn>) => () => void;
 let notifyCalls: Array<{ playerId: string; balanceMinor: number; currency: string }>;
 
 beforeAll(async () => {
@@ -49,8 +51,16 @@ beforeAll(async () => {
   // re-verify call is stubbed out.
   const maplerad = new MapleradClient({ baseUrl: 'x', secretKey: 'y', webhookSecret: MAPLE_SECRET });
   const fincra = new FincraClient({ baseUrl: 'x', secretKey: 'y', businessId: 'b', publicKey: 'pk', webhookSecret: FINCRA_SECRET });
-  maplerad.verifyTransaction = async () => verifyResult;
-  fincra.verifyTransaction = async () => verifyResult;
+  const defaultVerify = async () => verifyResult;
+  maplerad.verifyTransaction = defaultVerify;
+  fincra.verifyTransaction = defaultVerify;
+  swapVerify = (name, impl) => {
+    const target = name === 'fincra' ? fincra : maplerad;
+    target.verifyTransaction = impl;
+    return () => {
+      target.verifyTransaction = defaultVerify;
+    };
+  };
 
   notifyCalls = [];
   const notifyBalance = (playerId: string, balanceMinor: number, currency: string) => {
@@ -175,6 +185,26 @@ describe.each(PROCESSORS)('$name deposit webhook', (p) => {
     expect(res.status).toBe(200);
     expect(await wallet.balance(playerId, 'KES')).toBe(0);
     expect((await deposits.get(reference))?.status).toBe('failed');
+  });
+
+  it('OUTAGE REGRESSION: a throwing verifyTransaction returns 500, it does NOT kill the process', async () => {
+    // This took production down: Express 4 does not catch rejections from an
+    // async handler, so "Fincra error: Payment not found" became an unhandled
+    // rejection and crash-looped the server.
+    const { playerId, reference } = await pendingDeposit(2500);
+    const boom = new Error('Fincra error: Payment not found');
+    const restore = swapVerify(p.name, async () => {
+      throw boom;
+    });
+
+    const raw = event(p.ok, { reference, amount: 2500, status: 'success', id: 'tx-boom' });
+    const res = await postWebhook(p.name, raw, p.sign('e9', raw));
+
+    expect(res.status).toBe(500); // sender retries; process survives
+    expect(await wallet.balance(playerId, 'KES')).toBe(0);
+    expect((await deposits.get(reference))?.status).toBe('pending');
+
+    restore();
   });
 
   it('rejects a bad/absent signature with 400 and does not credit', async () => {

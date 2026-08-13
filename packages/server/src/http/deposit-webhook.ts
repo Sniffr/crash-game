@@ -50,6 +50,21 @@ export function createDepositWebhookRouter(deps: DepositWebhookRouterDeps): Rout
       return;
     }
 
+    // Everything past this point talks to the processor and the database, and
+    // any of it can throw (a processor 4xx, a dropped connection, a bad row).
+    // Express 4 does NOT catch rejections from an async handler, so an
+    // unhandled one takes the whole process down — which it did in production:
+    // a webhook naming a reference Fincra could not find crash-looped the
+    // server. Answer 500 instead and let the sender retry.
+    try {
+      await handleEvent();
+    } catch (err) {
+      console.error(`${tag} failed to process webhook (will be retried by the sender):`, err);
+      res.status(500).end();
+      return;
+    }
+
+    async function handleEvent(): Promise<void> {
     const evt = deps.provider.parseEvent(payload);
     if (!/^game-dep-/.test(evt.reference)) {
       // Foreign event on the shared processor account — not ours, ignore.
@@ -102,6 +117,7 @@ export function createDepositWebhookRouter(deps: DepositWebhookRouterDeps): Rout
     }
 
     res.status(200).end();
+    }
   });
 
   return router;
