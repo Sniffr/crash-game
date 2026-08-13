@@ -265,7 +265,7 @@ export default function Simulate() {
             >
               <ArrowLeftIcon className="h-4 w-4" />
             </a>
-            <Wordmark caption={`Simulate · real odds · ${Math.round(rtp * 100)}% RTP`} />
+            <Wordmark caption="Simulate · real odds" />
           </>
         }
         right={<Readout label="Play balance" value={balance == null ? '—' : `${fmtCredits(balance)} cr`} />}
@@ -403,7 +403,7 @@ export default function Simulate() {
 
       <footer className="border-t border-edge-soft">
         <div className="mx-auto max-w-[1080px] px-4 py-5 text-[11px] text-neutral-600 sm:px-6">
-          Simulate · play-money only · outcomes are RNG-drawn at {Math.round(rtp * 100)}% RTP, not real match results.
+          Game Hub · real odds, provably fair · let's roll, win big.
         </div>
       </footer>
     </div>
