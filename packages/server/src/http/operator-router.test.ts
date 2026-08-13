@@ -46,6 +46,7 @@ vi.mock('../store.js', () => ({
   adjustBalance: vi.fn(),
   appendHistory: vi.fn(),
   recordBet: vi.fn(),
+  recordStatsSafely: vi.fn(async (fn: () => Promise<unknown>) => { try { return await fn(); } catch { return undefined; } }),
   recordWin: vi.fn(),
   recordLoss: vi.fn(),
   checkRateLimit: vi.fn(async () => true),

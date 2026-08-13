@@ -281,6 +281,50 @@ Precedence: **user manual upload** > **server config** > **built-in Galaxy Crash
 3. **Cash out** before the plane crashes to win `stake × multiplier`
 4. Toggle **auto-cashout** to set a target (e.g., 2.00x) for automatic payout
 
+## Simulate — sports bet slip game
+
+Alongside the crash games, this repo ships a second engine: **Simulate**. It
+appears in the lobby (`/`) as its own card and runs at `/simulate`.
+
+Players build a bet slip from **real harvested fixtures** (today / tomorrow /
+this week) and *simulate* the outcome. A provably-fair RNG at a configured RTP
+decides win/loss — not the real match — so it plays like a casino game while
+the fixtures and odds stay real. It's play-money only.
+
+How it fits together:
+
+```
+services/harvester (Python + OddsHarvester)
+   └─ scrape upcoming odds ─▶ normalize ─▶ S3  simulate/fixtures/latest.json
+                                                     │
+packages/server  /api/simulate/*  ◀── reads feed ────┘
+   ├─ GET  /fixtures?window=today|tomorrow|week|all
+   ├─ POST /session         (play-money session, credits)
+   └─ POST /play            (provably-fair resolve + settle + seed reveal)
+packages/client  /simulate  ── bet-slip UI ──▶ /api/simulate/*
+packages/shared  simulate.ts  ── the RNG (per-leg RTP^(1/legs)/odds)
+```
+
+**Fairness / RTP.** A slip of `n` legs pays `stake × ∏ oddsᵢ` iff every leg
+wins. Each leg is drawn to win with probability `RTP^(1/n) / oddsᵢ`, so
+`E[payout]/stake = ∏(oddsᵢ · pᵢ) = RTP` for any odds and any number of legs —
+the same identity the crash game uses (`P(crash ≥ m) = RTP/m`). Every leg's
+uniform comes from `HMAC-SHA256(serverSeed, "<nonce>:<i>:<eventId>:<pick>")`,
+committed before and revealed after, so a player can recompute the result.
+
+**Run the harvester** (uploads the feed to S3):
+
+```bash
+docker compose --profile harvester up harvester   # one-shot scrape → S3
+# or locally:
+cd services/harvester && pip install -r requirements.txt && python -m harvester --once
+```
+
+If no feed exists yet (or S3 is unreachable), the server serves a bundled
+sample feed so Simulate always has fixtures to show. Config lives in
+`.env` (`SIMULATE_*`, `HARVEST_*`, `S3_*` — see `.env.example`), and the
+harvester service has its own [README](services/harvester/README.md).
+
 ## Architecture
 
 ```

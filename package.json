@@ -12,7 +12,7 @@
     "dev:creator": "cd packages/creator && npm run dev",
     "dev:all": "concurrently \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:creator\"",
     "build": "npm run build --workspace=packages/shared --workspace=packages/wallet --workspace=packages/adapters --workspace=packages/server --workspace=packages/client",
-    "test": "cd packages/shared && npm test"
+    "test": "npm test --workspaces --if-present"
   },
   "devDependencies": {
     "@types/pg": "^8.20.3",

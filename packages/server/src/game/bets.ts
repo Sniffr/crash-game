@@ -4,6 +4,7 @@ import {
   adjustBalance,
   appendHistory,
   recordWin,
+  recordStatsSafely,
   StoreOfflineError,
   getStats,
 } from '../store';
@@ -110,11 +111,21 @@ async function cashOutLobbyBet(bet: Bet, atMultiplier: number, source: 'manual' 
   if (deps) {
     try {
       const balanceMinor = await deps.wallet.win(bet.lobbyPlayerId as string, winAmountMinor, ref, bet.currency ?? DEFAULT_CURRENCY);
+      // Recorded only after the credit lands — a pending/failed win must not
+      // inflate the player's stats before the money actually exists.
+      const stats = await recordStatsSafely(() => recordWin(
+        bet.playerId, bet.amountMinor as number, winAmountMinor, atMultiplier,
+        bet.currency ?? DEFAULT_CURRENCY,
+      ));
       sendToSession(bet.playerId, {
         type: 'cashout_success',
         // Carry the same money fields as operator cashouts so the client formats
         // the win in minor units (currency), not as raw dollars.
-        data: { multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? DEFAULT_CURRENCY, profit: winAmountMinor, balanceMinor, source, slot: bet.slot ?? 0 },
+        data: {
+          multiplier: atMultiplier, winAmountMinor, currency: bet.currency ?? DEFAULT_CURRENCY,
+          profit: winAmountMinor, balanceMinor, source, slot: bet.slot ?? 0,
+          ...(stats ? { stats } : {}),
+        },
       });
     } catch (err) {
       console.error('[cashOutLobbyBet] wallet.win failed:', err);
@@ -262,6 +273,14 @@ export async function tryCashoutBet(
         },
       });
 
+      // Recorded only on a confirmed credit — the WIN_PENDING / WIN_FAILED
+      // branches below deliberately record nothing, so an unresolved win never
+      // shows up as profit the player doesn't have yet.
+      const stats = await recordStatsSafely(() => recordWin(
+        bet.playerId, bet.amountMinor as number, winAmountMinor, multiplier,
+        cashoutResult.currency ?? bet.currency ?? DEFAULT_CURRENCY,
+      ));
+
       // Include post-credit balanceMinor so the iframe header updates live
       sendToSession(bet.playerId, {
         type: 'cashout_success',
@@ -272,6 +291,7 @@ export async function tryCashoutBet(
           source,
           balanceMinor: cashoutResult.balanceMinor,
           slot: bet.slot ?? 0,
+          ...(stats ? { stats } : {}),
         },
       });
     } catch (err) {

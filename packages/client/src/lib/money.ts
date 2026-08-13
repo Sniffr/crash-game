@@ -59,6 +59,17 @@ export function toMinor(amount: number, currency: string | undefined): number {
 }
 
 /**
+ * Format a legacy demo-session amount (decimal credits in the default currency).
+ *
+ * Only for values the server produces on the demo path — the demo balance and
+ * SessionStats. A money session's amounts are integer minor units and must go
+ * through `fromMinor` with that session's currency instead.
+ */
+export function formatCredits(amount: number): string {
+  return `${DEFAULT_SYMBOL}${amount.toFixed(2)}`;
+}
+
+/**
  * Format a balance for display.
  *
  * For operator sessions: `balanceMinor` is canonical; convert using the session currency.
@@ -74,5 +85,5 @@ export function formatBalance(
   if (typeof session?.balanceMinor === 'number') {
     return fromMinor(session.balanceMinor, session.currency);
   }
-  return `${DEFAULT_SYMBOL}${balance.toFixed(2)}`;
+  return formatCredits(balance);
 }

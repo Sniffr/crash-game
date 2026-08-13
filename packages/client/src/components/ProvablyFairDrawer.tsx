@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { Button, Drawer, Eyebrow, Spinner, TextInput } from './ui';
 
 interface ProvablyFairDrawerProps {
   isOpen: boolean;
@@ -24,6 +25,11 @@ interface VerifyResult {
   error?: string;
 }
 
+/**
+ * The fairness proof, as a working tool rather than a wall of copy: the
+ * previous round's seed is one tap from being loaded into the verifier, so a
+ * sceptical player can check a real round in about two seconds.
+ */
 export default function ProvablyFairDrawer({
   isOpen,
   onClose,
@@ -53,179 +59,137 @@ export default function ProvablyFairDrawer({
 
   if (!isOpen) return null;
 
+  const revealed = currentRound.phase === 'CRASHED' || currentRound.phase === 'RESULT';
+
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-space-950/70 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-md bg-space-900 border-l border-space-500/40 overflow-y-auto">
-        {/* Sticky header */}
-        <div className="sticky top-0 bg-space-900/95 backdrop-blur-md border-b border-space-500/40 px-5 py-4 flex items-center justify-between z-10">
-          <div className="flex items-center gap-2.5">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#22d3ee" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-              <path d="M9 12l2 2 4-4"/>
-            </svg>
-            <h2 className="text-sm font-display font-bold uppercase tracking-[0.18em]">Provably Fair</h2>
-          </div>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 rounded-control bg-space-700/60 border border-space-500/40 text-neutral-300 hover:bg-space-600 hover:text-white transition flex items-center justify-center"
-            aria-label="Close"
+    <Drawer title="Provably fair" onClose={onClose}>
+      {/* Current round — the commitment, then the reveal once it lands. */}
+      {currentRound.hashCommit && (
+        <Section title={`Round ${currentRound.roundNumber}`}>
+          <KV label="Hash commit" value={currentRound.hashCommit} />
+          {revealed && currentRound.serverSeed && (
+            <>
+              <KV label="Server seed" value={currentRound.serverSeed} tone="accent" />
+              <KV label="Crash point" value={`${currentRound.crashPoint?.toFixed(2)}×`} tone="loss" />
+            </>
+          )}
+          {!revealed && (
+            <p className="mt-2 text-[11px] leading-relaxed text-neutral-600">
+              The seed stays sealed until this round ends — that's what makes the
+              commitment above worth anything.
+            </p>
+          )}
+        </Section>
+      )}
+
+      {/* Previous round, always fully revealed and one tap from the verifier. */}
+      {currentRound.prevServerSeed && currentRound.prevRoundNumber != null && (
+        <Section title={`Round ${currentRound.prevRoundNumber} — revealed`}>
+          <p className="break-all rounded-btn border border-edge bg-space-950 p-2.5 text-[11px] leading-relaxed text-cash-400">
+            {currentRound.prevServerSeed}
+          </p>
+          <Button
+            size="sm"
+            className="mt-2.5"
+            onClick={() => {
+              setVerifySeed(currentRound.prevServerSeed!);
+              setVerifyRoundN(String(currentRound.prevRoundNumber!));
+              setVerifyResult(null);
+            }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18"/>
-              <line x1="6" y1="6" x2="18" y2="18"/>
-            </svg>
-          </button>
-        </div>
+            Load into verifier
+          </Button>
+        </Section>
+      )}
 
-        <div className="p-5 space-y-5">
-          {/* How it works */}
-          <Section title="How it works">
-            <ol className="space-y-2.5 text-sm text-neutral-400 leading-relaxed list-decimal pl-4 marker:text-brand-500">
-              <li>Before each round, the server publishes a SHA-256 commitment of its secret seed.</li>
-              <li>The crash multiplier is derived deterministically from <code className="text-brand-400">HMAC-SHA256(seed, roundNumber)</code>.</li>
-              <li>After the round, the seed is revealed — anyone can recompute the same crash point.</li>
-            </ol>
-          </Section>
+      <Section title="Verify a round">
+        <div className="flex flex-col gap-2.5">
+          <TextInput
+            label="Server seed"
+            value={verifySeed}
+            onChange={(e) => setVerifySeed(e.target.value)}
+            placeholder="hex string"
+            className="text-[12px]"
+          />
+          <TextInput
+            label="Round number"
+            type="number"
+            value={verifyRoundN}
+            onChange={(e) => setVerifyRoundN(e.target.value)}
+            placeholder="42"
+            className="tabular-nums"
+          />
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={handleVerify}
+            disabled={loading || !verifySeed || !verifyRoundN}
+            className="w-full"
+          >
+            {loading ? <><Spinner /> Verifying…</> : 'Verify'}
+          </Button>
 
-          {/* Current round */}
-          {currentRound.hashCommit && (
-            <Section title={`Round #${currentRound.roundNumber}`}>
-              <KV label="Hash commit">
-                <span className="text-brand-400">{currentRound.hashCommit.slice(0, 24)}…</span>
-              </KV>
-              {(currentRound.phase === 'CRASHED' || currentRound.phase === 'RESULT') && currentRound.serverSeed && (
-                <>
-                  <KV label="Server seed">
-                    <span className="text-cash-500">{currentRound.serverSeed.slice(0, 24)}…</span>
-                  </KV>
-                  <KV label="Crash point">
-                    <span className="text-loss-400">{currentRound.crashPoint?.toFixed(2)}x</span>
-                  </KV>
-                </>
+          {verifyResult && (
+            <div
+              role="status"
+              className={`rounded-btn border p-3 text-[12px] leading-relaxed ${
+                verifyResult.ok
+                  ? 'border-bet-500/40 bg-bet-500/10 text-bet-400'
+                  : 'border-loss-500/40 bg-loss-500/10 text-loss-400'
+              }`}
+            >
+              {verifyResult.ok ? (
+                <>Verified — the crash recomputes to <span className="font-semibold tabular-nums">{verifyResult.computedCrash}×</span></>
+              ) : (
+                <>Verification failed — {verifyResult.reason}</>
               )}
-            </Section>
-          )}
-
-          {/* Previous round (always revealed) */}
-          {currentRound.prevServerSeed && currentRound.prevRoundNumber != null && (
-            <Section title={`Round #${currentRound.prevRoundNumber} — revealed`} accent="solar">
-              <div className="text-xs break-all text-cash-500/90 leading-relaxed">
-                {currentRound.prevServerSeed}
-              </div>
-              <button
-                onClick={() => {
-                  setVerifySeed(currentRound.prevServerSeed!);
-                  setVerifyRoundN(String(currentRound.prevRoundNumber!));
-                }}
-                className="mt-3 text-[11px] uppercase tracking-[0.18em] font-semibold px-3 py-1.5 rounded-control bg-cash-500/15 text-cash-500 hover:bg-cash-500/25 transition border border-cash-500/30"
-              >
-                Use in verifier
-              </button>
-            </Section>
-          )}
-
-          {/* Verifier */}
-          <Section title="Verify a round">
-            <div className="space-y-2.5">
-              <Field label="Server seed">
-                <input
-                  type="text"
-                  value={verifySeed}
-                  onChange={(e) => setVerifySeed(e.target.value)}
-                  placeholder="hex string"
-                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs text-white focus:outline-none focus:border-brand-500/60"
-                />
-              </Field>
-              <Field label="Round number">
-                <input
-                  type="number"
-                  value={verifyRoundN}
-                  onChange={(e) => setVerifyRoundN(e.target.value)}
-                  placeholder="42"
-                  className="w-full bg-space-800/60 border border-space-500/40 rounded-control px-3 h-9 text-xs text-white focus:outline-none focus:border-brand-500/60"
-                />
-              </Field>
-              <button
-                onClick={handleVerify}
-                disabled={loading || !verifySeed || !verifyRoundN}
-                className="w-full h-10 rounded-control bg-brand-500 text-space-950 font-display font-bold text-xs uppercase tracking-[0.18em] hover:brightness-110 transition disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                {loading ? 'Verifying…' : 'Verify'}
-              </button>
-
-              {verifyResult && (
-                <div
-                  className={`mt-2 p-3 rounded-control text-xs leading-relaxed ${
-                    verifyResult.ok
-                      ? 'bg-bet-500/10 border border-bet-500/40 text-bet-400'
-                      : 'bg-loss-500/10 border border-loss-500/40 text-loss-400'
-                  }`}
-                >
-                  {verifyResult.ok ? (
-                    <>Verified · crash recomputed to <span className="font-bold">{verifyResult.computedCrash}x</span></>
-                  ) : (
-                    <>Verification failed — {verifyResult.reason}</>
-                  )}
-                  {!verifyResult.ok && verifyResult.computedCrash != null && (
-                    <div className="mt-1 text-neutral-500">computed crash: {verifyResult.computedCrash}</div>
-                  )}
-                </div>
+              {!verifyResult.ok && verifyResult.computedCrash != null && (
+                <div className="mt-1 text-neutral-500">computed crash: {verifyResult.computedCrash}</div>
               )}
             </div>
-          </Section>
-
-          {/* Formula */}
-          <Section title="Formula">
-            <pre className="text-[11px] text-neutral-400 leading-relaxed whitespace-pre-wrap">
-{`u    = HMAC-SHA256(seed, round) → first 13 hex → [0,1)
-raw  = (100 × RTP) / (1 − u)
-crash = max(1.00, floor(raw) / 100)`}
-            </pre>
-            <p className="text-[11px] text-neutral-500 mt-2">
-              This gives <code className="text-brand-400">P(crash ≥ m) = RTP / m</code> for every m &gt; 1.
-            </p>
-          </Section>
+          )}
         </div>
-      </div>
-    </div>
+      </Section>
+
+      <Section title="How it works">
+        <ol className="flex list-decimal flex-col gap-2 pl-4 text-[12px] leading-relaxed text-neutral-400 marker:text-neutral-600">
+          <li>Before each round the server publishes a SHA-256 commitment of its secret seed.</li>
+          <li>The crash multiplier is derived from <code className="text-brand-400">HMAC-SHA256(seed, roundNumber)</code>.</li>
+          <li>After the round the seed is revealed, so anyone can recompute the same crash point.</li>
+        </ol>
+        <pre className="mt-3 overflow-x-auto rounded-btn border border-edge bg-space-950 p-3 text-[11px] leading-relaxed text-neutral-400">
+{`u     = HMAC-SHA256(seed, round) → first 13 hex → [0,1)
+raw   = (100 × RTP) / (1 − u)
+crash = max(1.00, floor(raw) / 100)`}
+        </pre>
+        <p className="mt-2 text-[11px] text-neutral-600">
+          Which gives <code className="text-brand-400">P(crash ≥ m) = RTP / m</code> for every m &gt; 1.
+        </p>
+      </Section>
+    </Drawer>
   );
 }
 
-function Section({
-  title, children, accent,
-}: {
-  title: string;
-  children: React.ReactNode;
-  accent?: 'solar' | 'plasma' | 'cosmos';
-}) {
-  const border = accent === 'solar'
-    ? 'border-cash-500/30'
-    : accent === 'cosmos'
-    ? 'border-info-500/30'
-    : 'border-space-500/40';
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className={`bg-space-800/40 rounded-panel p-4 border ${border}`}>
-      <h3 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em] mb-3">{title}</h3>
+    <section className="rounded-card border border-edge-soft p-4">
+      <Eyebrow className="mb-3 block">{title}</Eyebrow>
       {children}
     </section>
   );
 }
 
-function KV({ label, children }: { label: string; children: React.ReactNode }) {
+/** A long hex value that must stay copyable — so it wraps rather than truncates. */
+function KV({ label, value, tone = 'default' }: { label: string; value: string; tone?: 'default' | 'accent' | 'loss' }) {
+  const tones = {
+    default: 'text-neutral-300',
+    accent: 'text-cash-400',
+    loss: 'text-loss-400',
+  } as const;
   return (
-    <div className="flex justify-between items-baseline text-xs mb-1.5">
-      <span className="text-neutral-500">{label}</span>
-      <span className="truncate ml-3 tabular-nums">{children}</span>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[10px] uppercase tracking-[0.18em] text-neutral-500 mb-1">{label}</label>
-      {children}
+    <div className="mb-2 last:mb-0">
+      <div className="text-[11px] text-neutral-600">{label}</div>
+      <div className={`break-all text-[12px] tabular-nums ${tones[tone]}`}>{value}</div>
     </div>
   );
 }

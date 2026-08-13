@@ -32,7 +32,39 @@ html, body {
 
 * { box-sizing: border-box; }
 
+/* Headings balance, body copy loses orphans. */
+h1, h2, h3, h4 { text-wrap: balance; }
+p { text-wrap: pretty; }
+
 /* ─── Animations ─────────────────────────────────────────────────────────── */
+
+/* Live-round pulse — the one thing on the lobby allowed to move on its own. */
+.animate-pulse-dot { animation: pulseDot 2s ease-in-out infinite; }
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.35; transform: scale(0.82); }
+}
+
+/* Panel/row entrance — opacity + transform only (GPU-composited). */
+.animate-rise { animation: rise 0.26s cubic-bezier(0.23, 1, 0.32, 1) both; }
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Drawer entrance — transform only, so it stays on the compositor. */
+.animate-slide-in { animation: slideIn 0.24s cubic-bezier(0.23, 1, 0.32, 1) both; }
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* A crash-rail bar growing in as a new round lands. */
+.animate-bar-in { animation: barIn 0.3s cubic-bezier(0.23, 1, 0.32, 1) both; }
+@keyframes barIn {
+  from { opacity: 0; transform: scaleY(0.2); }
+  to   { opacity: 1; transform: none; }
+}
 
 .animate-toast-in {
   animation: toastIn 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.1) both;
@@ -160,6 +192,23 @@ html, body {
 
 @media (prefers-reduced-motion: reduce) {
   .game-bg::before, .game-bg::after, .sn-supernova { animation: none; }
+  /* Keep colour/opacity feedback, drop all movement. */
+  .animate-rise, .animate-bar-in, .animate-chip-in, .animate-countdown,
+  .animate-toast-in, .animate-slide-in {
+    animation: none;
+  }
+  .animate-pulse-dot { animation-name: pulseDotFade; }
+  *, *::before, *::after { transition-duration: 0.01ms !important; }
+  @keyframes pulseDotFade { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+}
+
+/* One focus treatment everywhere: an ember ring offset from the control, never
+   a browser outline sitting on top of a rounded edge. */
+/* No border-radius here — the outline already follows the element's own corners,
+   and setting one would square off a rounded button the moment it takes focus. */
+:focus-visible {
+  outline: 2px solid rgb(251 101 20 / 0.75);
+  outline-offset: 2px;
 }
 
 /* Thin scrollbars */

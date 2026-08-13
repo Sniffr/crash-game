@@ -5,12 +5,15 @@ import PlayerList from './components/PlayerList';
 import HistoryStrip from './components/HistoryStrip';
 import ProvablyFairDrawer from './components/ProvablyFairDrawer';
 import {
+  AppBar, Button, Eyebrow, Readout, RocketGlyph, ShieldIcon, SpeakerIcon, Spinner,
+} from './components/ui';
+import {
   applyThemeSounds, cashoutChime, crashBoom, isMuted, placeBet as sndPlaceBet,
   setMuted, startMusic, takeoffWhoosh, uiTick,
 } from './sounds';
 import { applyThemeCssVars, fetchServerTheme, hasUserOverride, loadTheme, saveTheme } from './theme/loader';
 import { type Theme } from './theme/types';
-import { formatBalance, fromMinor, toMinor, DEFAULT_SYMBOL } from './lib/money';
+import { formatBalance, formatCredits, fromMinor, toMinor } from './lib/money';
 
 /**
  * In a production build the theme is whatever the server is serving from
@@ -47,11 +50,18 @@ interface SessionInfo {
   rgLimits?: { maxBetMinor?: number; sessionEndsAt?: number };
 }
 
+/**
+ * Mirrors @crash/shared SessionStats. `currency` discriminates the units of the
+ * monetary fields: present ⇒ integer minor units of that currency (money
+ * sessions), absent ⇒ decimal credits (legacy demo). `biggestCashout` is a
+ * multiplier and is unitless either way.
+ */
 interface SessionStats {
   bets: number; wins: number; losses: number;
   totalWagered: number; totalWon: number; netProfit: number;
   biggestCashout: number; biggestWin: number;
   currentStreak: number; bestStreak: number;
+  currency?: string;
 }
 
 const ZERO_STATS: SessionStats = {
@@ -443,7 +453,7 @@ export default function App() {
           // Operator frame: bet.amount is integer minor units; currency is top-level.
           flashToast('info', `Bet placed · ${fromMinor(message.data.bet.amount, message.data.currency)}`);
         } else {
-          flashToast('info', `Bet placed · ${DEFAULT_SYMBOL}${message.data.bet.amount.toFixed(2)}`);
+          flashToast('info', `Bet placed · ${formatCredits(message.data.bet.amount)}`);
         }
         break;
 
@@ -462,7 +472,7 @@ export default function App() {
           // Operator frame: no `profit` field; use winAmountMinor + currency.
           flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${fromMinor(message.data.winAmountMinor, message.data.currency)}`);
         } else {
-          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${DEFAULT_SYMBOL}${message.data.profit.toFixed(2)}`);
+          flashToast('win', `${message.data.source === 'auto' ? 'Auto cash out' : 'Cashed out'} @ ${message.data.multiplier.toFixed(2)}x  +${formatCredits(message.data.profit)}`);
         }
         break;
 
@@ -607,6 +617,9 @@ export default function App() {
     ws.send(JSON.stringify({ type: 'reset_balance', data: { sessionId: session.sessionId } }));
   };
 
+  // One discriminator for money-vs-demo, matching formatBalance's rule.
+  const isMoneySession = typeof session?.balanceMinor === 'number' && !!session?.currency;
+
   const getChipClass = (cp: number) => (cp < 2 ? 'pink' : cp < 10 ? 'purple' : 'gold');
 
   // Tier color from active theme — drives canvas curve, multiplier readout, history
@@ -625,17 +638,17 @@ export default function App() {
   // Launched game: show a neutral loader until its theme is ready (no default flash).
   if (isLaunchedGame && !themeReady) {
     return (
-      <div className="min-h-screen grid place-items-center">
+      <div className="grid min-h-screen place-items-center bg-space-950">
         <div className="flex flex-col items-center gap-3 text-neutral-500">
-          <div className="w-8 h-8 rounded-full border-2 border-white/10 border-t-brand-500 animate-spin" />
-          <span className="text-sm font-bold">Loading…</span>
+          <Spinner className="h-7 w-7 text-brand-500" />
+          <span className="text-[13px] font-medium">Loading the table…</span>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen text-neutral-100 relative">
+    <div className="relative min-h-screen bg-space-950 text-neutral-100">
       <Header
         soundOn={soundOn}
         onToggleSound={() => {
@@ -647,35 +660,41 @@ export default function App() {
         }}
         onOpenDrawer={() => setDrawerOpen(true)}
         balance={balance}
-        onResetBalance={resetBalance}
         theme={theme}
         session={session}
         lobbyUrl={lobbyUrl}
       />
 
       {sessionError && (
-        <div className="px-4 py-2 bg-loss-500/15 border-b border-loss-500/40 text-loss-400 text-xs text-center">
+        <div role="alert" className="border-b border-loss-500/40 bg-loss-500/15 px-4 py-2 text-center text-[12px] text-loss-400">
           {sessionError}
         </div>
       )}
 
-      <main className="max-w-[1500px] mx-auto w-full p-3 lg:p-4">
-        <div className="grid gap-3 lg:gap-4 lg:grid-cols-[300px_minmax(0,1fr)]">
+      <main className="mx-auto w-full max-w-[1500px] p-3 lg:p-4">
+        <div className="grid gap-3 lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-4">
           {/* Live Bets — desktop sidebar */}
-          <aside className="hidden lg:flex flex-col gap-3 min-h-0">
+          <aside className="hidden min-h-0 flex-col gap-3 lg:flex">
             <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
-            <StatsPanel stats={stats} displayName={session?.displayName} />
+            <StatsPanel
+              stats={stats}
+              displayName={session?.displayName}
+              onResetBalance={resetBalance}
+              canReset={!isMoneySession}
+              isMoneySession={isMoneySession}
+              sessionCurrency={session?.currency}
+            />
           </aside>
 
           {/* Right column: history · canvas · dual bet */}
-          <div className="flex flex-col gap-3 min-w-0">
+          <div className="flex min-w-0 flex-col gap-3">
             <HistoryStrip history={gameState.history} getChipClass={getChipClass} />
 
             {/* 16:9 to match the 1280×720 game scene so nothing is cropped
                 (gif clips are 16:9 too). max-h keeps it from dominating short
                 viewports; the renderer contain-fits, so any residual gap just
                 shows the stage backdrop rather than clipping the road/wheels. */}
-            <section className="relative rounded-panel overflow-hidden border border-space-600/40 bg-space-950 w-full aspect-[16/9] max-h-[70vh]">
+            <section className="relative aspect-[16/9] max-h-[70vh] w-full overflow-hidden rounded-card border border-edge bg-space-950">
               {/* CSS galaxy (starfield + supernova + planet Earth), behind the canvas */}
               <div className="game-bg absolute inset-0 overflow-hidden pointer-events-none" aria-hidden="true">
                 <div className="sn-earth-glow" />
@@ -694,18 +713,21 @@ export default function App() {
                 theme={theme}
               />
 
-              <div className="absolute top-3 left-3 text-[10px] uppercase tracking-[0.18em] text-neutral-300/50 bg-space-900/60 backdrop-blur-md rounded-md px-2 py-1 border border-space-500/40">
-                Round · {gameState.roundNumber}
+              {/* Chrome over the canvas stays at the lowest possible contrast —
+                  the multiplier is the focal point and nothing should compete. */}
+              <div className="absolute left-3 top-3 rounded-chip border border-white/10 bg-black/50 px-2 py-1 text-[11px] tabular-nums text-neutral-400 backdrop-blur-md">
+                Round {gameState.roundNumber}
               </div>
 
               {toast && (
                 <div
-                  className={`absolute top-3 left-1/2 -translate-x-1/2 px-4 py-2 rounded-xl text-sm font-semibold backdrop-blur-md border animate-toast-in ${
+                  role="status"
+                  className={`animate-toast-in absolute left-1/2 top-3 -translate-x-1/2 rounded-btn border px-3.5 py-2 text-[13px] font-semibold backdrop-blur-md ${
                     toast.kind === 'win'
-                      ? 'bg-bet-500/15 text-bet-400 border-bet-500/40'
+                      ? 'border-bet-500/40 bg-bet-500/15 text-bet-400'
                       : toast.kind === 'loss'
-                      ? 'bg-loss-500/15 text-loss-400 border-loss-500/40'
-                      : 'bg-brand-500/15 text-brand-400 border-brand-500/40'
+                      ? 'border-loss-500/40 bg-loss-500/15 text-loss-400'
+                      : 'border-brand-500/40 bg-brand-500/15 text-brand-400'
                   }`}
                 >
                   {toast.text}
@@ -726,7 +748,7 @@ export default function App() {
                 onPlaceBet={placeBet} onCashout={() => cashout(0)}
                 maxBetMinor={session?.rgLimits?.maxBetMinor}
                 currency={session?.currency}
-                isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
+                isOperator={isMoneySession}
               />
               <BetPanel
                 phase={gameState.phase} hasBet={hasBet[1]} balance={balance}
@@ -739,21 +761,30 @@ export default function App() {
                 onPlaceBet={() => placeBetWith(bet2Amount, auto2Enabled, auto2, 1)} onCashout={() => cashout(1)}
                 maxBetMinor={session?.rgLimits?.maxBetMinor}
                 currency={session?.currency}
-                isOperator={typeof session?.balanceMinor === 'number' && !!session?.currency}
+                isOperator={isMoneySession}
               />
             </div>
 
             {/* Live Bets + stats on mobile (sidebar is desktop-only) */}
-            <div className="lg:hidden flex flex-col gap-3">
-              <StatsPanel stats={stats} displayName={session?.displayName} />
+            <div className="flex flex-col gap-3 lg:hidden">
+              <StatsPanel
+              stats={stats}
+              displayName={session?.displayName}
+              onResetBalance={resetBalance}
+              canReset={!isMoneySession}
+              isMoneySession={isMoneySession}
+              sessionCurrency={session?.currency}
+            />
               <PlayerList bets={gameState.bets} youPlayerId={session?.sessionId} />
             </div>
           </div>
         </div>
       </main>
 
-      <footer className="text-center py-3 text-[11px] text-neutral-500 border-t border-space-500/30 bg-space-950/60">
-        {theme.brandName || 'Galaxy Crash'} · simulation only · no real wagers, no real money.
+      <footer className="border-t border-edge-soft">
+        <div className="mx-auto max-w-[1500px] px-4 py-4 text-[11px] text-neutral-600">
+          {theme.brandName || 'Galaxy Crash'} · simulation only · no real wagers, no real money.
+        </div>
       </footer>
 
       <ProvablyFairDrawer
@@ -767,14 +798,13 @@ export default function App() {
 
 // ─── Header ──────────────────────────────────────────────────────────────────
 function Header({
-  soundOn, onToggleSound, onOpenDrawer, balance, onResetBalance,
+  soundOn, onToggleSound, onOpenDrawer, balance,
   theme, session, lobbyUrl,
 }: {
   soundOn: boolean;
   onToggleSound: () => void;
   onOpenDrawer: () => void;
   balance: number;
-  onResetBalance: () => void;
   theme: Theme;
   session?: SessionInfo | null;
   lobbyUrl?: string | null;
@@ -782,175 +812,157 @@ function Header({
   const brand = theme.brandName || 'Galaxy Crash';
   const tagline = theme.brandTagline || 'provably-fair multiplier';
   const customLogo = theme.assets?.logo;
+
   return (
-    <header className="flex items-center justify-between px-4 sm:px-6 py-3 border-b border-space-500/30 bg-space-950/70 backdrop-blur-xl relative z-10">
-      <div className="flex items-center gap-3 min-w-0">
-        {customLogo ? (
-          <img
-            src={customLogo}
-            alt={brand}
-            className="w-9 h-9 rounded-control object-contain border border-space-500/60 bg-space-800/60 shrink-0"
-          />
-        ) : (
-          <Logo />
-        )}
-        <div className="flex flex-col min-w-0">
-          <h1 className="font-display font-bold text-[15px] sm:text-base tracking-[0.18em] uppercase leading-none truncate" style={{ color: theme.colors.text }}>
-            <span className="text-brand-400">
-              {brand.split(' ')[0]}
+    <AppBar
+      left={
+        <>
+          {customLogo ? (
+            <img
+              src={customLogo}
+              alt=""
+              className="h-7 w-7 shrink-0 rounded-btn border border-edge object-contain"
+            />
+          ) : (
+            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-btn bg-brand-500">
+              <RocketGlyph className="h-4 w-4 text-black" />
             </span>
-            {brand.split(' ').slice(1).length > 0 && (
-              <span className="ml-1.5">{brand.split(' ').slice(1).join(' ')}</span>
-            )}
-          </h1>
-          <span className="text-[9px] uppercase tracking-[0.22em] text-neutral-500 mt-0.5 truncate">
-            {tagline}
-          </span>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2 sm:gap-3">
-        <IconButton onClick={onToggleSound} label={soundOn ? 'Mute sounds' : 'Unmute sounds'}>
-          {soundOn ? <SpeakerIcon /> : <SpeakerMutedIcon />}
-        </IconButton>
-        <IconButton onClick={onOpenDrawer} label="Provably fair">
-          <ShieldIcon />
-          <span className="hidden md:inline ml-1.5 text-xs font-medium text-neutral-300">Fair</span>
-        </IconButton>
-
-        {lobbyUrl && (
-          <button
-            onClick={() => {
-              window.parent.postMessage({ type: 'lobby' }, '*');
-              setTimeout(() => {
-                if (lobbyUrl && window.top) window.top.location.href = lobbyUrl;
-              }, 50);
-            }}
-            className="text-[10px] text-neutral-400 hover:text-neutral-100 transition px-2 py-1.5 rounded-control bg-space-800/80 border border-space-500/50 uppercase tracking-wider font-semibold"
-            title="Return to lobby"
-          >
-            Lobby
-          </button>
-        )}
-        <div className="flex items-center gap-2 sm:gap-3 bg-space-800/80 border border-space-500/50 rounded-control px-3 py-1.5">
-          <div className="leading-tight">
-            <div className="text-[9px] uppercase tracking-[0.22em] text-neutral-500">Balance</div>
-            <div className="text-base sm:text-lg font-semibold text-bet-400">{formatBalance(balance, session ?? null)}</div>
-          </div>
-          {!(typeof session?.balanceMinor === 'number' && session?.currency) && (
-            <button
-              onClick={onResetBalance}
-              className="text-[10px] text-neutral-400 hover:text-neutral-100 transition px-2 py-1 rounded bg-space-700/60 border border-space-500/40 uppercase tracking-wider"
-              title="Reset balance to KSh 1000"
-            >
-              Reset
-            </button>
           )}
-        </div>
-      </div>
-    </header>
-  );
-}
+          {/* The game's own name, at its own weight — the old header split it in
+              two colours and tracked it out to 0.18em, which made every table
+              read as a logo rather than a title. */}
+          <h1 className="truncate text-[15px] font-bold tracking-tight text-neutral-100">{brand}</h1>
+          <span className="hidden h-4 w-px shrink-0 bg-white/10 sm:block" aria-hidden />
+          <span className="hidden truncate text-[11px] font-medium text-neutral-500 sm:block">{tagline}</span>
+        </>
+      }
+      right={
+        <>
+          <Button
+            variant="quiet"
+            size="sm"
+            onClick={onToggleSound}
+            aria-label={soundOn ? 'Mute sounds' : 'Unmute sounds'}
+            title={soundOn ? 'Mute sounds' : 'Unmute sounds'}
+            className="px-2.5"
+          >
+            <SpeakerIcon className="h-4 w-4" muted={!soundOn} />
+          </Button>
+          <Button variant="quiet" size="sm" onClick={onOpenDrawer} title="Provably fair" className="px-2.5">
+            <ShieldIcon className="h-4 w-4" />
+            <span className="hidden md:inline">Fair</span>
+          </Button>
 
-function IconButton({ onClick, label, children }: { onClick: () => void; label: string; children: React.ReactNode }) {
-  return (
-    <button
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className="flex items-center text-neutral-400 hover:text-neutral-100 transition px-2.5 py-2 rounded-control hover:bg-space-700/60 border border-transparent hover:border-space-500/40"
-    >
-      {children}
-    </button>
-  );
-}
+          {lobbyUrl && (
+            <Button
+              variant="secondary"
+              size="sm"
+              title="Return to lobby"
+              onClick={() => {
+                window.parent.postMessage({ type: 'lobby' }, '*');
+                setTimeout(() => {
+                  if (lobbyUrl && window.top) window.top.location.href = lobbyUrl;
+                }, 50);
+              }}
+            >
+              Lobby
+            </Button>
+          )}
 
-function Logo() {
-  return (
-    <div className="w-9 h-9 rounded-control bg-gradient-to-br from-info-600 via-space-700 to-brand-600 border border-space-500/60 flex items-center justify-center">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M12 2 L15 8 L15 16 Q12 22 9 16 L9 8 Z" fill="#f8fafc" stroke="#0f172a" strokeWidth="0.5"/>
-        <circle cx="12" cy="9" r="1.6" fill="#22d3ee"/>
-        <path d="M9 15 L6 19 L9 17 Z" fill="#ef4444"/>
-        <path d="M15 15 L18 19 L15 17 Z" fill="#ef4444"/>
-        <path d="M11 18 Q12 22 13 18 Z" fill="#fbbf24"/>
-      </svg>
-    </div>
-  );
-}
-
-function SpeakerIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/>
-      <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
-      <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
-    </svg>
-  );
-}
-
-function SpeakerMutedIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" fill="currentColor"/>
-      <line x1="23" y1="9" x2="17" y2="15"/>
-      <line x1="17" y1="9" x2="23" y2="15"/>
-    </svg>
-  );
-}
-
-function ShieldIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-      <path d="M9 12l2 2 4-4"/>
-    </svg>
+          <Readout label="Balance" value={formatBalance(balance, session ?? null)} />
+        </>
+      }
+    />
   );
 }
 
 
 // ─── Session stats sidebar panel ─────────────────────────────────────────────
-function StatsPanel({ stats, displayName }: { stats: SessionStats; displayName?: string }) {
+/**
+ * Eight equally-weighted tiles said nothing — the number a player actually
+ * tracks is whether they're up or down, so net P/L leads at 20px and the rest
+ * drop to a quiet two-column grid beneath it.
+ */
+function StatsPanel({
+  stats, displayName, onResetBalance, canReset, isMoneySession, sessionCurrency,
+}: {
+  stats: SessionStats;
+  displayName?: string;
+  onResetBalance: () => void;
+  /** Demo sessions only — a money-backed balance is never resettable. */
+  canReset: boolean;
+  /** Operator- or lobby-backed real-money session. */
+  isMoneySession: boolean;
+  sessionCurrency?: string;
+}) {
   const net = stats.netProfit;
   const streakLabel = stats.currentStreak > 0
-    ? `${stats.currentStreak} wins`
+    ? `${stats.currentStreak}W`
     : stats.currentStreak < 0
-    ? `${Math.abs(stats.currentStreak)} losses`
+    ? `${Math.abs(stats.currentStreak)}L`
     : '—';
+
+  // The server stamps `currency` on the stats record the first time a money
+  // session records anything; before that first bet every figure is 0, so
+  // falling back to the session currency just picks the right symbol for the
+  // zeros. A demo session has neither and stays on decimal credits.
+  const unitCurrency = stats.currency ?? (isMoneySession ? sessionCurrency : undefined);
+  const money = (v: number) => (unitCurrency ? fromMinor(v, unitCurrency) : formatCredits(v));
+
+  const header = (
+    <div className="flex items-baseline justify-between gap-2 border-b border-edge-soft px-3 py-2.5">
+      <h2 className="text-[13px] font-semibold text-neutral-100">This session</h2>
+      {displayName && (
+        <span className="truncate text-[11px] text-neutral-600" title={displayName}>{displayName}</span>
+      )}
+    </div>
+  );
+
   return (
-    <div className="bg-space-900/70 backdrop-blur-md border border-space-500/40 rounded-panel p-4">
-      <div className="flex items-baseline justify-between mb-3">
-        <h2 className="text-[10px] font-semibold text-neutral-400 uppercase tracking-[0.22em]">Your stats</h2>
-        {displayName && (
-          <span className="text-[10px] text-info-400 truncate ml-2" title={displayName}>
-            {displayName}
-          </span>
-        )}
+    <div className="rounded-card border border-edge bg-space-850">
+      {header}
+
+      <div className="border-b border-edge-soft px-3 py-3">
+        <Eyebrow>Net profit / loss</Eyebrow>
+        <div
+          className={`mt-1 text-[20px] font-bold leading-none tabular-nums ${
+            net > 0 ? 'text-bet-400' : net < 0 ? 'text-loss-400' : 'text-neutral-300'
+          }`}
+        >
+          {net > 0 ? '+' : net < 0 ? '−' : ''}{money(Math.abs(net))}
+        </div>
+        <div className="mt-1.5 text-[11px] tabular-nums text-neutral-600">
+          {stats.bets} {stats.bets === 1 ? 'bet' : 'bets'} · {stats.wins}W / {stats.losses}L
+          {stats.currentStreak !== 0 && ` · ${streakLabel} streak`}
+        </div>
       </div>
-      <div className="grid grid-cols-2 gap-2 text-[11px]">
-        <StatTile label="Bets" value={stats.bets.toString()} />
-        <StatTile label="Wins" value={`${stats.wins} / ${stats.losses}`} />
-        <StatTile label="Wagered" value={`${DEFAULT_SYMBOL}${stats.totalWagered.toFixed(2)}`} />
-        <StatTile label="Won" value={`${DEFAULT_SYMBOL}${stats.totalWon.toFixed(2)}`} />
-        <StatTile
-          label="Net P/L"
-          value={`${net >= 0 ? '+' : ''}${DEFAULT_SYMBOL}${net.toFixed(2)}`}
-          tone={net > 0 ? 'win' : net < 0 ? 'loss' : 'neutral'}
-        />
-        <StatTile label="Streak" value={streakLabel} tone={stats.currentStreak > 0 ? 'win' : stats.currentStreak < 0 ? 'loss' : 'neutral'} />
-        <StatTile label="Biggest x" value={stats.biggestCashout > 0 ? `${stats.biggestCashout.toFixed(2)}x` : '—'} />
-        <StatTile label="Best win" value={stats.biggestWin > 0 ? `${DEFAULT_SYMBOL}${stats.biggestWin.toFixed(2)}` : '—'} />
+
+      <div className="grid grid-cols-2 gap-x-3 gap-y-2.5 px-3 py-3">
+        <StatTile label="Wagered" value={money(stats.totalWagered)} />
+        <StatTile label="Returned" value={money(stats.totalWon)} />
+        <StatTile label="Best multiplier" value={stats.biggestCashout > 0 ? `${stats.biggestCashout.toFixed(2)}×` : '—'} />
+        <StatTile label="Best win" value={stats.biggestWin > 0 ? money(stats.biggestWin) : '—'} />
       </div>
+
+      {/* Resetting the demo balance lives with the session it belongs to, not in
+          the top bar — in the bar it crowded the game's name down to "Gal…" on
+          a 390px screen. */}
+      {canReset && (
+        <div className="border-t border-edge-soft px-3 py-2.5">
+          <Button variant="quiet" size="sm" onClick={onResetBalance} className="w-full">
+            Reset demo balance
+          </Button>
+        </div>
+      )}
     </div>
   );
 }
 
-function StatTile({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'win' | 'loss' | 'neutral' }) {
-  const color = tone === 'win' ? 'text-bet-400' : tone === 'loss' ? 'text-loss-400' : 'text-neutral-100';
+function StatTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-space-800/50 border border-space-500/30 rounded-control px-2.5 py-1.5 leading-tight">
-      <div className="text-[9px] uppercase tracking-[0.18em] text-neutral-500">{label}</div>
-      <div className={`font-semibold tabular-nums ${color}`}>{value}</div>
+    <div className="min-w-0">
+      <div className="truncate text-[10px] font-medium uppercase tracking-[0.1em] text-neutral-600">{label}</div>
+      <div className="mt-0.5 truncate text-[13px] font-semibold tabular-nums text-neutral-200">{value}</div>
     </div>
   );
 }

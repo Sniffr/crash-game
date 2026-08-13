@@ -21,6 +21,7 @@ vi.mock('../store.js', () => ({
   recordBet: vi.fn().mockResolvedValue({ bets: 1, wins: 0, losses: 0, totalWagered: 100, totalWon: 0, netProfit: -100, biggestCashout: 0, biggestWin: 0, currentStreak: -1, bestStreak: 0 }),
   recordWin: vi.fn().mockResolvedValue({ bets: 1, wins: 1, losses: 0, totalWagered: 100, totalWon: 200, netProfit: 100, biggestCashout: 2.0, biggestWin: 100, currentStreak: 1, bestStreak: 1 }),
   recordLoss: vi.fn().mockResolvedValue(undefined),
+  recordStatsSafely: vi.fn(async (fn: () => Promise<unknown>) => { try { return await fn(); } catch { return undefined; } }),
   setBalance: vi.fn().mockResolvedValue(undefined),
   getStats: vi.fn().mockResolvedValue({ bets: 0, wins: 0, losses: 0, totalWagered: 0, totalWon: 0, netProfit: 0, biggestCashout: 0, biggestWin: 0, currentStreak: 0, bestStreak: 0 }),
   getSession: vi.fn(),

@@ -30,6 +30,55 @@ services:
       retries: 3
       start_period: 20s
 
+  # Local-dev Postgres. Production keeps Postgres external (Contabo), so this is
+  # opt-in and never starts with a plain `docker compose up`:
+  #
+  #   docker compose --profile local up -d postgres
+  #
+  # Published on 55432 to match the wallet test convention and to avoid clashing
+  # with any Postgres already listening on 5432. The app creates its own schema
+  # on boot (CREATE TABLE IF NOT EXISTS in packages/wallet/src/pg.ts), so there
+  # is no migration step. Point DATABASE_URL at localhost:55432 when running the
+  # app on the host with `npm run dev`.
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    profiles: ["local"]
+    # Credentials match packages/wallet/src/pg-test-support.ts, which connects
+    # as postgres/test on 55432 and creates its own `crashtest` database. Using
+    # them here means this one container serves both the running app and the
+    # wallet/server test suites; picking different ones leaves every
+    # Postgres-backed test failing on password authentication.
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: casino
+    ports:
+      - "55432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Creates the `crashtest` database the test suites expect. Runs only on
+      # first init of the volume — `down -v` to re-run it.
+      - ./deploy/local-postgres-init.sql:/docker-entrypoint-initdb.d/10-crashtest.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d casino"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Odds harvester for the Simulate game. Scrapes upcoming odds off OddsPortal
+  # with Playwright, normalizes them, and uploads the fixtures feed to S3 (the
+  # app reads simulate/fixtures/latest.json). One-shot by default; set
+  # HARVEST_INTERVAL_SEC>0 in .env to loop, or drive it on a schedule instead.
+  harvester:
+    build:
+      context: .
+      dockerfile: services/harvester/Dockerfile
+    image: crash-harvester
+    restart: "no"
+    env_file: .env          # S3_* + HARVEST_* (see .env.example)
+    profiles: ["harvester"] # opt-in: `docker compose --profile harvester up harvester`
+
   caddy:
     image: caddy:2
     restart: unless-stopped
@@ -47,5 +96,6 @@ services:
 
 volumes:
   crash-data:
+  postgres-data:
   caddy-data:
   caddy-config:
