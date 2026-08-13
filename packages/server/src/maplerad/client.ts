@@ -1,21 +1,12 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { railFor } from '@crash/wallet';
+import { providerRejected, type CollectInput, type CollectResult, type PayInProvider, type ParsedEvent, type VerifiedTxn } from '../payments/types.js';
 
 export interface MapleradClientConfig {
   baseUrl: string;
   secretKey: string;
   webhookSecret: string;
   fetchImpl?: typeof fetch;
-}
-
-export interface MapleradCollectInput {
-  currency: string;
-  amountMinor: number;
-  phone: string;
-  bankCode: string;
-  reference: string;
-  description: string;
-  payerName?: string;
-  payerEmail?: string;
 }
 
 interface MapleradEnvelope {
@@ -35,7 +26,8 @@ interface MapleradEnvelope {
  * Auth is a static Bearer secret key. Sandbox and production share the base
  * URL — test keys (sk_test_...) route to the sandbox.
  */
-export class MapleradClient {
+export class MapleradClient implements PayInProvider {
+  readonly name = 'maplerad';
   private readonly baseUrl: string;
   private readonly secretKey: string;
   private readonly webhookSecret: string;
@@ -48,12 +40,20 @@ export class MapleradClient {
     this.fetchImpl = cfg.fetchImpl ?? fetch;
   }
 
+  /** Momo rails only, and only once the institution code has been pulled. */
+  supports(currency: string): boolean {
+    const rail = railFor(currency);
+    return this.secretKey.length > 0 && rail?.payIn.method === 'momo' && !!rail.payIn.institutionCode;
+  }
+
   /**
-   * Initiates a mobile money collection. amountMinor is in the lowest
-   * denomination (e.g. cents). meta.counterparty is required in production
-   * ("request failed" without it).
+   * Initiates a mobile money collection. Amounts are already in the lowest
+   * denomination, which is what Maplerad bills in. meta.counterparty is
+   * required in production ("request failed" without it).
    */
-  async collect(input: MapleradCollectInput): Promise<Record<string, unknown>> {
+  async collect(input: CollectInput): Promise<CollectResult> {
+    const bankCode = railFor(input.currency)?.payIn.institutionCode;
+    if (!bankCode) throw providerRejected(`Maplerad has no institution code for ${input.currency}`);
     const rawName = input.payerName?.trim();
     const name = rawName && rawName.length > 0 ? rawName : 'Customer';
     const space = name.indexOf(' ');
@@ -66,20 +66,32 @@ export class MapleradClient {
     const body = {
       account_number: input.phone,
       amount: input.amountMinor,
-      bank_code: input.bankCode,
+      bank_code: bankCode,
       currency: input.currency,
       description: input.description,
       reference: input.reference,
       meta: { counterparty },
     };
-    const envelope = await this.call('POST', '/collections/momo', body);
-    return this.data(envelope);
+    await this.call('POST', '/collections/momo', body);
+    // Nothing to redirect to — Maplerad prompts the customer's phone directly.
+    return {};
+  }
+
+  parseEvent(payload: unknown): ParsedEvent {
+    const p = payload as { event?: string; data?: { reference?: string; id?: string } } | null;
+    const outcome = p?.event === 'collection.successful' ? 'success' : p?.event === 'collection.failed' ? 'failed' : 'ignore';
+    return { reference: p?.data?.reference ?? '', outcome, txnKey: p?.data?.id ?? '' };
   }
 
   /** Verify a collection transaction's status. Docs: always verify before giving value. */
-  async verifyTransaction(id: string): Promise<Record<string, unknown>> {
-    const envelope = await this.call('GET', `/transactions/verify/${id}`);
-    return this.data(envelope);
+  async verifyTransaction(id: string): Promise<VerifiedTxn> {
+    const d = this.data(await this.call('GET', `/transactions/verify/${id}`));
+    return {
+      status: String(d.status ?? ''),
+      reference: String(d.reference ?? ''),
+      amountMinor: d.amount == null ? undefined : Number(d.amount),
+      currency: d.currency == null ? undefined : String(d.currency),
+    };
   }
 
   /**
@@ -88,11 +100,14 @@ export class MapleradClient {
    * base64-decoded portion of the whsec_ secret; the header holds
    * space-separated "v1,<base64sig>" entries.
    */
-  verifyWebhookSignature(svixId: string, svixTimestamp: string, rawBody: string, sigHeader: string): boolean {
+  verifyWebhookSignature(header: (name: string) => string | undefined, rawBody: string): boolean {
     if (!this.webhookSecret || this.webhookSecret.trim().length === 0) {
       // no secret configured — skip; safe because status is re-verified via the API
       return true;
     }
+    const svixId = header('svix-id') ?? '';
+    const svixTimestamp = header('svix-timestamp') ?? '';
+    const sigHeader = header('svix-signature') ?? '';
     if (!svixId || !svixTimestamp || !sigHeader) {
       return false;
     }
@@ -125,8 +140,10 @@ export class MapleradClient {
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
     const json = (await res.json()) as MapleradEnvelope;
+    // An explicit API-level "no" — nothing was charged, so the caller may
+    // safely fail over to the other processor.
     if (json.status === false) {
-      throw new Error(`Maplerad error: ${json.message ?? 'unknown error'}`);
+      throw providerRejected(`Maplerad error: ${json.message ?? 'unknown error'}`);
     }
     return json;
   }

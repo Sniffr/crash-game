@@ -15,10 +15,12 @@ import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { createLobbyRouter } from './http/lobby';
 import { createLobbyPlayRouter } from './http/lobby-play';
 import { createLobbyDepositRouter } from './http/lobby-deposit';
-import { createMapleradWebhookRouter } from './http/maplerad-webhook';
+import { createDepositWebhookRouter } from './http/deposit-webhook';
 import { MapleradClient } from './maplerad/client';
+import { FincraClient } from './fincra/client';
+import type { PayInProvider } from './payments/types';
 import { MapleradFx } from './maplerad/fx';
-import { PgDepositsRepo } from '@crash/wallet';
+import { PgDepositsRepo, SUPPORTED_CURRENCIES } from '@crash/wallet';
 import { createAssetsRouter } from './http/assets';
 import { setLobbyWiringDeps } from './game/lobby-deps';
 import type { OperatorLedgerSource } from '@crash/wallet';
@@ -69,15 +71,37 @@ const players = new PlayersRepo(pool);
 const wallet = new WalletLedger(pool);
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
 
-// ─── Maplerad pay-in (deposits) ─────────────────────────────────────────────
-// KES-only depositable at launch (spec §Phase 1); FX is only exercised if a
-// non-KES lobby bet occurs, so FX_RATES is an acceptable static config
-// fallback until the live rate endpoint is wired for ZMW/ZAR/NGN.
+// ─── Pay-in processors (deposits) ───────────────────────────────────────────
+// Maplerad and Fincra both collect mobile money in the Eastern/Southern
+// African corridors listed in RAILS. The deposit route tries them in
+// PAYIN_PROVIDER_ORDER and uses whichever one is configured, supports the
+// player's currency, and accepts the charge. FX is only exercised if a non-KES
+// lobby bet occurs, so FX_RATES is an acceptable static config fallback until
+// a live rate endpoint is wired.
 const maplerad = new MapleradClient({
   baseUrl: process.env.MAPLERAD_BASE_URL ?? 'https://api.maplerad.com/v1',
   secretKey: process.env.MAPLERAD_SECRET_KEY ?? '',
   webhookSecret: process.env.MAPLERAD_WEBHOOK_SECRET ?? '',
 });
+const fincra = new FincraClient({
+  baseUrl: process.env.FINCRA_BASE_URL ?? 'https://api.fincra.com',
+  secretKey: process.env.FINCRA_SECRET_KEY ?? '',
+  businessId: process.env.FINCRA_BUSINESS_ID ?? '',
+  publicKey: process.env.FINCRA_PUBLIC_KEY ?? '',
+  webhookSecret: process.env.FINCRA_WEBHOOK_SECRET ?? '',
+  ...(process.env.FINCRA_REDIRECT_URL ? { redirectUrl: process.env.FINCRA_REDIRECT_URL } : {}),
+  ...(process.env.FINCRA_CURRENCIES ? { currencies: process.env.FINCRA_CURRENCIES.split(',').map((c) => c.trim()) } : {}),
+});
+const payInByName: Record<string, PayInProvider> = { maplerad, fincra };
+const payInProviders = (process.env.PAYIN_PROVIDER_ORDER ?? 'maplerad,fincra')
+  .split(',')
+  .map((n) => n.trim())
+  .map((n) => payInByName[n])
+  .filter((p): p is PayInProvider => !!p);
+console.log(
+  `[payin] order: ${payInProviders.map((p) => p.name).join(' → ')}; configured: ` +
+    (SUPPORTED_CURRENCIES.map((c) => `${c}=${payInProviders.filter((p) => p.supports(c)).map((p) => p.name).join('/') || 'none'}`).join(' ')),
+);
 const deposits = new PgDepositsRepo(pool);
 const fx = new MapleradFx(async (from) => {
   const rates = JSON.parse(process.env.FX_RATES ?? '{}');
@@ -188,10 +212,10 @@ app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, 
 // internal to the lobby router; asset uploads are admin-JWT protected.
 app.use('/api/lobby', createLobbyRouter({ players, wallet }));
 app.use('/api/lobby', createLobbyPlayRouter({ games, players, wallet }));
-app.use('/api/lobby', createLobbyDepositRouter({ players, deposits, maplerad, wallet }));
+app.use('/api/lobby', createLobbyDepositRouter({ players, deposits, providers: payInProviders }));
 app.use('/api/assets', createAssetsRouter());
 
-// ─── Maplerad webhook (Svix-signed collection events) ───────────────────────
+// ─── Collection webhooks (one signed endpoint per processor) ────────────────
 // notifyBalance is best-effort: it scans currently-connected sessions for one
 // bound to the deposited lobby player (via lobbyPlayerId) and pushes a live
 // balance update over the socket. If the player has no live session (or the
@@ -206,11 +230,13 @@ async function notifyBalance(playerId: string, balanceMinor: number, currency: s
       }
     }
   } catch (err) {
-    console.debug('[maplerad] notifyBalance best-effort push failed (non-fatal):', err);
+    console.debug('[payin] notifyBalance best-effort push failed (non-fatal):', err);
   }
 }
 
-app.use('/api/webhooks', createMapleradWebhookRouter({ maplerad, deposits, wallet, notifyBalance }));
+for (const provider of payInProviders) {
+  app.use('/api/webhooks', createDepositWebhookRouter({ path: `/${provider.name}`, provider, deposits, wallet, notifyBalance }));
+}
 
 // ─── Simulate game (harvested odds + provably-fair RNG) ─────────────────────
 // Play-money casino game: build a bet slip from real harvested fixtures and

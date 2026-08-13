@@ -451,6 +451,8 @@ function DepositModal({
   const [phase, setPhase] = useState<DepositPhase>('form');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // Set when the processor collects on a hosted page rather than by phone prompt.
+  const [payUrl, setPayUrl] = useState<string | null>(null);
   const sym = symbolFor(currency).trim();
 
   const submit = async () => {
@@ -466,8 +468,14 @@ function DepositModal({
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({ amountMinor }),
       });
-      const j = (await res.json().catch(() => ({}))) as { message?: string; error?: { message?: string } };
+      const j = (await res.json().catch(() => ({}))) as { message?: string; redirectUrl?: string; error?: { message?: string } };
       if (!res.ok) { setPhase('error'); setMessage(j?.error?.message ?? 'Could not start the deposit. Try again.'); return; }
+      if (j.redirectUrl) {
+        setPayUrl(j.redirectUrl);
+        // Popup blockers eat this silently, so the pending screen also shows
+        // the link — never rely on the window actually opening.
+        window.open(j.redirectUrl, '_blank', 'noopener,noreferrer');
+      }
       setPhase('pending');
       setMessage(j?.message ?? 'Check your phone to approve the prompt.');
     } catch {
@@ -517,13 +525,23 @@ function DepositModal({
 
   if (phase === 'pending') {
     return (
-      <Modal title="Check your phone" onClose={onClose}>
+      <Modal title={payUrl ? 'Complete your payment' : 'Check your phone'} onClose={onClose}>
         <div className="py-4 text-center">
           <Spinner className="mx-auto h-8 w-8 text-brand-500" />
           <p className="mt-4 text-[13px] text-neutral-200">{message}</p>
           <p className="mt-2 text-[12px] text-neutral-500">
             Waiting for confirmation — this window updates on its own.
           </p>
+          {payUrl && (
+            <a
+              href={payUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-4 inline-block text-[12px] font-semibold text-brand-400 underline underline-offset-2"
+            >
+              Payment page didn’t open? Tap here
+            </a>
+          )}
           <Button variant="secondary" size="lg" onClick={onClose} className="mt-6 w-full">Close</Button>
         </div>
       </Modal>

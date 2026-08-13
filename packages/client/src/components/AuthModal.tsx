@@ -24,9 +24,10 @@ type ContactKind = 'phone' | 'email';
  */
 const CURRENCY_OPTIONS: { code: string; country: string; contact: ContactKind }[] = [
   { code: 'KES', country: 'Kenya', contact: 'phone' },
+  { code: 'UGX', country: 'Uganda', contact: 'phone' },
+  { code: 'TZS', country: 'Tanzania', contact: 'phone' },
   { code: 'ZMW', country: 'Zambia', contact: 'phone' },
   { code: 'ZAR', country: 'South Africa', contact: 'email' },
-  { code: 'NGN', country: 'Nigeria', contact: 'email' },
 ];
 
 /**
@@ -34,7 +35,7 @@ const CURRENCY_OPTIONS: { code: string; country: string; contact: ContactKind }[
  *
  * Login is a single username + password step. Register is a two-step flow:
  * (1) username + password, (2) settlement currency + the matching contact
- * channel (phone for KES/ZMW, email for ZAR/NGN). All fetch/HTTP failures are
+ * channel (phone for the momo currencies, email for ZAR). All fetch/HTTP failures are
  * surfaced inline — the modal never throws.
  */
 export default function AuthModal({

@@ -123,25 +123,25 @@ describe('lobby router', () => {
     expect(res.body.error.code).toBe('UNSUPPORTED_CURRENCY');
   });
 
-  it('I2: a non-KES (NGN) player gets their balance read + currency echoed in login/me, not hardcoded KES', async () => {
+  it('I2: a non-KES (ZAR) player gets their balance read + currency echoed in login/me, not hardcoded KES', async () => {
     const username = `t_${randomUUID()}`;
     const password = 'p@ssw0rd';
     createdUsernames.push(username);
 
     const reg = await request(app)
       .post('/api/lobby/register')
-      .send({ username, password, currency: 'NGN', email: 'ngn-player@example.com' });
+      .send({ username, password, currency: 'ZAR', email: 'zar-player@example.com' });
     expect(reg.status).toBe(201);
 
     const login = await request(app).post('/api/lobby/login').send({ username, password });
     expect(login.status).toBe(200);
-    expect(login.body.currency).toBe('NGN');
+    expect(login.body.currency).toBe('ZAR');
     expect(login.body.balanceMinor).toBe(0);
     const token = login.body.token as string;
 
     const me = await request(app).get('/api/lobby/me').set('Authorization', `Bearer ${token}`);
     expect(me.status).toBe(200);
-    expect(me.body.currency).toBe('NGN');
+    expect(me.body.currency).toBe('ZAR');
     expect(me.body.balanceMinor).toBe(0);
   });
 
