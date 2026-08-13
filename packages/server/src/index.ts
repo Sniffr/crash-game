@@ -82,6 +82,7 @@ const maplerad = new MapleradClient({
   baseUrl: process.env.MAPLERAD_BASE_URL ?? 'https://api.maplerad.com/v1',
   secretKey: process.env.MAPLERAD_SECRET_KEY ?? '',
   webhookSecret: process.env.MAPLERAD_WEBHOOK_SECRET ?? '',
+  institutionCodes: JSON.parse(process.env.MAPLERAD_INSTITUTION_CODES ?? '{}'),
 });
 const fincra = new FincraClient({
   baseUrl: process.env.FINCRA_BASE_URL ?? 'https://api.fincra.com',

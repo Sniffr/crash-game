@@ -30,6 +30,25 @@ describe('MapleradClient', () => {
     expect(new MapleradClient({ baseUrl: 'x', secretKey: '', webhookSecret: '' }).supports('KES')).toBe(false);
   });
 
+  it('an institution-code override beats the rail default (sandbox vs live codes differ)', async () => {
+    // Prod rejected the rails default for KES with "invalid bank code" — the
+    // override exists so that is a config change, not a redeploy.
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (_u: string | URL, init?: RequestInit) => {
+      body = JSON.parse(init?.body as string);
+      return { ok: true, json: async () => ({ status: true, data: {} }) } as Response;
+    }) as unknown as typeof fetch;
+
+    const c = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '', institutionCodes: { KES: '187' }, fetchImpl });
+    await c.collect({ currency: 'KES', amountMinor: 100, phone: '2547', reference: 'r', description: 'd' });
+    expect(body.bank_code).toBe('187');
+
+    // A currency with no override still uses the rail's code.
+    const plain = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '', fetchImpl });
+    await plain.collect({ currency: 'KES', amountMinor: 100, phone: '2547', reference: 'r', description: 'd' });
+    expect(body.bank_code).toBe('1271');
+  });
+
   it('collect POSTs /collections/momo with the Bearer header and expected body, with no redirect', async () => {
     let capturedUrl: string | undefined;
     let capturedInit: RequestInit | undefined;

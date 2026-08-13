@@ -6,6 +6,12 @@ export interface MapleradClientConfig {
   baseUrl: string;
   secretKey: string;
   webhookSecret: string;
+  /**
+   * Per-currency institution code overrides. Sandbox and live keys return
+   * DIFFERENT codes from GET /institutions — prod rejected the rails default
+   * for KES with "invalid bank code" — so this is a knob, not a redeploy.
+   */
+  institutionCodes?: Record<string, string>;
   fetchImpl?: typeof fetch;
 }
 
@@ -31,19 +37,27 @@ export class MapleradClient implements PayInProvider {
   private readonly baseUrl: string;
   private readonly secretKey: string;
   private readonly webhookSecret: string;
+  private readonly institutionCodes: Record<string, string>;
   private readonly fetchImpl: typeof fetch;
 
   constructor(cfg: MapleradClientConfig) {
     this.baseUrl = cfg.baseUrl;
     this.secretKey = cfg.secretKey;
     this.webhookSecret = cfg.webhookSecret;
+    this.institutionCodes = cfg.institutionCodes ?? {};
     this.fetchImpl = cfg.fetchImpl ?? fetch;
+  }
+
+  /** Momo institution code for a currency: env override first, then the rail. */
+  private bankCodeFor(currency: string): string | undefined {
+    const rail = railFor(currency);
+    if (rail?.payIn.method !== 'momo') return undefined;
+    return this.institutionCodes[currency] ?? rail.payIn.institutionCode;
   }
 
   /** Momo rails only, and only once the institution code has been pulled. */
   supports(currency: string): boolean {
-    const rail = railFor(currency);
-    return this.secretKey.length > 0 && rail?.payIn.method === 'momo' && !!rail.payIn.institutionCode;
+    return this.secretKey.length > 0 && !!this.bankCodeFor(currency);
   }
 
   /**
@@ -52,7 +66,7 @@ export class MapleradClient implements PayInProvider {
    * required in production ("request failed" without it).
    */
   async collect(input: CollectInput): Promise<CollectResult> {
-    const bankCode = railFor(input.currency)?.payIn.institutionCode;
+    const bankCode = this.bankCodeFor(input.currency);
     if (!bankCode) throw providerRejected(`Maplerad has no institution code for ${input.currency}`);
     // Momo collections are keyed on the payer's phone — never call out without one.
     if (!input.phone) throw providerRejected(`Maplerad needs a phone number to collect ${input.currency}`);
