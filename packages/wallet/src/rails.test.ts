@@ -12,6 +12,16 @@ it('exposes the KES momo rail and 0dp UGX; unknown currencies have no rail', () 
   expect(decimalsFor('KES')).toBe(2);
 });
 
+it('Maplerad can collect the momo currencies it has institutions for, and no others', () => {
+  // Verified against Maplerad GET /institutions: KE/UG/TZ have momo
+  // institutions, ZM and ZA return none, NGN is a bank rail.
+  expect(railFor('UGX')?.payIn.institutionCode).toBe('919'); // MTN Uganda
+  expect(railFor('TZS')?.payIn.institutionCode).toBe('214'); // Airtel Tanzania
+  expect(railFor('ZMW')?.payIn.institutionCode).toBeUndefined();
+  expect(railFor('ZAR')?.payIn.method).toBe('bank');
+  expect(railFor('NGN')?.payIn.method).toBe('bank');
+});
+
 it('lists the Eastern/Southern African currencies plus NGN', () => {
   expect(SUPPORTED_CURRENCIES).toEqual(['KES', 'UGX', 'TZS', 'ZMW', 'ZAR', 'NGN']);
   expect(railFor('NGN')?.contact).toBe('email'); // bank rail — no phone collected

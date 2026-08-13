@@ -24,7 +24,9 @@ describe('MapleradClient', () => {
   it('supports only currencies with a live institution code', () => {
     const c = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '' });
     expect(c.supports('KES')).toBe(true);
-    expect(c.supports('ZMW')).toBe(false); // no institution code pulled yet
+    expect(c.supports('UGX')).toBe(true); // MTN Uganda momo
+    expect(c.supports('ZMW')).toBe(false); // Maplerad lists no ZM institutions
+    expect(c.supports('ZAR')).toBe(false); // bank rail, not momo
     expect(new MapleradClient({ baseUrl: 'x', secretKey: '', webhookSecret: '' }).supports('KES')).toBe(false);
   });
 

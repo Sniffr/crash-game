@@ -16,8 +16,15 @@ export type Rail = {
 
 export const RAILS: Record<string, Rail> = {
   KES: { currency: 'KES', country: 'KE', decimals: 2, payIn: { method: 'momo', institutionCode: '1271' }, payOut: { type: 'CBK' }, contact: 'phone' },
-  UGX: { currency: 'UGX', country: 'UG', decimals: 0, payIn: { method: 'momo' }, payOut: { type: 'MOMO' }, contact: 'phone' },
-  TZS: { currency: 'TZS', country: 'TZ', decimals: 2, payIn: { method: 'momo' }, payOut: { type: 'MOMO' }, contact: 'phone' },
+  // UG/TZ codes came from Maplerad GET /institutions?type=momo. One code per
+  // currency means one operator per market — MTN for Uganda, Airtel for
+  // Tanzania, the larger of the two each place.
+  // ponytail: route by MSISDN prefix if the other operator's share matters.
+  UGX: { currency: 'UGX', country: 'UG', decimals: 0, payIn: { method: 'momo', institutionCode: '919' }, payOut: { type: 'MOMO' }, contact: 'phone' },
+  TZS: { currency: 'TZS', country: 'TZ', decimals: 2, payIn: { method: 'momo', institutionCode: '214' }, payOut: { type: 'MOMO' }, contact: 'phone' },
+  // Maplerad lists ZERO institutions for ZM and ZA, so it cannot collect these
+  // at all — Fincra is the only pay-in route for them (card/EFT for ZAR,
+  // mobile money + card for ZMW).
   ZMW: { currency: 'ZMW', country: 'ZM', decimals: 2, payIn: { method: 'momo' }, payOut: { type: 'MOMO' }, contact: 'phone' },
   ZAR: { currency: 'ZAR', country: 'ZA', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'WALLET' }, contact: 'email' },
   NGN: { currency: 'NGN', country: 'NG', decimals: 2, payIn: { method: 'bank' }, payOut: { type: 'NUBAN' }, contact: 'email' },
