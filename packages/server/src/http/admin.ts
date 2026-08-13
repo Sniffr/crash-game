@@ -12,6 +12,7 @@
 import { Router } from 'express';
 import type { WalletClient, PgBetLog, WinRequest, OperatorStatus, BetState, FinancialFilter, PgReconciler, ReconStatus } from '@crash/wallet';
 import { WalletError, PgOperatorRegistry, DuplicateOperatorIdError, OperatorNotFoundError, encodeCursor, decodeCursor, parseLimit, ALL_BET_STATES, PgGamesRepo, DuplicateGameIdError, GameNotFoundError, InvalidGameError } from '@crash/wallet';
+import { DEFAULT_GAME_ID } from '@crash/shared/rng';
 import * as bcrypt from 'bcryptjs';
 import type { WalletClientCache } from '../wallet/client-cache.js';
 import type { AdminRole } from '../admin/admin-store.js';
@@ -709,6 +710,40 @@ export function createAdminRouter(deps: AdminRouterDeps): Router {
     } catch (err) {
       if (err instanceof GameNotFoundError) { res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: err.message } }); return; }
       if (err instanceof InvalidGameError) { res.status(400).json({ error: { code: 'INVALID_REQUEST', message: err.message } }); return; }
+      throw err;
+    }
+  });
+
+  // DELETE /games/:gameId — PERMANENT. `PATCH { status: 'archived' }` is the
+  // reversible option (game leaves the lobby, history keeps its name); this drops
+  // the catalogue row for good. Refuses the base game, which the round loop keeps
+  // running whether or not it is in the catalogue — deleting it would leave a
+  // phantom engine and a default game_id no row explains.
+  router.delete('/games/:gameId', requireRole('admin'), async (req, res): Promise<void> => {
+    const gameId = req.params['gameId']!;
+    if (gameId === DEFAULT_GAME_ID) {
+      res.status(409).json({
+        error: {
+          code: 'GAME_NOT_DELETABLE',
+          message: `'${gameId}' is the base game — archive it instead of deleting it.`,
+        },
+      });
+      return;
+    }
+    try {
+      const { betCount } = await deps.games.delete(gameId);
+      deps.adminAudit.record({
+        actor: req.admin!.username,
+        action: 'game.delete',
+        target: `game:${gameId}`,
+        payload: { betCount },
+      });
+      res.json({ ok: true, gameId, betCount });
+    } catch (err) {
+      if (err instanceof GameNotFoundError) {
+        res.status(404).json({ error: { code: 'GAME_NOT_FOUND', message: err.message } });
+        return;
+      }
       throw err;
     }
   });

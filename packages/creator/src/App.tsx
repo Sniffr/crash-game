@@ -144,26 +144,53 @@ export default function App() {
     } catch (e) { alert('Load failed: ' + (e as Error).message); }
   }, [theme.brandName]);
 
-  // Delete (archive) a published game: it leaves the lobby + Open list and its
-  // engine stops. Soft — bet history keeps its game reference.
-  const handleDelete = useCallback(async (gameId: string) => {
-    if (!gameId || !token) return;
-    if (!window.confirm(`Delete game "${gameId}"?\n\nIt will be removed from the lobby and can no longer be launched. This can't be undone here.`)) return;
+  // Both removal paths differ only in the request, so they share everything
+  // after it: 401 drops to the login gate, the list refreshes, and if the game
+  // being removed is the one loaded in the editor we reset to a clean default
+  // (otherwise Publish would immediately re-create what you just deleted).
+  const removeGame = useCallback(async (gameId: string, verb: string, req: RequestInit) => {
     try {
-      const res = await fetch(`/admin/v1/games/${encodeURIComponent(gameId)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ status: 'archived' }),
-      });
+      const res = await fetch(`/admin/v1/games/${encodeURIComponent(gameId)}`, req);
       if (res.status === 401) { setToken(null); setAdmin(null); return; }
-      if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e?.error?.message ?? `Delete failed (${res.status})`); }
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error?.message ?? `${verb} failed (${res.status})`);
       await refreshGames();
       if (slug(theme.brandName) === gameId) setTheme({ ...PRESETS.galaxy, brandName: '' });
-      alert(`Deleted "${gameId}".`);
+      return body as { betCount?: number };
     } catch (e) {
-      alert('Delete failed: ' + (e as Error).message);
+      alert(`${verb} failed: ` + (e as Error).message);
+      return undefined;
     }
-  }, [token, theme.brandName]);
+  }, [token, theme.brandName, refreshGames]);
+
+  // Archive: the game leaves the lobby + Open list and its engine stops, but the
+  // row stays, so bet history still resolves to a name and it can be restored.
+  const handleArchive = useCallback(async (gameId: string) => {
+    if (!gameId || !token) return;
+    if (!window.confirm(`Remove "${gameId}" from the lobby?\n\nIt can no longer be launched, but the game is kept so its bet history still resolves to a name.`)) return;
+    const ok = await removeGame(gameId, 'Remove', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ status: 'archived' }),
+    });
+    if (ok) alert(`Removed "${gameId}" from the lobby.`);
+  }, [token, removeGame]);
+
+  // Permanent: drops the catalogue row for good. Its assets and per-operator
+  // wiring go with it; settled bets survive but keep a game id that no longer
+  // resolves to a name, so the count is worth showing before and after.
+  const handlePurge = useCallback(async (gameId: string) => {
+    if (!gameId || !token) return;
+    if (!window.confirm(`PERMANENTLY delete "${gameId}"?\n\nThe game, its theme and its per-operator settings are erased. This cannot be undone — use Remove instead if you may want it back.`)) return;
+    const body = await removeGame(gameId, 'Delete', {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!body) return;
+    alert(body.betCount
+      ? `Deleted "${gameId}" permanently. ${body.betCount} settled bet(s) still reference it and will now show the bare id in reports.`
+      : `Deleted "${gameId}" permanently.`);
+  }, [token, removeGame]);
 
   const [publishing, setPublishing] = useState(false);
   const handlePublish = useCallback(async () => {
@@ -290,7 +317,8 @@ export default function App() {
         onNew={handleNew}
         games={games}
         onOpen={handleOpen}
-        onDelete={handleDelete}
+        onArchive={handleArchive}
+        onPurge={handlePurge}
         currentGameId={slug(theme.brandName)}
         advanced={advanced}
         onToggleAdvanced={() => setAdvanced((v) => !v)}
@@ -417,11 +445,20 @@ function LoginGate({ onLogin }: { onLogin: (token: string, user: string) => void
   );
 }
 
+/** Bin glyph — marks the irreversible delete apart from the ✕ that just hides. */
+function TrashIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v5M14 11v5" />
+    </svg>
+  );
+}
+
 // ─── Top bar ────────────────────────────────────────────────────────────────
-function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen, onDelete, currentGameId, advanced, onToggleAdvanced, admin, onLogout }: {
+function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, onOpen, onArchive, onPurge, currentGameId, advanced, onToggleAdvanced, admin, onLogout }: {
   onExport: () => void; onImportClick: () => void; onPublish: () => void; publishing: boolean;
   onNew: () => void; games: { gameId: string; name: string }[]; onOpen: (gameId: string) => void;
-  onDelete: (gameId: string) => void; currentGameId: string;
+  onArchive: (gameId: string) => void; onPurge: (gameId: string) => void; currentGameId: string;
   advanced: boolean; onToggleAdvanced: () => void; admin: string | null; onLogout: () => void;
 }) {
   // <details> stays open after a click; collapse it so the menu isn't left
@@ -493,13 +530,24 @@ function TopBar({ onExport, onImportClick, onPublish, publishing, onNew, games, 
                     {g.gameId}{g.gameId === currentGameId ? ' · open' : ''}
                   </span>
                 </button>
+                {/* Two removals, deliberately different glyphs and colours: ✕
+                    hides the game, the bin erases it. Same icon twice would make
+                    the irreversible one a mis-click away from the reversible one. */}
                 <button
-                  onClick={(e) => { closeMenu(e); onDelete(g.gameId); }}
-                  className="shrink-0 px-2 py-1.5 text-rose-400/70 hover:text-rose-300 transition"
-                  title={`Delete "${g.gameId}"`}
-                  aria-label={`Delete ${g.name}`}
+                  onClick={(e) => { closeMenu(e); onArchive(g.gameId); }}
+                  className="shrink-0 px-2 py-1.5 text-slate-500 hover:text-slate-200 transition"
+                  title={`Remove "${g.gameId}" from the lobby (keeps history)`}
+                  aria-label={`Remove ${g.name} from the lobby`}
                 >
                   ✕
+                </button>
+                <button
+                  onClick={(e) => { closeMenu(e); onPurge(g.gameId); }}
+                  className="shrink-0 px-2 py-1.5 text-rose-400/70 hover:text-rose-300 transition"
+                  title={`Delete "${g.gameId}" permanently`}
+                  aria-label={`Delete ${g.name} permanently`}
+                >
+                  <TrashIcon />
                 </button>
               </div>
             ))}

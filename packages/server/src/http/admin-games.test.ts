@@ -134,6 +134,41 @@ describe('GET /admin/v1/games', () => {
   });
 });
 
+describe('DELETE /admin/v1/games/:gameId — permanent', () => {
+  it('drops the row for good, cascades operator_games, and refuses the base game', async () => {
+    const { app, games, registry } = await makeHarness();
+    const jwt = await token(app);
+    const auth = (r: request.Test) => r.set('Authorization', `Bearer ${jwt}`);
+
+    await auth(request(app).post('/admin/v1/games'))
+      .send({ gameId: 'doomed', name: 'Doomed', gameType: 'sprite', rtp: 97, theme: { gameType: 'sprite' } });
+
+    // Wire it to an operator so we can prove the cascade fires.
+    const { operator } = await registry.create({
+      operatorId: 'op-del', name: 'Op', walletBaseUrl: 'https://w.example', adapter: 'generic-rest',
+      currencies: ['EUR'], minBetMinor: 100, maxBetMinor: 100000, rtpVariant: 0.97, jurisdictions: ['MT'],
+    });
+    await games.setOperatorGame(operator.operatorId, 'doomed', { enabled: true });
+    expect(await games.getOperatorGame(operator.operatorId, 'doomed')).not.toBeNull();
+
+    const del = await auth(request(app).delete('/admin/v1/games/doomed'));
+    expect(del.status).toBe(200);
+    expect(del.body).toMatchObject({ ok: true, gameId: 'doomed', betCount: 0 });
+
+    // Gone for real — not merely archived, so includeArchived can't see it either.
+    expect(await games.getById('doomed')).toBeNull();
+    const all = await auth(request(app).get('/admin/v1/games?includeArchived=1'));
+    expect(all.body.items.map((g: { gameId: string }) => g.gameId)).not.toContain('doomed');
+    expect(await games.getOperatorGame(operator.operatorId, 'doomed')).toBeNull();
+
+    // Second delete is a 404, and the base game is protected.
+    expect((await auth(request(app).delete('/admin/v1/games/doomed'))).status).toBe(404);
+    const base = await auth(request(app).delete('/admin/v1/games/galaxy-crash'));
+    expect(base.status).toBe(409);
+    expect(base.body.error.code).toBe('GAME_NOT_DELETABLE');
+  });
+});
+
 describe('PATCH /admin/v1/operators/:id/games/:gameId', () => {
   it('persists enabled + rtpVariant into operator_games', async () => {
     const { app, registry, games } = await makeHarness();

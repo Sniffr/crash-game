@@ -129,6 +129,29 @@ export class PgGamesRepo {
     return rowToGame(rows[0]);
   }
 
+  /**
+   * Hard-delete a game — permanent, unlike `update({ status: 'archived' })`.
+   *
+   * `operator_games` and `game_assets` rows go with it (both FK the game with
+   * ON DELETE CASCADE). `bet_log.game_id` is plain text with NO foreign key, so
+   * settled bets survive and keep pointing at an id that no longer resolves to a
+   * name — financial reports will show the bare id. That is why the count comes
+   * back: the caller can warn before destroying the row that names those bets.
+   *
+   * The engine for a deleted game stops on the next games-snapshot refresh,
+   * the same path that starts engines for newly created ones.
+   */
+  async delete(gameId: string): Promise<{ betCount: number }> {
+    if (!(await this.getById(gameId))) throw new GameNotFoundError(gameId);
+    const { rows } = await this.pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM bet_log WHERE game_id = $1`,
+      [gameId],
+    );
+    await this.pool.query(`DELETE FROM games WHERE game_id = $1`, [gameId]);
+    await this.refreshSnapshot();
+    return { betCount: Number(rows[0]?.n ?? 0) };
+  }
+
   // ── operator_games ─────────────────────────────────────────────────────────
 
   async setOperatorGame(
