@@ -14,3 +14,7 @@ kubectl.exe
 
 # Scratch output from the interface-design tooling, not a deliverable.
 .interface-design/
+
+# Local secrets scratch — never commit
+FINCRA_SECRETS.txt
+fincra-patch.json
