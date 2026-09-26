@@ -45,6 +45,73 @@ def test_match_url_promotes_the_event_id():
             == "https://www.oddsportal.com/football/h2h/arsenal-chelsea/WE22s2T6")
 
 
+# The listing as OddsPortal renders it since September 2026: no data-testid
+# hooks, utility classes only. A league group's first item carries the header
+# (links to /football/<country>/<league>/) and the column heads; later items are
+# bare rows. Rows are an <a> to the h2h page (clock + teams) plus a price list.
+LISTING_HTML = """
+<div class="tabs"><a href="/football/">Football</a><a href="/football/2026-09-27/">Tomorrow</a></div>
+<div data-client-only-list><div>
+  <div class="flex w-full flex-col">
+    <div><a href="/football/">Football</a> / <a href="/football/usa/">USA</a> / <a href="/football/usa/mls/">MLS</a></div>
+    <div>Tomorrow, 27 Sep <span>1</span><span>X</span><span>2</span></div>
+    <div class="flex flex-col"><div class="flex w-full">
+      <a href="/football/h2h/atlanta-united-EPngUvhk/new-york-city-vZraQYnO/#h8OvjEB6">
+        <div>02:30</div><div><p>Atlanta Utd</p><p>-</p><p>New York City</p></div></a>
+      <div></div><ul><li>2.28</li><li>3.54</li><li>2.93</li></ul>
+    </div></div>
+  </div>
+  <div class="flex w-full">
+    <a href="/football/h2h/cf-montreal-j9cigLCr/fc-cincinnati-8btog05R/#YFRRxgDM">
+      <div>02:30</div><div><p>CF Montreal</p><p>-</p><p>FC Cincinnati</p></div></a>
+    <div></div><ul><li>-</li><li>-</li><li>-</li></ul>
+  </div>
+  <div class="flex w-full flex-col">
+    <div><a href="/football/">Football</a> / <a href="/football/europe/">Europe</a> / <a href="/football/europe/uefa-nations-league/">Nations League</a></div>
+    <div>Tomorrow, 27 Sep</div>
+    <div class="flex flex-col"><div class="flex w-full">
+      <a href="/football/h2h/norway-8rP6JO0H/portugal-WvJrjFVN/#UycFdR8s">
+        <div>21:45</div><div><p>Norway</p><p>-</p><p>Portugal</p></div></a>
+      <div></div><ul><li>2.51</li><li>3.69</li><li>2.57</li></ul>
+    </div></div>
+  </div>
+  <div class="flex w-full">
+    <a href="/football/h2h/spain-bLyo6mco/france-QkGeVG1n/#Kd2Fp7Uy">
+      <div>21:45</div><div><p>Spain</p><p>-</p><p>France</p></div></a>
+    <div></div><ul><li>1.95</li><li>3.40</li><li>4.10</li></ul>
+  </div>
+</div></div>
+"""
+
+
+def test_row_records_reads_the_current_listing_markup():
+    """Runs the real in-page extraction in Chromium; skipped where it isn't installed."""
+    import pytest
+
+    sync_api = pytest.importorskip("playwright.sync_api")
+    try:
+        pw = sync_api.sync_playwright().start()
+        browser = pw.chromium.launch()
+    except Exception as e:  # noqa: BLE001 — no browser binary on this machine
+        pytest.skip(f"chromium unavailable: {e}")
+    try:
+        page = browser.new_page()
+        page.set_content(LISTING_HTML)
+        rows = [listing._parse_row(r) for r in listing._row_records(page, "football")]
+        assert listing._match_count(page) == 4
+    finally:
+        browser.close()
+        pw.stop()
+
+    parsed = [r for r in rows if r]
+    # The unpriced Montreal row is skipped, and each row takes its own group's league.
+    assert [(r["home"], r["away"], r["time"], r["league"], r["odds"]) for r in parsed] == [
+        ("Atlanta Utd", "New York City", "02:30", "Usa: Mls", ["2.28", "3.54", "2.93"]),
+        ("Norway", "Portugal", "21:45", "Europe: Uefa Nations League", ["2.51", "3.69", "2.57"]),
+        ("Spain", "France", "21:45", "Europe: Uefa Nations League", ["1.95", "3.40", "4.10"]),
+    ]
+
+
 def _stub_kickoffs(*starts):
     """Feed canned JSON-LD kickoffs to the calibration path, one per sample."""
     it = iter(starts)

@@ -2,13 +2,23 @@
 
 Why this exists instead of the `oddsharvester` CLI
 --------------------------------------------------
-OddsPortal migrated its `/matches/<sport>/<date>/` listing to the same
-`data-testid="game-row"` markup its live listing already used, and now redirects
-that URL to `/<sport>/<YYYY-MM-DD>/`. `oddsharvester` (0.10.0) still looks for
+OddsPortal migrated its `/matches/<sport>/<date>/` listing to new markup and now
+serves it at `/<sport>/<YYYY-MM-DD>/`. `oddsharvester` (0.10.0) still looks for
 the old `div[class*="eventRow"]` and therefore returns zero rows for every date
 — a silent empty scrape, not an error. Everything Simulate needs (kickoff,
 teams, 1x2 prices) is present on the listing page itself, so we read it directly
 and skip the per-match page visits the CLI performed.
+
+Finding rows without markup hooks
+---------------------------------
+The page has twice changed its hooks under us: first the CLI's `eventRow`
+classes, then (September 2026) every `data-testid` attribute disappeared, which
+silently emptied the feed for weeks. Its classes are Tailwind utilities, no
+steadier. So rows are located by what they *are* rather than what they're
+tagged: each match links to its `/h2h/…/#<eventId>` page, and its row is the
+smallest element around that link that also carries the three 1x2 prices. The
+league is read from the nearest preceding header's `/<sport>/<country>/<league>/`
+link.
 
 Timezone — the subtle part
 --------------------------
@@ -47,8 +57,8 @@ from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout
 log = logging.getLogger("harvester.listing")
 
 BASE = "https://www.oddsportal.com"
-GAME_ROW = '[data-testid="game-row"]'
-TIME_ITEM = '[data-testid="time-item"]'
+# Every listed match links to its head-to-head page; the fragment is its id.
+MATCH_LINK = 'a[href*="/h2h/"]'
 
 # How many detail pages to sample when working out the display offset.
 CALIBRATION_SAMPLES = 3
@@ -57,66 +67,80 @@ CALIBRATION_SAMPLES = 3
 _TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
 _ODDS_RE = re.compile(r"^\d+\.\d+$")
 
+# Shared by the row reader and the "prices have loaded" wait: the row of a match
+# link is its closest ancestor holding three decimal prices, provided that
+# ancestor doesn't also hold another match (then this match has no prices yet).
+_ROW_OF_JS = """
+const priceCount = (el) => ((el.innerText || '').match(/\\b\\d+\\.\\d+\\b/g) || []).length;
+const matchIds = (el) => new Set([...el.querySelectorAll('a[href*="/h2h/"]')]
+  .map((l) => l.getAttribute('href')));
+const rowOf = (link) => {
+  let row = link.parentElement;
+  while (row && priceCount(row) < 3) {
+    const up = row.parentElement;
+    if (!up || matchIds(up).size > 1) return null;
+    row = up;
+  }
+  return row && matchIds(row).size === 1 ? row : null;
+};
+"""
 
-def _row_records(page: Page) -> list[dict[str, Any]]:
+
+def _row_records(page: Page, sport: str) -> list[dict[str, Any]]:
     """Pull the raw (href, displayed time, teams, odds) tuples out of the DOM.
 
-    The `game-row` testid appears twice per fixture (outer div and a nested one
-    inside the anchor), so rows are de-duplicated on href.
+    A match can render its link more than once, so rows are de-duplicated on
+    href. Links without an event-id fragment aren't listing rows.
     """
     return page.evaluate(
-        """
-        (sel) => {
-          const [rowSel, timeSel] = sel;
+        "(sport) => {" + _ROW_OF_JS + """
+          // League headers link /<sport>/<country>/<league>/; rows only link
+          // /<sport>/h2h/… pages, so any other deep sport link marks a header.
+          const leagueLinks = (el) => [...el.querySelectorAll('a[href]')]
+            .map((l) => l.getAttribute('href') || '')
+            .filter((h) => h.startsWith('/' + sport + '/') && !h.includes('/h2h/')
+                           && h.split('/').filter(Boolean).length >= 3);
+          const leagueOf = (row) => {
+            for (let n = row; n; n = n.parentElement) {
+              for (let s = n.previousElementSibling; s; s = s.previousElementSibling) {
+                const hrefs = leagueLinks(s);
+                if (hrefs.length) {
+                  // Deepest path = most specific (the league itself).
+                  return hrefs.reduce((a, b) =>
+                    b.split('/').filter(Boolean).length > a.split('/').filter(Boolean).length ? b : a);
+                }
+              }
+            }
+            return '';
+          };
           const out = [];
           const seen = new Set();
-          for (const row of document.querySelectorAll(rowSel)) {
-            const a = row.querySelector('a[href]');
-            if (!a) continue;
-            const href = a.getAttribute('href');
-            if (!href || seen.has(href)) continue;
+          for (const link of document.querySelectorAll('a[href*="/h2h/"]')) {
+            const href = link.getAttribute('href');
+            if (!href || !href.includes('#') || seen.has(href)) continue;
+            const row = rowOf(link);
+            if (!row) continue;
             seen.add(href);
-            const timeEl = row.querySelector(timeSel);
-            const parts = row.innerText.split('\\n')
-                             .map(s => s.trim()).filter(Boolean);
             out.push({
               href,
-              time: timeEl ? timeEl.innerText.trim() : null,
-              parts,
-              // Rows sit under a `sport-country-league-item` header. Its visible
-              // text is fragmented across nodes, but its anchors carry the
-              // path (/football/europe/champions-league/), which is a cleaner
-              // source for the label than the text.
-              leagueHref: (() => {
-                let n = row;
-                while (n) {
-                  let s = n.previousElementSibling;
-                  while (s) {
-                    const hdr = s.matches?.('[data-testid="sport-country-league-item"]')
-                      ? s : s.querySelector?.('[data-testid="sport-country-league-item"]');
-                    if (hdr) {
-                      const hrefs = [...hdr.querySelectorAll('a[href]')]
-                        .map(l => l.getAttribute('href') || '')
-                        .filter(h => h.startsWith('/'));
-                      if (hrefs.length) {
-                        // Deepest path = most specific (the league itself).
-                        return hrefs.reduce((a, b) =>
-                          b.split('/').filter(Boolean).length >
-                          a.split('/').filter(Boolean).length ? b : a);
-                      }
-                    }
-                    s = s.previousElementSibling;
-                  }
-                  n = n.parentElement;
-                }
-                return '';
-              })(),
+              // The link's own text opens with the kickoff clock ("02:30").
+              time: ((link.innerText || '').match(/\\b\\d{1,2}:\\d{2}\\b/) || [null])[0],
+              parts: row.innerText.split('\\n').map((s) => s.trim()).filter(Boolean),
+              leagueHref: leagueOf(row),
             });
           }
           return out;
         }
         """,
-        [GAME_ROW, TIME_ITEM],
+        sport,
+    )
+
+
+def _match_count(page: Page) -> int:
+    """Distinct match links currently in the DOM (the list grows as it scrolls)."""
+    return page.evaluate(
+        "(sel) => new Set([...document.querySelectorAll(sel)].map((l) => l.getAttribute('href'))).size",
+        MATCH_LINK,
     )
 
 
@@ -269,15 +293,15 @@ def _wait_for_prices(page: Page, timeout_ms: int) -> None:
     """Block until the listing's price cells have actually filled in.
 
     Rows render before their odds: the cells sit at "-" for a second or two
-    after `game-row` appears, and a row read at that moment carries no prices,
-    so `_parse_row` discards it as "not a 1x2 row". Waiting on the row selector
-    alone is what made this scrape return zero fixtures for every date — the
-    thing the blind 8s sleep it replaced had been quietly covering.
+    after the match links appear, and a row read at that moment carries no
+    prices, so `_parse_row` discards it as "not a 1x2 row". Waiting on the links
+    alone is what once made this scrape return zero fixtures for every date —
+    the thing the blind 8s sleep it replaced had been quietly covering.
     """
     page.wait_for_function(
-        """(sel) => [...document.querySelectorAll(sel)]
-             .some((r) => (r.innerText.match(/\\d+\\.\\d+/g) || []).length >= 3)""",
-        arg=GAME_ROW,
+        "() => {" + _ROW_OF_JS + """
+          return [...document.querySelectorAll('a[href*="/h2h/"]')].some((l) => rowOf(l) !== null);
+        }""",
         timeout=timeout_ms,
     )
 
@@ -301,11 +325,12 @@ def scrape_date(
     means — but *raises* if calibration itself fails, aborting the run rather
     than publishing kickoffs that may be hours wrong.
     """
-    url = f"{BASE}/matches/{sport}/{date_yyyymmdd}/"
+    day = datetime.strptime(date_yyyymmdd, "%Y%m%d").strftime("%Y-%m-%d")
+    url = f"{BASE}/{sport}/{day}/"
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
         try:
-            page.wait_for_selector(GAME_ROW, timeout=nav_timeout_ms)
+            page.wait_for_selector(MATCH_LINK, timeout=nav_timeout_ms)
             _wait_for_prices(page, nav_timeout_ms)
         except PlaywrightTimeout:
             # A date with no fixtures at all is a normal outcome, not a failure.
@@ -319,11 +344,11 @@ def scrape_date(
         seen: dict[str, dict[str, Any]] = {}
         previous = prev_seen = -1
         for _ in range(12):
-            for rec in _row_records(page):
+            for rec in _row_records(page, sport):
                 row = _parse_row(rec)
                 if row:
                     seen.setdefault(row["href"], row)
-            count = len(page.query_selector_all(GAME_ROW))
+            count = _match_count(page)
             # Stop once neither the list nor our haul is still growing.
             if count == previous and len(seen) == prev_seen:
                 break
