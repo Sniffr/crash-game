@@ -328,14 +328,20 @@ def scrape_date(
     day = datetime.strptime(date_yyyymmdd, "%Y%m%d").strftime("%Y-%m-%d")
     url = f"{BASE}/{sport}/{day}/"
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
-        try:
-            page.wait_for_selector(MATCH_LINK, timeout=nav_timeout_ms)
-            _wait_for_prices(page, nav_timeout_ms)
-        except PlaywrightTimeout:
-            # A date with no fixtures at all is a normal outcome, not a failure.
-            log.info("%s: no priced rows on the listing", date_yyyymmdd)
-            return [], offset
+        # The listing sometimes stalls on a load and never prices up, then loads
+        # in seconds on the next visit — so reload once before calling a date empty.
+        for attempt in (1, 2):
+            page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout_ms)
+            try:
+                page.wait_for_selector(MATCH_LINK, timeout=nav_timeout_ms)
+                _wait_for_prices(page, nav_timeout_ms)
+                break
+            except PlaywrightTimeout:
+                if attempt == 2:
+                    # A date with no fixtures at all is a normal outcome, not a failure.
+                    log.info("%s: no priced rows on the listing", date_yyyymmdd)
+                    return [], offset
+                log.info("%s: listing didn't price up — reloading once", date_yyyymmdd)
 
         # The listing lazy-renders AND virtualises: rows recycle as you scroll,
         # dropping their prices on the way out. Reading once at the end loses
