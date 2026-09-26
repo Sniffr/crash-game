@@ -100,18 +100,29 @@ def _row_records(page: Page, sport: str) -> list[dict[str, Any]]:
             .map((l) => l.getAttribute('href') || '')
             .filter((h) => h.startsWith('/' + sport + '/') && !h.includes('/h2h/')
                            && h.split('/').filter(Boolean).length >= 3);
+          // The header's link texts carry the display names ("USA", "MLS").
+          const linkText = (el, href) => {
+            const l = [...el.querySelectorAll('a[href]')].find((x) => x.getAttribute('href') === href);
+            return l ? (l.innerText || '').trim() : '';
+          };
           const leagueOf = (row) => {
             for (let n = row; n; n = n.parentElement) {
               for (let s = n.previousElementSibling; s; s = s.previousElementSibling) {
                 const hrefs = leagueLinks(s);
                 if (hrefs.length) {
                   // Deepest path = most specific (the league itself).
-                  return hrefs.reduce((a, b) =>
+                  const href = hrefs.reduce((a, b) =>
                     b.split('/').filter(Boolean).length > a.split('/').filter(Boolean).length ? b : a);
+                  const segs = href.split('/').filter(Boolean);
+                  return {
+                    href,
+                    country: linkText(s, '/' + segs.slice(0, 2).join('/') + '/'),
+                    name: linkText(s, href),
+                  };
                 }
               }
             }
-            return '';
+            return { href: '', country: '', name: '' };
           };
           const out = [];
           const seen = new Set();
@@ -121,12 +132,15 @@ def _row_records(page: Page, sport: str) -> list[dict[str, Any]]:
             const row = rowOf(link);
             if (!row) continue;
             seen.add(href);
+            const league = leagueOf(row);
             out.push({
               href,
               // The link's own text opens with the kickoff clock ("02:30").
               time: ((link.innerText || '').match(/\\b\\d{1,2}:\\d{2}\\b/) || [null])[0],
               parts: row.innerText.split('\\n').map((s) => s.trim()).filter(Boolean),
-              leagueHref: leagueOf(row),
+              leagueHref: league.href,
+              leagueCountry: league.country,
+              leagueName: league.name,
             });
           }
           return out;
@@ -173,20 +187,28 @@ def _parse_row(rec: dict[str, Any]) -> dict[str, Any] | None:
         "home": teams[0],
         "away": teams[1],
         "odds": odds,
-        "league": _league_label(rec.get("leagueHref") or ""),
+        "league": _league_label(
+            rec.get("leagueHref") or "", rec.get("leagueCountry") or "", rec.get("leagueName") or ""
+        ),
     }
 
 
-def _league_label(href: str) -> str:
-    """`/football/europe/champions-league/` -> "Europe: Champions League"."""
+def _league_label(href: str, country: str = "", name: str = "") -> str:
+    """"Country League", e.g. "England Premier League", "USA MLS".
+
+    Prefers the names the listing header displays; falls back to prettifying
+    the path (`/football/europe/champions-league/` -> "Europe Champions League")
+    when a header renders no link text.
+    """
+    if name:
+        return f"{country} {name}".strip()
     segs = [s for s in href.split("/") if s]
     if len(segs) < 2:
         return ""
     def pretty(s: str) -> str:
         return " ".join(w.capitalize() for w in s.replace("-", " ").split())
     # segs[0] is the sport; the rest is country (+ league).
-    parts = [pretty(s) for s in segs[1:3]]
-    return ": ".join(p for p in parts if p)
+    return " ".join(pretty(s) for s in segs[1:3])
 
 
 def _match_url(href: str) -> str:

@@ -18,6 +18,8 @@ SAMPLE_REC = {
     "time": "20:00",
     "parts": ["20:00", "Arsenal", "-", "Chelsea", "2.10", "3.40", "3.35", "12"],
     "leagueHref": "/football/europe/champions-league/",
+    "leagueCountry": "Europe",
+    "leagueName": "Champions League",
 }
 
 
@@ -26,7 +28,7 @@ def test_parse_row():
     assert row["home"] == "Arsenal"
     assert row["away"] == "Chelsea"
     assert row["odds"] == ["2.10", "3.40", "3.35"]
-    assert row["league"] == "Europe: Champions League"
+    assert row["league"] == "Europe Champions League"
 
 
 def test_parse_row_rejects_non_1x2():
@@ -36,7 +38,9 @@ def test_parse_row_rejects_non_1x2():
 
 
 def test_league_label():
-    assert listing._league_label("/football/europe/champions-league/") == "Europe: Champions League"
+    # Header names win; the path is only a fallback.
+    assert listing._league_label("/football/usa/mls/", "USA", "MLS") == "USA MLS"
+    assert listing._league_label("/football/europe/champions-league/") == "Europe Champions League"
     assert listing._league_label("/football/") == ""
 
 
@@ -106,9 +110,9 @@ def test_row_records_reads_the_current_listing_markup():
     parsed = [r for r in rows if r]
     # The unpriced Montreal row is skipped, and each row takes its own group's league.
     assert [(r["home"], r["away"], r["time"], r["league"], r["odds"]) for r in parsed] == [
-        ("Atlanta Utd", "New York City", "02:30", "Usa: Mls", ["2.28", "3.54", "2.93"]),
-        ("Norway", "Portugal", "21:45", "Europe: Uefa Nations League", ["2.51", "3.69", "2.57"]),
-        ("Spain", "France", "21:45", "Europe: Uefa Nations League", ["1.95", "3.40", "4.10"]),
+        ("Atlanta Utd", "New York City", "02:30", "USA MLS", ["2.28", "3.54", "2.93"]),
+        ("Norway", "Portugal", "21:45", "Europe Nations League", ["2.51", "3.69", "2.57"]),
+        ("Spain", "France", "21:45", "Europe Nations League", ["1.95", "3.40", "4.10"]),
     ]
 
 
