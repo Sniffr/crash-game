@@ -120,8 +120,23 @@ export function inRange(iso: string, range: DateRange, now = Date.now()): boolea
   return t <= now + span * 86_400_000;
 }
 
-/** Big competitions first on Highlights; everything else by how many fixtures it has. */
-const FEATURED = [/premier league/i, /champions league/i, /la ?liga/i, /serie a/i, /bundesliga/i, /ligue 1/i, /europa league/i, /kenya/i];
+/**
+ * Big competitions first on Highlights; everything else by how many fixtures it
+ * has. Whole-name matches ("England Premier League"), so a women's or youth
+ * league that merely contains "Bundesliga" doesn't jump the queue.
+ */
+const FEATURED = [
+  /^england:? premier league$/i,
+  /^europe:? (uefa )?champions league$/i,
+  /^spain:? la ?liga$/i,
+  /^italy:? serie a$/i,
+  /^germany:? bundesliga$/i,
+  /^france:? ligue 1$/i,
+  /^europe:? (uefa )?europa league$/i,
+  /^europe:? uefa nations league$/i,
+  /^world:? world championship/i,
+  /^kenya:? premier league$/i,
+];
 const featuredRank = (league: string) => {
   const i = FEATURED.findIndex((re) => re.test(league));
   return i < 0 ? FEATURED.length : i;

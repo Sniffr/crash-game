@@ -66,7 +66,9 @@ export function FixturesBoard({ limitLeagues, league = null, afterFirst }: {
           body={league ? `Nothing left to play in ${league} for these dates.` : 'Try another date range — new fixtures arrive with every odds update.'}
           action={range !== 'all' ? <Button variant="outline" onClick={() => setRange('all')}>Show all dates</Button> : undefined} />
       ) : (
-        <div className="flex flex-col gap-3">
+        // Keyed by the filters: a new date range or order remounts the
+        // accordions, so the (new) first league opens as it does on first load.
+        <div key={`${order}:${range}`} className="flex flex-col gap-3">
           {shown.map((g, i) => (
             <Fragment key={g.league}>
               <LeagueAccordion group={g} defaultOpen={i === 0 || !!league} showViewAll={!league} />
