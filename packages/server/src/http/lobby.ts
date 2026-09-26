@@ -18,6 +18,7 @@ import * as bcrypt from 'bcryptjs';
 import { PlayersRepo, DuplicateUsernameError } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
 import { railFor, SUPPORTED_CURRENCIES } from '@crash/wallet';
+import { accountBlock, type AccountsRepo } from '../account/accounts-repo.js';
 
 // ---------------------------------------------------------------------------
 // Request augmentation — mirrors admin-auth.ts's `req.admin` pattern.
@@ -49,17 +50,34 @@ function getSecretKey(): Uint8Array | null {
 interface PlayerClaims {
   sub: string;
   typ: string;
+  /** Account token_version at signing; absent on tokens minted before it existed (= 0). */
+  ver?: number;
   iat: number;
   exp: number;
 }
 
+/**
+ * Per-request account check, wired at boot (tests leave it unset). Rejects
+ * tokens from an older token_version (signed out everywhere) and accounts that
+ * are deactivated or self-excluded.
+ */
+export type PlayerGateResult =
+  | { ok: true }
+  | { ok: false; status: number; code: string; message: string; until?: string };
+export type PlayerGate = (playerId: string, tokenVersion: number) => Promise<PlayerGateResult>;
+
+let playerGate: PlayerGate | null = null;
+export function setPlayerGate(gate: PlayerGate | null): void {
+  playerGate = gate;
+}
+
 /** Sign a player JWT. Throws if JWT_SECRET is unset at call time. */
-export async function signPlayerJwt(playerId: string): Promise<string> {
+export async function signPlayerJwt(playerId: string, tokenVersion = 0): Promise<string> {
   const secretKey = getSecretKey();
   if (!secretKey) throw new Error('JWT_SECRET not set');
 
   const now = Math.floor(Date.now() / 1000);
-  return new SignJWT({ typ: 'player' })
+  return new SignJWT({ typ: 'player', ver: tokenVersion })
     .setProtectedHeader({ alg: 'HS256' })
     .setSubject(playerId)
     .setIssuedAt(now)
@@ -109,6 +127,16 @@ export const requirePlayerJwt: RequestHandler = async (req, res, next): Promise<
       return;
     }
 
+    if (playerGate) {
+      const verdict = await playerGate(payload.sub, typeof payload.ver === 'number' ? payload.ver : 0);
+      if (!verdict.ok) {
+        res.status(verdict.status).json({
+          error: { code: verdict.code, message: verdict.message, ...(verdict.until ? { until: verdict.until } : {}) },
+        });
+        return;
+      }
+    }
+
     req.player = { playerId: payload.sub };
     next();
   } catch (err) {
@@ -126,9 +154,11 @@ export const requirePlayerJwt: RequestHandler = async (req, res, next): Promise<
 export interface LobbyRouterDeps {
   players: PlayersRepo;
   wallet: WalletLedger;
+  /** Account security state (token version, deactivation, self-exclusion). Optional for tests. */
+  accounts?: AccountsRepo;
 }
 
-export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLedger }): Router {
+export function createLobbyRouter(deps: LobbyRouterDeps): Router {
   const router = Router();
 
   // Guard: JWT_SECRET must be set to issue tokens. Returns 503 if not.
@@ -225,7 +255,14 @@ export function createLobbyRouter(deps: { players: PlayersRepo; wallet: WalletLe
       return;
     }
 
-    const token = await signPlayerJwt(found.playerId);
+    const acct = deps.accounts ? await deps.accounts.getById(found.playerId) : null;
+    const block = acct ? accountBlock(acct) : null;
+    if (block) {
+      res.status(403).json({ error: { code: block.code, message: block.message, ...('until' in block ? { until: block.until } : {}) } });
+      return;
+    }
+
+    const token = await signPlayerJwt(found.playerId, acct?.tokenVersion ?? 0);
     const balanceMinor = await deps.wallet.balance(found.playerId, found.currency);
     res.status(200).json({
       token,

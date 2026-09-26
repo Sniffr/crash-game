@@ -129,6 +129,22 @@ describe('GET /api/simulate/fixtures', () => {
   });
 });
 
+describe('GET /api/simulate/fixtures/markets (batch)', () => {
+  it('prices several fixtures at once, including odd/even, and skips unknown ids', async () => {
+    const res = await request(app).get('/api/simulate/fixtures/markets?ids=arsenal-chelsea-T1,madrid-barca-T2,nope');
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { eventId: string }) => i.eventId)).toEqual(['arsenal-chelsea-T1', 'madrid-barca-T2']);
+    const markets = res.body.items[0].markets.map((m: { market: string }) => m.market);
+    expect(markets).toEqual(expect.arrayContaining(['1x2', 'double_chance', 'btts', 'odd_even', 'over_under_2_5']));
+  });
+
+  it('requires ids and caps the batch size', async () => {
+    expect((await request(app).get('/api/simulate/fixtures/markets')).status).toBe(400);
+    const many = Array.from({ length: 21 }, (_, i) => `id${i}`).join(',');
+    expect((await request(app).get(`/api/simulate/fixtures/markets?ids=${many}`)).body.error.code).toBe('TOO_MANY_IDS');
+  });
+});
+
 describe('GET /api/simulate/fixtures/:eventId/markets', () => {
   it('prices the full catalogue for one fixture, with 1x2 straight from the feed', async () => {
     const res = await request(app).get('/api/simulate/fixtures/arsenal-chelsea-T1/markets');

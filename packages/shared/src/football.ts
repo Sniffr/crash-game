@@ -276,6 +276,14 @@ export function marketCatalogue(): MarketGroup[] {
         { market: 'btts', pick: 'no', label: 'No', settles: (s) => s.home === 0 || s.away === 0 },
       ],
     },
+    {
+      market: 'odd_even',
+      name: 'Odd/Even Goals',
+      outcomes: [
+        { market: 'odd_even', pick: 'odd', label: 'Odd', settles: (s) => (s.home + s.away) % 2 === 1 },
+        { market: 'odd_even', pick: 'even', label: 'Even', settles: (s) => (s.home + s.away) % 2 === 0 },
+      ],
+    },
   ];
 
   for (const line of OVER_UNDER_LINES) {

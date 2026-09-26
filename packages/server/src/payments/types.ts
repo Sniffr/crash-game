@@ -53,6 +53,48 @@ export interface PayInProvider {
   verifyTransaction(txnKey: string): Promise<VerifiedTxn>;
 }
 
+// ---------------------------------------------------------------------------
+// Payouts (withdrawals to mobile money).
+// ---------------------------------------------------------------------------
+
+export type PayoutStatus = 'pending' | 'success' | 'failed';
+
+export interface PayoutInput {
+  /** OUR reference (game-wd-…), echoed back on the provider's webhooks. */
+  reference: string;
+  currency: string;
+  amountMinor: number;
+  /** Recipient in E.164, e.g. +254712345678. */
+  phone: string;
+  recipientName: string;
+  reason: string;
+}
+
+export interface PayoutResult {
+  providerTxnId: string | null;
+  status: PayoutStatus;
+}
+
+export interface PayoutEvent {
+  reference: string;
+  providerTxnId: string | null;
+  /** The status the event claims — never acted on for refunds without confirmation. */
+  status: PayoutStatus | null;
+}
+
+export interface PayOutProvider {
+  readonly name: string;
+  supportsPayout(currency: string): boolean;
+  /** Throws a providerRejected() error if the provider refused it (nothing was sent). */
+  payout(input: PayoutInput): Promise<PayoutResult>;
+  /** Independently confirmed status, or null if it can't be determined right now. */
+  lookupPayout(providerTxnId: string): Promise<PayoutStatus | null>;
+  /** The payout event in a webhook payload, or null if it isn't one. */
+  parsePayoutEvent(payload: unknown): PayoutEvent | null;
+  /** True when webhooks are signature-checked with a configured secret. */
+  readonly webhookSigned: boolean;
+}
+
 /**
  * Thrown when the processor *rejected* the request outright (explicit API
  * error / 4xx) — no charge was created, so failing over to the other processor

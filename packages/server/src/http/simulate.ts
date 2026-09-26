@@ -121,6 +121,8 @@ interface FixtureMarkets {
 
 const marketCache = new Map<string, FixtureMarkets>();
 
+const MAX_BATCH_MARKETS = 20;
+
 // Dropped wholesale whenever the feed is replaced, which bounds the cache at
 // one entry per live fixture. A count bound protected nothing: on a feed bigger
 // than the bound, walking eventIds in order misses every time — and the
@@ -167,6 +169,47 @@ function oddsFor(fx: Fixture, market: string, pick: string): number | null {
 /** Round credits to 2dp to avoid float dust. */
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+export type SelectionResolution =
+  | { ok: true; selections: Selection[]; fixtures: Map<string, Fixture> }
+  | { ok: false; code: 'UNKNOWN_EVENT' | 'EVENT_STARTED' | 'INVALID_PICK'; message: string };
+
+/**
+ * Turn client picks into priced selections from the current feed. Odds always
+ * come from the server — client-sent odds are ignored — and a fixture that has
+ * kicked off can't be picked.
+ */
+export function resolveSelections(
+  feed: FixturesFeed,
+  raw: ReadonlyArray<Record<string, unknown>>,
+  nowMs: number,
+): SelectionResolution {
+  noteFeed(feed);
+  const fixtures = new Map(feed.fixtures.map((f) => [f.eventId, f]));
+  const selections: Selection[] = [];
+  for (const r of raw) {
+    const eventId = typeof r.eventId === 'string' ? r.eventId : '';
+    const market = typeof r.market === 'string' ? r.market : '1x2';
+    const pick = typeof r.pick === 'string' ? r.pick : '';
+    const fx = fixtures.get(eventId);
+    if (!fx) return { ok: false, code: 'UNKNOWN_EVENT', message: `event not in feed: ${eventId}` };
+    if (new Date(fx.kickoff).getTime() <= nowMs) {
+      return { ok: false, code: 'EVENT_STARTED', message: `event already started: ${eventId}` };
+    }
+    const odds = oddsFor(fx, market, pick);
+    if (odds == null) return { ok: false, code: 'INVALID_PICK', message: `no odds for ${eventId} ${market}/${pick}` };
+    selections.push({
+      eventId,
+      market,
+      pick,
+      odds,
+      label: `${fx.home} v ${fx.away} — ${pick}`,
+      // Drives the simulated scoreline; revealed so the player can recompute it.
+      goalRates: marketsFor(fx)?.goalRates,
+    });
+  }
+  return { ok: true, selections, fixtures };
 }
 
 // ---------------------------------------------------------------------------
@@ -229,6 +272,45 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
     } catch (err) {
       res.status(503).json({ error: { code: 'FEED_UNAVAILABLE', message: (err as Error).message } });
     }
+  });
+
+  // ── GET /fixtures/markets?ids=a,b,c ───────────────────────────────────────
+  // Priced markets for a handful of fixtures at once (one league row group).
+  // Capped, because each cold fixture costs a model fit on the event loop the
+  // live crash game shares.
+  router.get('/fixtures/markets', async (req, res) => {
+    const ids = String(req.query.ids ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (ids.length === 0) {
+      res.status(400).json({ error: { code: 'INVALID_REQUEST', message: 'ids required' } });
+      return;
+    }
+    if (ids.length > MAX_BATCH_MARKETS) {
+      res.status(400).json({ error: { code: 'TOO_MANY_IDS', message: `at most ${MAX_BATCH_MARKETS} fixtures per request` } });
+      return;
+    }
+    let feed;
+    try {
+      feed = await getFeed(now());
+    } catch (err) {
+      res.status(503).json({ error: { code: 'FEED_UNAVAILABLE', message: (err as Error).message } });
+      return;
+    }
+    noteFeed(feed);
+    const byId = new Map(feed.fixtures.map((f) => [f.eventId, f]));
+    const items = ids.flatMap((eventId) => {
+      const fx = byId.get(eventId);
+      const priced = fx ? marketsFor(fx) : null;
+      if (!priced) return [];
+      return [{
+        eventId,
+        markets: priced.markets.map((g) => ({
+          market: g.market,
+          name: g.name,
+          options: g.outcomes.map((o) => ({ pick: o.pick, label: o.label, odds: o.odds })),
+        })),
+      }];
+    });
+    res.json({ items });
   });
 
   // ── GET /fixtures/:eventId/markets ────────────────────────────────────────
@@ -329,40 +411,12 @@ export function createSimulateRouter(deps: SimulateRouterDeps): Router {
       res.status(503).json({ error: { code: 'FEED_UNAVAILABLE', message: (err as Error).message } });
       return;
     }
-    noteFeed(feed);
-    const byId = new Map(feed.fixtures.map((f) => [f.eventId, f]));
-
-    const selections: Selection[] = [];
-    for (const raw of body.selections as Array<Record<string, unknown>>) {
-      const eventId = typeof raw.eventId === 'string' ? raw.eventId : '';
-      const market = typeof raw.market === 'string' ? raw.market : '1x2';
-      const pick = typeof raw.pick === 'string' ? raw.pick : '';
-      const fx = byId.get(eventId);
-      if (!fx) {
-        res.status(400).json({ error: { code: 'UNKNOWN_EVENT', message: `event not in feed: ${eventId}` } });
-        return;
-      }
-      if (new Date(fx.kickoff).getTime() <= now()) {
-        res.status(400).json({ error: { code: 'EVENT_STARTED', message: `event already started: ${eventId}` } });
-        return;
-      }
-      const odds = oddsFor(fx, market, pick);
-      if (odds == null) {
-        res.status(400).json({ error: { code: 'INVALID_PICK', message: `no odds for ${eventId} ${market}/${pick}` } });
-        return;
-      }
-      selections.push({
-        eventId,
-        market,
-        pick,
-        odds,
-        label: `${fx.home} v ${fx.away} — ${pick}`,
-        // Drives the simulated scoreline. Server-side only: the client never
-        // supplies these, and they are echoed in the reveal so the player can
-        // recompute the same playthrough.
-        goalRates: marketsFor(fx)?.goalRates,
-      });
+    const resolved = resolveSelections(feed, body.selections as Array<Record<string, unknown>>, now());
+    if (!resolved.ok) {
+      res.status(400).json({ error: { code: resolved.code, message: resolved.message } });
+      return;
     }
+    const { selections, fixtures: byId } = resolved;
 
     // Provably-fair draw.
     const serverSeed = generateServerSeed();

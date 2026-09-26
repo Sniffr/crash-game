@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { WalletLedger } from '@crash/wallet/wallet-ledger';
 import type { PgDepositsRepo } from '@crash/wallet/deposits-repo';
 import type { PayInProvider } from '../payments/types.js';
+import type { WithdrawalService } from '../payments/withdrawals.js';
 
 // ---------------------------------------------------------------------------
 // Signed collection webhooks, one mount per processor (`/maplerad`,
@@ -27,6 +28,8 @@ export interface DepositWebhookRouterDeps {
   deposits: PgDepositsRepo;
   wallet: WalletLedger;
   notifyBalance?: NotifyBalance;
+  /** Payout (withdrawal) events arrive on the same signed endpoint. */
+  payouts?: WithdrawalService;
 }
 
 export function createDepositWebhookRouter(deps: DepositWebhookRouterDeps): Router {
@@ -65,6 +68,11 @@ export function createDepositWebhookRouter(deps: DepositWebhookRouterDeps): Rout
     }
 
     async function handleEvent(): Promise<void> {
+    if (deps.payouts && (await deps.payouts.onWebhook(payload)) !== 'ignored') {
+      res.status(200).end();
+      return;
+    }
+
     const evt = deps.provider.parseEvent(payload);
     if (!/^game-dep-/.test(evt.reference)) {
       // Foreign event on the shared processor account — not ours, ignore.

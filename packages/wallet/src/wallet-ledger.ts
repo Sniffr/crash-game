@@ -123,6 +123,18 @@ export class WalletLedger {
    * Returns the new balance; throws InsufficientFundsError.
    */
   async betInTx(client: PoolClient, playerId: string, amountMinor: number, ref: string, currency = 'KES'): Promise<number> {
+    return this.debitInTx(client, playerId, amountMinor, ref, currency, 'bet');
+  }
+
+  /** Overdraw-guarded debit of any kind, inside a caller-owned transaction. */
+  async debitInTx(
+    client: PoolClient,
+    playerId: string,
+    amountMinor: number,
+    ref: string,
+    currency: string,
+    kind: 'bet' | 'withdrawal',
+  ): Promise<number> {
     assertPositiveInt(amountMinor, 'amountMinor');
     // Serialise all balance-mutating ops for this player within the txn.
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [playerId]);
@@ -130,8 +142,8 @@ export class WalletLedger {
     if (bal < amountMinor) throw new InsufficientFundsError(playerId, bal, amountMinor);
     await client.query(
       `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
-       VALUES ($1, $2, $3, 'bet', $4)`,
-      [playerId, currency, -amountMinor, ref],
+       VALUES ($1, $2, $3, $4, $5)`,
+      [playerId, currency, -amountMinor, kind, ref],
     );
     return bal - amountMinor;
   }

@@ -12,7 +12,20 @@ import { fileURLToPath } from 'node:url';
 import { PgBetLog, PgOperatorRegistry, PgGamesRepo, PgReconciler, runRecovery, consoleAlerter, getPool, bootstrapCasinoSchema } from '@crash/wallet';
 import { PlayersRepo } from '@crash/wallet/players-repo';
 import { WalletLedger } from '@crash/wallet/wallet-ledger';
-import { createLobbyRouter } from './http/lobby';
+import { createLobbyRouter, setPlayerGate } from './http/lobby';
+import { AccountsRepo, makePlayerGate } from './account/accounts-repo';
+import { OtpService } from './account/otp';
+import { createAccountRouter } from './account/router';
+import { createPlayerBetsRouter, loadRealBetLimits } from './http/player-bets';
+import { createWithdrawalsRouter, loadWithdrawalLimits } from './http/withdrawals';
+import { createAdminOpsRouter } from './http/admin-ops';
+import { WithdrawalService } from './payments/withdrawals';
+import { PgWithdrawalsRepo } from '@crash/wallet/withdrawals-repo-pg';
+import { SupportRepo } from './support/support-repo';
+import { createSupportRouter } from './support/router';
+import { PgSimBetsRepo } from '@crash/wallet/sim-bets-repo-pg';
+import { PgPlayerHistory } from '@crash/wallet/player-history-pg';
+import { smsSenderFromEnv } from './sms/sender';
 import { createLobbyPlayRouter } from './http/lobby-play';
 import { createLobbyDepositRouter } from './http/lobby-deposit';
 import { createDepositWebhookRouter } from './http/deposit-webhook';
@@ -74,6 +87,9 @@ const games = new PgGamesRepo(pool);
 const GAMES_SNAPSHOT_REFRESH_MS = 10_000;
 const players = new PlayersRepo(pool);
 const wallet = new WalletLedger(pool);
+const accounts = new AccountsRepo(pool);
+setPlayerGate(makePlayerGate(accounts));
+const otp = new OtpService(pool, smsSenderFromEnv(), () => process.env['JWT_SECRET'] ?? '');
 const fantasyLeagues = new PgFantasyLeagueRepo(pool, wallet);
 const fantasyProvider = new FplProvider();
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
@@ -121,6 +137,10 @@ console.log(
     (SUPPORTED_CURRENCIES.map((c) => `${c}=${payInProviders.filter((p) => p.supports(c)).map((p) => p.name).join('/') || 'none'}`).join(' ')),
 );
 const deposits = new PgDepositsRepo(pool);
+const withdrawalsRepo = new PgWithdrawalsRepo(pool, wallet);
+const withdrawalService = new WithdrawalService(withdrawalsRepo, maplerad);
+const supportRepo = new SupportRepo(pool);
+const realBetLimits = loadRealBetLimits();
 const fx = new MapleradFx(async (from) => {
   const rates = JSON.parse(process.env.FX_RATES ?? '{}');
   const r = rates[from];
@@ -223,12 +243,30 @@ app.use(
 // ─── Admin API (Phase-5.2 JWT; must be BEFORE registerPublicRoutes SPA * fallback) ──
 // Auth is internal to the router: /auth/login is public; router.use(requireAdminJwt)
 // gates everything else. No top-level auth middleware here.
+app.use('/admin/v1', createAdminOpsRouter({ withdrawals: withdrawalsRepo, support: supportRepo, adminAudit, revoked }));
 app.use('/admin/v1', createAdminRouter({ walletClientCache, betLog, adminAudit, adminUsers, registry, games, revoked, reconciler }));
 
 // ─── Personal lobby: player accounts + wallet + asset uploads (Wave A) ──────────
 // Mounted BEFORE registerPublicRoutes (SPA * fallback). Player-facing auth is
 // internal to the lobby router; asset uploads are admin-JWT protected.
-app.use('/api/lobby', createLobbyRouter({ players, wallet }));
+app.use('/api/lobby', createLobbyRouter({ players, wallet, accounts }));
+app.use('/api/account', createAccountRouter({ accounts, otp, wallet }));
+app.use('/api/account', createWithdrawalsRouter({
+  accounts,
+  withdrawals: withdrawalsRepo,
+  service: withdrawalService,
+  provider: maplerad,
+  limits: loadWithdrawalLimits(),
+  betLimits: realBetLimits,
+}));
+app.use('/api/account/support', createSupportRouter({ support: supportRepo }));
+app.use('/api', createPlayerBetsRouter({
+  bets: new PgSimBetsRepo(pool, wallet),
+  history: new PgPlayerHistory(pool),
+  players,
+  wallet,
+  limits: realBetLimits,
+}));
 app.use('/api/lobby', createLobbyPlayRouter({ games, players, wallet }));
 app.use('/api/lobby', createLobbyDepositRouter({ players, deposits, providers: payInProviders }));
 app.use('/api/assets', createAssetsRouter());
@@ -253,7 +291,14 @@ async function notifyBalance(playerId: string, balanceMinor: number, currency: s
 }
 
 for (const provider of payInProviders) {
-  app.use('/api/webhooks', createDepositWebhookRouter({ path: `/${provider.name}`, provider, deposits, wallet, notifyBalance }));
+  app.use('/api/webhooks', createDepositWebhookRouter({
+    path: `/${provider.name}`,
+    provider,
+    deposits,
+    wallet,
+    notifyBalance,
+    ...(provider === maplerad ? { payouts: withdrawalService } : {}),
+  }));
 }
 
 // ─── Simulate game (harvested odds + provably-fair RNG) ─────────────────────
@@ -353,6 +398,9 @@ console.log('[recovery] report', JSON.stringify(recoveryReport));
 // is thin glue). It also never throws out of the timer (catch + log per operator).
 if (process.env['NODE_ENV'] !== 'test') {
   scheduleDailyReconciliation(reconciler, registry, { hourUtc: 0, minuteUtc: 15 });
+  setInterval(() => {
+    void withdrawalService.reconcile().catch((err) => console.error('[withdrawals] reconcile failed:', err));
+  }, 5 * 60_000);
   console.log('[reconciliation] daily sweep scheduled for 00:15 UTC');
   startFantasyScheduler(fantasyLeagues, fantasyProvider, FANTASY_LEAGUE_TEMPLATES);
   console.log('[fantasy-league] scheduler started (opens gameweek leagues, settles finished ones)');

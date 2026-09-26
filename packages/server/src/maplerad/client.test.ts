@@ -128,4 +128,56 @@ describe('MapleradClient', () => {
     });
     expect(c.parseEvent({ event: 'collection.failed', data: { reference: 'r1' } }).outcome).toBe('failed');
   });
+
+  describe('payouts', () => {
+    function recording(response: unknown, ok = true) {
+      const calls: Array<{ url: string; method?: string; body?: Record<string, unknown> }> = [];
+      const fetchImpl = (async (url: string | URL, init?: RequestInit) => {
+        calls.push({ url: String(url), method: init?.method, body: init?.body ? JSON.parse(init.body as string) : undefined });
+        return { ok, json: async () => response } as Response;
+      }) as unknown as typeof fetch;
+      return { calls, fetchImpl };
+    }
+
+    it('POSTs /transfers on the MOBILEMONEY scheme with the MSISDN and reference', async () => {
+      const { calls, fetchImpl } = recording({ status: true, data: { id: 'tr_1', status: 'PENDING' } });
+      const c = new MapleradClient({ baseUrl: 'https://api.maplerad.com/v1', secretKey: 'sk', webhookSecret: '', fetchImpl });
+      const r = await c.payout({ reference: 'game-wd-1', currency: 'KES', amountMinor: 5_000, phone: '+254712345678', recipientName: 'Jane', reason: 'Withdrawal' });
+      expect(r).toEqual({ providerTxnId: 'tr_1', status: 'pending' });
+      expect(calls[0]!.url).toBe('https://api.maplerad.com/v1/transfers');
+      expect(calls[0]!.body).toEqual({
+        bank_code: '1271', account_number: '254712345678', amount: 5_000, currency: 'KES', reason: 'Withdrawal',
+        reference: 'game-wd-1', meta: { scheme: 'MOBILEMONEY', counterparty: { name: 'Jane' } },
+      });
+    });
+
+    it('marks an explicit API refusal as a rejection (safe to refund)', async () => {
+      const { fetchImpl } = recording({ status: false, message: 'insufficient balance' });
+      const c = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '', fetchImpl });
+      await expect(c.payout({ reference: 'r', currency: 'KES', amountMinor: 1, phone: '+254712345678', recipientName: 'n', reason: 'w' }))
+        .rejects.toMatchObject({ rejected: true });
+    });
+
+    it('lookupPayout maps statuses and returns null rather than guessing', async () => {
+      const ok = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '', fetchImpl: recording({ status: true, data: { status: 'SUCCESS' } }).fetchImpl });
+      expect(await ok.lookupPayout('tr_1')).toBe('success');
+      const failed = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '', fetchImpl: recording({ status: true, data: { status: 'REVERSED' } }).fetchImpl });
+      expect(await failed.lookupPayout('tr_1')).toBe('failed');
+      const unavailable = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '', fetchImpl: recording({ status: false, message: 'not found' }).fetchImpl });
+      expect(await unavailable.lookupPayout('tr_1')).toBeNull();
+    });
+
+    it('parses transfer.* events and ignores everything else', () => {
+      const c = new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '' });
+      expect(c.parsePayoutEvent({ event: 'transfer.successful', data: { reference: 'game-wd-1', id: 'tr_1' } }))
+        .toEqual({ reference: 'game-wd-1', providerTxnId: 'tr_1', status: 'success' });
+      expect(c.parsePayoutEvent({ event: 'transfer.failed', data: { reference: 'game-wd-1', id: 'tr_1' } })?.status).toBe('failed');
+      expect(c.parsePayoutEvent({ event: 'collection.successful', data: { reference: 'x' } })).toBeNull();
+    });
+
+    it('reports whether webhooks are signature-checked', () => {
+      expect(new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: '' }).webhookSigned).toBe(false);
+      expect(new MapleradClient({ baseUrl: 'x', secretKey: 'sk', webhookSecret: 'whsec_abc' }).webhookSigned).toBe(true);
+    });
+  });
 });

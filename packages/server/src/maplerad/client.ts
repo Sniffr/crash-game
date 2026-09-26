@@ -1,6 +1,18 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { railFor } from '@crash/wallet';
-import { providerRejected, type CollectInput, type CollectResult, type PayInProvider, type ParsedEvent, type VerifiedTxn } from '../payments/types.js';
+import {
+  providerRejected,
+  type CollectInput,
+  type CollectResult,
+  type PayInProvider,
+  type ParsedEvent,
+  type PayOutProvider,
+  type PayoutEvent,
+  type PayoutInput,
+  type PayoutResult,
+  type PayoutStatus,
+  type VerifiedTxn,
+} from '../payments/types.js';
 
 export interface MapleradClientConfig {
   baseUrl: string;
@@ -32,7 +44,20 @@ interface MapleradEnvelope {
  * Auth is a static Bearer secret key. Sandbox and production share the base
  * URL — test keys (sk_test_...) route to the sandbox.
  */
-export class MapleradClient implements PayInProvider {
+const PAYOUT_SUCCESS = new Set(['SUCCESS', 'SUCCESSFUL', 'COMPLETED', 'COMPLETE']);
+const PAYOUT_FAILED = new Set(['FAILED', 'FAILURE', 'REVERSED', 'CANCELLED', 'CANCELED', 'REJECTED', 'DECLINED']);
+
+function payoutStatus(raw: unknown): PayoutStatus {
+  const s = String(raw ?? '').toUpperCase();
+  if (PAYOUT_SUCCESS.has(s)) return 'success';
+  if (PAYOUT_FAILED.has(s)) return 'failed';
+  return 'pending';
+}
+
+/** Maplerad takes the MSISDN without the leading '+'. Stored local formats pass through unchanged. */
+const msisdn = (phone: string): string => phone.replace(/^\+/, '');
+
+export class MapleradClient implements PayInProvider, PayOutProvider {
   readonly name = 'maplerad';
   private readonly baseUrl: string;
   private readonly secretKey: string;
@@ -77,10 +102,10 @@ export class MapleradClient implements PayInProvider {
       first_name: space > 0 ? name.slice(0, space) : name,
       last_name: space > 0 ? name.slice(space + 1) : name,
       email: input.payerEmail && input.payerEmail.length > 0 ? input.payerEmail : 'unknown@stdiox.com',
-      phone_number: input.phone,
+      phone_number: msisdn(input.phone),
     };
     const body = {
-      account_number: input.phone,
+      account_number: msisdn(input.phone),
       amount: input.amountMinor,
       bank_code: bankCode,
       currency: input.currency,
@@ -107,6 +132,58 @@ export class MapleradClient implements PayInProvider {
       reference: String(d.reference ?? ''),
       amountMinor: d.amount == null ? undefined : Number(d.amount),
       currency: d.currency == null ? undefined : String(d.currency),
+    };
+  }
+
+  // ---------- Payouts (mobile money transfers) ----------
+
+  get webhookSigned(): boolean {
+    return this.webhookSecret.trim().length > 0;
+  }
+
+  supportsPayout(currency: string): boolean {
+    return this.secretKey.length > 0 && !!this.bankCodeFor(currency);
+  }
+
+  /**
+   * POST /transfers with meta.scheme=MOBILEMONEY — KES only moves on the
+   * mobile-money scheme. Same shape as the omindos Maplerad service.
+   */
+  async payout(input: PayoutInput): Promise<PayoutResult> {
+    const bankCode = this.bankCodeFor(input.currency);
+    if (!bankCode) throw providerRejected(`Maplerad has no institution code for ${input.currency}`);
+    const envelope = await this.call('POST', '/transfers', {
+      bank_code: bankCode,
+      account_number: msisdn(input.phone),
+      amount: input.amountMinor,
+      currency: input.currency,
+      reason: input.reason,
+      reference: input.reference,
+      meta: { scheme: 'MOBILEMONEY', counterparty: { name: input.recipientName } },
+    });
+    const d = this.data(envelope);
+    return { providerTxnId: d.id == null ? null : String(d.id), status: payoutStatus(d.status) };
+  }
+
+  /** Best effort: null when the lookup isn't available, so callers never act on a guess. */
+  async lookupPayout(providerTxnId: string): Promise<PayoutStatus | null> {
+    try {
+      const d = this.data(await this.call('GET', `/transfers/${encodeURIComponent(providerTxnId)}`));
+      return d.status == null ? null : payoutStatus(d.status);
+    } catch {
+      return null;
+    }
+  }
+
+  parsePayoutEvent(payload: unknown): PayoutEvent | null {
+    const p = payload as { event?: string; data?: { reference?: string; id?: string; status?: string } } | null;
+    const event = p?.event ?? '';
+    if (!event.startsWith('transfer.')) return null;
+    const fromEvent = /success|completed/.test(event) ? 'success' : /fail|revers|cancel|reject|declin/.test(event) ? 'failed' : null;
+    return {
+      reference: p?.data?.reference ?? '',
+      providerTxnId: p?.data?.id == null ? null : String(p.data.id),
+      status: fromEvent ?? (p?.data?.status == null ? null : payoutStatus(p.data.status)),
     };
   }
 

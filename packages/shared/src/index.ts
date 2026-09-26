@@ -5,3 +5,4 @@ export * from './curve';
 export * from './football';
 export * from './simulate';
 export * from './fantasy';
+export * from './phone';

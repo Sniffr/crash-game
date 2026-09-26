@@ -123,6 +123,13 @@ describe('market catalogue', () => {
     expect(findOutcome('btts', 'no')!.settles({ home: 3, away: 0 })).toBe(true);
   });
 
+  it('settles odd/even on total goals, with 0-0 counting as even', () => {
+    expect(findOutcome('odd_even', 'odd')!.settles({ home: 2, away: 1 })).toBe(true);
+    expect(findOutcome('odd_even', 'even')!.settles({ home: 2, away: 2 })).toBe(true);
+    expect(findOutcome('odd_even', 'even')!.settles({ home: 0, away: 0 })).toBe(true);
+    expect(findOutcome('odd_even', 'odd')!.settles({ home: 0, away: 0 })).toBe(false);
+  });
+
   it('settles double chance and correct score', () => {
     expect(findOutcome('double_chance', 'home_draw')!.settles({ home: 1, away: 1 })).toBe(true);
     expect(findOutcome('double_chance', 'home_away')!.settles({ home: 1, away: 1 })).toBe(false);

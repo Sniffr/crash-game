@@ -21,3 +21,6 @@ export * from './rails.js';
 export * from './deposits-repo.js';
 export * from './fantasy-league-repo.js';
 export * from './fantasy-league-repo-pg.js';
+export * from './sim-bets-repo-pg.js';
+export * from './player-history-pg.js';
+export * from './withdrawals-repo-pg.js';

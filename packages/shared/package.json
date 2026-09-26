@@ -11,7 +11,8 @@
     "./curve": "./src/curve.ts",
     "./football": "./src/football.ts",
     "./simulate": "./src/simulate.ts",
-    "./fantasy": "./src/fantasy.ts"
+    "./fantasy": "./src/fantasy.ts",
+    "./phone": "./src/phone.ts"
   },
   "scripts": {
     "build": "tsc",

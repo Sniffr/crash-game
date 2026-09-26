@@ -87,11 +87,23 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       player_id    uuid NOT NULL REFERENCES players(player_id),
       currency     text NOT NULL DEFAULT 'KES',
       amount_minor bigint NOT NULL,                     -- +credit / -debit
-      kind         text NOT NULL,                       -- 'deposit'|'bet'|'win'|'adjust'
+      kind         text NOT NULL,                       -- 'deposit'|'bet'|'win'|'adjust'|'withdrawal'
       ref          text,
       created_at   timestamptz NOT NULL DEFAULT now(),
-      CHECK (kind IN ('deposit','bet','win','adjust'))
+      CONSTRAINT wallet_ledger_kind_check CHECK (kind IN ('deposit','bet','win','adjust','withdrawal'))
     );
+    -- Databases created before withdrawals existed carry the old 4-kind check.
+    DO $$ BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'wallet_ledger'::regclass AND conname = 'wallet_ledger_kind_check'
+          AND pg_get_constraintdef(oid) LIKE '%withdrawal%'
+      ) THEN
+        ALTER TABLE wallet_ledger DROP CONSTRAINT IF EXISTS wallet_ledger_kind_check;
+        ALTER TABLE wallet_ledger ADD CONSTRAINT wallet_ledger_kind_check
+          CHECK (kind IN ('deposit','bet','win','adjust','withdrawal'));
+      END IF;
+    END $$;
     CREATE INDEX IF NOT EXISTS idx_wallet_player ON wallet_ledger(player_id, currency);
     -- One credit per deposit reference (idempotent webhook replay + crash-safety).
     -- Partial so it only constrains deposit rows; bet/win/adjust reuse refs freely.
@@ -263,5 +275,108 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       manager_name text NOT NULL,
       linked_at    timestamptz NOT NULL DEFAULT now()
     );
+
+    -- ── Account security (SimBet phone accounts) ───────────────────────────
+    -- token_version is embedded in player JWTs; bumping it signs the player
+    -- out everywhere (password change/reset, self-exclusion, deactivation).
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS phone_verified_at   timestamptz;
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS token_version       integer NOT NULL DEFAULT 0;
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS account_status      text NOT NULL DEFAULT 'active';
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS self_excluded_until timestamptz;
+    ALTER TABLE players ADD COLUMN IF NOT EXISTS deactivation_reason text;
+    CREATE INDEX IF NOT EXISTS idx_players_phone ON players(phone);
+
+    CREATE TABLE IF NOT EXISTS otp_codes (
+      id          bigserial PRIMARY KEY,
+      phone       text NOT NULL,
+      purpose     text NOT NULL,
+      code_hash   text NOT NULL,
+      attempts    integer NOT NULL DEFAULT 0,
+      expires_at  timestamptz NOT NULL,
+      consumed_at timestamptz,
+      created_at  timestamptz NOT NULL DEFAULT now(),
+      CHECK (purpose IN ('register','reset','deactivate','reactivate'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_otp_phone_purpose ON otp_codes(phone, purpose, created_at DESC);
+
+    -- ── Real-money Simulated Matches ────────────────────────────────────────
+    -- Each bet resolves at placement (provably-fair RNG); the seed/nonce stay
+    -- here so a player can verify any bet from their history.
+    CREATE TABLE IF NOT EXISTS sim_bets (
+      bet_id       text PRIMARY KEY,
+      player_id    uuid NOT NULL REFERENCES players(player_id),
+      mode         text NOT NULL,
+      currency     text NOT NULL,
+      stake_minor  bigint NOT NULL,
+      total_odds   double precision NOT NULL,
+      won          boolean NOT NULL,
+      payout_minor bigint NOT NULL,
+      server_seed  text NOT NULL,
+      commit       text NOT NULL,
+      nonce        text NOT NULL,
+      rtp          real NOT NULL,
+      created_at   timestamptz NOT NULL DEFAULT now(),
+      CHECK (mode IN ('single','multi')),
+      CHECK (stake_minor > 0 AND payout_minor >= 0)
+    );
+    CREATE INDEX IF NOT EXISTS idx_sim_bets_player ON sim_bets(player_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS sim_bet_legs (
+      bet_id     text NOT NULL REFERENCES sim_bets(bet_id) ON DELETE CASCADE,
+      idx        integer NOT NULL,
+      event_id   text NOT NULL,
+      league     text,
+      home       text,
+      away       text,
+      kickoff    timestamptz,
+      market     text NOT NULL,
+      pick       text NOT NULL,
+      label      text,
+      odds       double precision NOT NULL,
+      won        boolean NOT NULL,
+      score_home integer,
+      score_away integer,
+      -- json, not jsonb: jsonb reorders keys, and provably-fair verification
+      -- compares the timeline exactly as the engine produced it.
+      goal_rates json,
+      timeline   json,
+      PRIMARY KEY (bet_id, idx)
+    );
+
+    -- ── Withdrawals (M-PESA payouts) ────────────────────────────────────────
+    -- Funds are debited (kind 'withdrawal') when the request is created and
+    -- credited back (kind 'adjust') if the payout fails.
+    CREATE TABLE IF NOT EXISTS withdrawals (
+      reference       text PRIMARY KEY,
+      player_id       uuid NOT NULL REFERENCES players(player_id),
+      currency        text NOT NULL,
+      amount_minor    bigint NOT NULL,
+      phone           text NOT NULL,
+      provider        text NOT NULL,
+      provider_txn_id text,
+      status          text NOT NULL DEFAULT 'pending',
+      failure_reason  text,
+      created_at      timestamptz NOT NULL DEFAULT now(),
+      updated_at      timestamptz NOT NULL DEFAULT now(),
+      CHECK (amount_minor > 0),
+      CHECK (status IN ('pending','processing','success','failed'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_withdrawals_player ON withdrawals(player_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_withdrawals_status ON withdrawals(status, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_deposits_player ON deposits(player_id, created_at DESC);
+
+    -- ── Customer support chat (one thread per player) ───────────────────────
+    CREATE TABLE IF NOT EXISTS support_messages (
+      id         bigserial PRIMARY KEY,
+      player_id  uuid NOT NULL REFERENCES players(player_id),
+      sender     text NOT NULL,
+      agent      text,
+      body       text NOT NULL,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      read_at    timestamptz,
+      CHECK (sender IN ('player','agent')),
+      CHECK (length(body) BETWEEN 1 AND 2000)
+    );
+    CREATE INDEX IF NOT EXISTS idx_support_player ON support_messages(player_id, id);
   `);
 }
