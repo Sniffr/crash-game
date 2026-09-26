@@ -60,8 +60,10 @@ BASE = "https://www.oddsportal.com"
 # Every listed match links to its head-to-head page; the fragment is its id.
 MATCH_LINK = 'a[href*="/h2h/"]'
 
-# How many detail pages to sample when working out the display offset.
-CALIBRATION_SAMPLES = 3
+# Detail pages to try when working out the display offset: we stop as soon as
+# two agree, but some pages load without a usable kickoff (a slow load, a match
+# already under way), so a few spares keep one bad page from aborting the run.
+CALIBRATION_SAMPLES = 6
 
 # Row text is "HH:MM | Home | - | Away | o1 | o2 | o3" once blank lines collapse.
 _TIME_RE = re.compile(r"^\d{1,2}:\d{2}$")
@@ -291,10 +293,17 @@ def _calibrate_offset(
     emit fixtures with guessed times.
     """
     offsets: Counter[int] = Counter()
-    for row in rows[:CALIBRATION_SAMPLES]:
+    tried = 0
+    # Latest kickoffs first: by the afternoon the day's earliest matches are
+    # over, and finished matches' pages rarely give a usable kickoff.
+    candidates = sorted(rows, key=lambda r: r["time"].zfill(5), reverse=True)
+    for row in candidates[:CALIBRATION_SAMPLES]:
+        tried += 1
         minutes = _sample_offset(page, row, day, nav_timeout_ms)
         if minutes is not None:
             offsets[minutes] += 1
+            if offsets[minutes] >= 2:
+                break  # two independent pages agree — that's the answer
 
     if not offsets:
         return None
@@ -303,11 +312,11 @@ def _calibrate_offset(
         # A one-vote "plurality" is a coin toss between the real offset and a
         # postponed fixture whose JSON-LD still carries its original kickoff —
         # and the loser silently shifts every kickoff in the run.
-        log.warning("%s: no two samples agreed on the listing timezone (%s)",
-                    day, dict(offsets))
+        log.warning("%s: no two of %d samples agreed on the listing timezone (%s)",
+                    day, tried, dict(offsets))
         return None
     log.info("timezone calibration: listing is UTC%+d min (%d/%d samples agreed)",
-             best, count, min(len(rows), CALIBRATION_SAMPLES))
+             best, count, tried)
     return timedelta(minutes=best)
 
 

@@ -148,3 +148,17 @@ def test_calibration_rejects_a_plurality_of_one():
         None,
     )
     assert listing._calibrate_offset(None, rows, "20261021", 0) == timedelta(minutes=120)
+
+
+def test_calibration_keeps_sampling_past_pages_without_a_kickoff():
+    # Two detail pages come back without a usable JSON-LD kickoff (the failure
+    # that aborted a production run); later rows still settle the offset, and
+    # sampling stops as soon as two agree.
+    rows = [{"href": "/football/h2h/a-b/#x", "time": "20:00"}] * 6
+    _stub_kickoffs(
+        None,
+        datetime(2026, 10, 21, 18, 0, tzinfo=UTC),
+        None,
+        datetime(2026, 10, 21, 18, 0, tzinfo=UTC),
+    )  # a fifth call would raise StopIteration
+    assert listing._calibrate_offset(None, rows, "20261021", 0) == timedelta(minutes=120)
