@@ -1,0 +1,78 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* SimBet design tokens, from the Figma file (light + dark modes). RGB triples
+   so Tailwind's sb-* colours take an alpha: bg-sb-primary/20 is the odds tint. */
+:root {
+  color-scheme: light;
+  --sb-primary: 58 12 163;          /* #3a0ca3 */
+  --sb-accent: 58 12 163;           /* primary as text */
+  --sb-bg: 241 245 249;             /* #f1f5f9 */
+  --sb-header: 255 255 255;
+  --sb-surface: 248 250 252;        /* #f8fafc */
+  --sb-surface2: 241 245 249;
+  --sb-line: 226 232 240;           /* #e2e8f0 */
+  --sb-text: 15 23 42;              /* #0f172a */
+  --sb-muted: 100 116 139;          /* #64748b */
+  --sb-input: 29 104 250;           /* #1d68fa, used at 20% */
+  --sb-odds: 58 12 163;             /* primary, used at 20% */
+  --sb-footer: 255 255 255;
+  --sb-footer2: 244 244 245;
+  --sb-footer-text: 24 24 27;
+  --sb-footer-muted: 113 113 122;
+}
+
+:root[data-sb-theme='dark'] {
+  color-scheme: dark;
+  /* Primary text on near-black needs lifting to stay legible. */
+  --sb-accent: 165 148 249;
+  --sb-bg: 2 6 23;                  /* #020617 */
+  --sb-header: 2 6 23;
+  --sb-surface: 15 23 42;           /* #0f172a */
+  --sb-surface2: 30 41 59;          /* #1e293b */
+  --sb-line: 30 41 59;
+  --sb-text: 248 250 252;
+  --sb-muted: 148 163 184;          /* #94a3b8 */
+  --sb-footer: 9 9 11;              /* zinc-950 */
+  --sb-footer2: 24 24 27;
+  --sb-footer-text: 250 250 250;
+  --sb-footer-muted: 161 161 170;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: rgb(var(--sb-bg));
+  color: rgb(var(--sb-text));
+  font-family: 'Public Sans', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* { box-sizing: border-box; }
+
+h1, h2, h3, h4 { text-wrap: balance; }
+p { text-wrap: pretty; }
+
+.sb-tabular { font-variant-numeric: tabular-nums; }
+
+/* Thin scrollbars inside panels (bet slip, chat, dropdowns). */
+.sb-scroll { scrollbar-width: thin; scrollbar-color: rgb(var(--sb-line)) transparent; }
+
+/* Horizontally scrolling tab rows: swipeable, but no scrollbar under the tabs. */
+.sb-noscroll { scrollbar-width: none; }
+.sb-noscroll::-webkit-scrollbar { display: none; }
+
+@keyframes sb-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+.sb-rise { animation: sb-rise 0.22s cubic-bezier(0.23, 1, 0.32, 1) both; }
+
+@keyframes sb-fade { from { opacity: 0; } to { opacity: 1; } }
+.sb-fade { animation: sb-fade 0.18s ease-out both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .sb-rise, .sb-fade { animation: none; }
+}

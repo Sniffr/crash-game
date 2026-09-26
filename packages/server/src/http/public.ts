@@ -55,6 +55,12 @@ function isCreatorHost(req: express.Request): boolean {
   return req.hostname === CREATOR_HOST;
 }
 
+// SimBet (simbet.games.soa.plus) is a second site built into the same client bundle
+// with its own page, simbet.html. Any `simbet.` host gets it.
+export function isSimBetHost(req: express.Request): boolean {
+  return req.hostname.startsWith('simbet.');
+}
+
 // ─── Launch error HTML template (loaded once at module initialisation) ────────
 const LAUNCH_ERROR_TEMPLATE_PATH = path.join(__dirname, '../views/launch-error.html');
 let _launchErrorTemplate: string | null = null;
@@ -137,7 +143,9 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // ─── Static assets (host-aware: studio on the creator host, else the game) ──
   const serveClient = express.static(clientDist);
   const serveCreator = express.static(creatorDist);
-  app.use((req, res, next) => (isCreatorHost(req) ? serveCreator : serveClient)(req, res, next));
+  // No directory index on SimBet: "/" must fall through to simbet.html below, not index.html.
+  const serveSimBet = express.static(clientDist, { index: false });
+  app.use((req, res, next) => (isCreatorHost(req) ? serveCreator : isSimBetHost(req) ? serveSimBet : serveClient)(req, res, next));
 
   // ─── Games catalogue (public) ────────────────────────────────────────────────
   // Lobbies + the Creator list active games. No theme_json here — the theme
@@ -418,7 +426,8 @@ export function registerPublicRoutes(app: express.Application, deps: PublicRoute
   // Must come AFTER express.static and all /api routes.
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/') || req.path.startsWith('/admin/') || req.path === '/ws') return next();
-    const indexHtml = path.join(isCreatorHost(req) ? creatorDist : clientDist, 'index.html');
+    const indexHtml = isCreatorHost(req) ? path.join(creatorDist, 'index.html')
+      : path.join(clientDist, isSimBetHost(req) ? 'simbet.html' : 'index.html');
     if (!fs.existsSync(indexHtml)) return next();
     res.sendFile(indexHtml);
   });

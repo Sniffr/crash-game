@@ -1,9 +1,15 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+  content: ['./index.html', './simbet.html', './src/**/*.{js,ts,jsx,tsx}'],
+  // `dark:` follows SimBet's own theme switch (Game Hub is dark-only and uses no dark: classes).
+  darkMode: ['selector', '[data-sb-theme="dark"]'],
   theme: {
     extend: {
       fontFamily: {
+        // SimBet (src/simbet) — the Figma type roles.
+        'sb-display': ['"Bubblegum Sans"', 'cursive'],
+        'sb-body': ['"Public Sans"', 'system-ui', 'sans-serif'],
+        'sb-form': ['Inter', 'system-ui', 'sans-serif'],
         // Poppins everywhere — one geometric sans; heavy weights carry the
         // display role. No monospace (font-mono maps to Poppins too).
         display: ['Poppins', 'system-ui', 'sans-serif'],
@@ -11,6 +17,28 @@ export default {
         mono: ['Poppins', 'system-ui', 'sans-serif'],
       },
       colors: {
+        // SimBet tokens — CSS-var backed (src/simbet/simbet.css) so light/dark
+        // is one attribute flip on <html>.
+        sb: {
+          primary: 'rgb(var(--sb-primary) / <alpha-value>)',
+          accent: 'rgb(var(--sb-accent) / <alpha-value>)',
+          bg: 'rgb(var(--sb-bg) / <alpha-value>)',
+          header: 'rgb(var(--sb-header) / <alpha-value>)',
+          surface: 'rgb(var(--sb-surface) / <alpha-value>)',
+          surface2: 'rgb(var(--sb-surface2) / <alpha-value>)',
+          line: 'rgb(var(--sb-line) / <alpha-value>)',
+          text: 'rgb(var(--sb-text) / <alpha-value>)',
+          muted: 'rgb(var(--sb-muted) / <alpha-value>)',
+          input: 'rgb(var(--sb-input) / <alpha-value>)',
+          odds: 'rgb(var(--sb-odds) / <alpha-value>)',
+          footer: 'rgb(var(--sb-footer) / <alpha-value>)',
+          footer2: 'rgb(var(--sb-footer2) / <alpha-value>)',
+          'footer-text': 'rgb(var(--sb-footer-text) / <alpha-value>)',
+          'footer-muted': 'rgb(var(--sb-footer-muted) / <alpha-value>)',
+          success: '#22c55e',
+          error: '#ef4444',
+          pending: '#eab308',
+        },
         // Chrome — PURE NEUTRAL greyscale, hsl(0 0% L): black page, lighter panels.
         // Only lightness varies; no hue, no saturation.
         space: {
