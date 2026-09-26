@@ -216,5 +216,52 @@ export async function bootstrapCasinoSchema(pool: pg.Pool = getPool()): Promise<
       updated_at   timestamptz NOT NULL DEFAULT now(),
       CHECK (status IN ('pending','settled','failed'))
     );
+
+    -- ── Fantasy League ─────────────────────────────────────────────────────
+    -- One league = one FPL gameweek. Joins close at the gameweek deadline;
+    -- once FPL marks the gameweek final it settles exactly once: points and
+    -- payouts are written here and credited to wallet_ledger in the same txn.
+    CREATE TABLE IF NOT EXISTS fantasy_leagues (
+      league_id       text PRIMARY KEY,
+      name            text NOT NULL,
+      blurb           text NOT NULL DEFAULT '',
+      gameweek        integer NOT NULL,
+      deadline        timestamptz NOT NULL,
+      entry_fee_minor bigint NOT NULL,
+      currency        text NOT NULL DEFAULT 'KES',
+      rake_bps        integer NOT NULL DEFAULT 1000,
+      payout_bps      jsonb NOT NULL DEFAULT '[5000,3000,2000]',
+      status          text NOT NULL DEFAULT 'open',
+      pool_minor      bigint,
+      rake_minor      bigint,
+      settled_at      timestamptz,
+      created_at      timestamptz NOT NULL DEFAULT now(),
+      CHECK (entry_fee_minor > 0),
+      CHECK (rake_bps >= 0 AND rake_bps <= 10000),
+      CHECK (status IN ('open','settled','cancelled'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_fantasy_leagues_status ON fantasy_leagues(status, gameweek);
+
+    CREATE TABLE IF NOT EXISTS fantasy_league_members (
+      league_id       text NOT NULL REFERENCES fantasy_leagues(league_id) ON DELETE CASCADE,
+      player_id       uuid NOT NULL REFERENCES players(player_id),
+      player_ids      integer[] NOT NULL,     -- FPL element ids, the XI
+      captain_id      integer NOT NULL,
+      vice_captain_id integer NOT NULL,
+      points          integer,                -- final gameweek points, set at settlement
+      final_rank      integer,
+      payout_minor    bigint,
+      joined_at       timestamptz NOT NULL DEFAULT now(),
+      PRIMARY KEY (league_id, player_id)
+    );
+
+    -- A player's linked FPL team (by its public Team ID) — used to import an XI.
+    CREATE TABLE IF NOT EXISTS fantasy_fpl_links (
+      player_id    uuid PRIMARY KEY REFERENCES players(player_id),
+      entry_id     integer NOT NULL,
+      team_name    text NOT NULL,
+      manager_name text NOT NULL,
+      linked_at    timestamptz NOT NULL DEFAULT now()
+    );
   `);
 }

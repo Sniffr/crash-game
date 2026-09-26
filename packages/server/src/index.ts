@@ -29,6 +29,11 @@ import { initThemeLoader, getActiveTheme } from './theme/loader';
 import { registerPublicRoutes } from './http/public';
 import { createSimulateRouter } from './http/simulate';
 import { createStoreEconomy } from './simulate/economy';
+import { createFantasyLeagueRouter } from './http/fantasy-league';
+import { PgFantasyLeagueRepo } from '@crash/wallet/fantasy-league-repo-pg';
+import type { LeagueTemplate } from '@crash/wallet/fantasy-league-repo';
+import { FplProvider } from './fantasy/fpl';
+import { startFantasyScheduler } from './fantasy/scheduler';
 import { verifyOperatorSignature } from './http/middleware/verify-operator-signature';
 import { createOperatorRouter } from './http/operator';
 import { PgOperatorAudit } from './http/operator-audit-pg';
@@ -69,7 +74,19 @@ const games = new PgGamesRepo(pool);
 const GAMES_SNAPSHOT_REFRESH_MS = 10_000;
 const players = new PlayersRepo(pool);
 const wallet = new WalletLedger(pool);
+const fantasyLeagues = new PgFantasyLeagueRepo(pool, wallet);
+const fantasyProvider = new FplProvider();
 setOperatorWiringDeps({ walletClientCache, betLog, alerter: consoleAlerter, games });
+
+// Recurring Fantasy leagues — the scheduler opens one of each per FPL gameweek.
+const FANTASY_LEAGUE_TEMPLATES: LeagueTemplate[] = [
+  { templateId: 'fast-road-guys', name: 'Fast Road Guys Fantasy League', blurb: 'Premier League · starter stakes', entryFeeMinor: 50_000, currency: 'KES' },
+  { templateId: 'midnight-strikers', name: 'Midnight Strikers League', blurb: 'Premier League · starter stakes', entryFeeMinor: 50_000, currency: 'KES' },
+  { templateId: 'cash-cash-football', name: 'Cash Cash Football Fantasy', blurb: 'Premier League · mid stakes', entryFeeMinor: 100_000, currency: 'KES' },
+  { templateId: 'coastal-kings', name: 'Coastal Kings Fantasy', blurb: 'Premier League · mid stakes', entryFeeMinor: 100_000, currency: 'KES' },
+  { templateId: 'tiger-group', name: 'Tiger Group Football Fantasy', blurb: 'Premier League · high stakes', entryFeeMinor: 500_000, currency: 'KES' },
+  { templateId: 'sunset-rovers', name: 'Sunset Rovers League', blurb: 'Premier League · high stakes', entryFeeMinor: 500_000, currency: 'KES' },
+];
 
 // ─── Pay-in processors (deposits) ───────────────────────────────────────────
 // Maplerad and Fincra both collect mobile money in the Eastern/Southern
@@ -244,6 +261,9 @@ for (const provider of payInProviders) {
 // simulate the outcome. Mounted BEFORE registerPublicRoutes (SPA * fallback).
 app.use('/api/simulate', createSimulateRouter({ economy: createStoreEconomy() }));
 
+// ─── Fantasy League (classic fantasy football on official FPL points) ──────
+app.use('/api/fantasy-league', createFantasyLeagueRouter({ leagues: fantasyLeagues, players, provider: fantasyProvider }));
+
 // HTTP routes (SPA * fallback is inside; must come AFTER /op/v1 and /admin/v1)
 registerPublicRoutes(app, { walletClientCache, games });
 
@@ -334,6 +354,8 @@ console.log('[recovery] report', JSON.stringify(recoveryReport));
 if (process.env['NODE_ENV'] !== 'test') {
   scheduleDailyReconciliation(reconciler, registry, { hourUtc: 0, minuteUtc: 15 });
   console.log('[reconciliation] daily sweep scheduled for 00:15 UTC');
+  startFantasyScheduler(fantasyLeagues, fantasyProvider, FANTASY_LEAGUE_TEMPLATES);
+  console.log('[fantasy-league] scheduler started (opens gameweek leagues, settles finished ones)');
 }
 
 // ─── Bootstrap first admin from env ──────────────────────────────────────────

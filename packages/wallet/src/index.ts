@@ -19,3 +19,5 @@ export * from './reconciler.js';
 export * from './reconciler-pg.js';
 export * from './rails.js';
 export * from './deposits-repo.js';
+export * from './fantasy-league-repo.js';
+export * from './fantasy-league-repo-pg.js';

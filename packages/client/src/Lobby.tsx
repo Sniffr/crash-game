@@ -3,7 +3,7 @@ import AuthModal, { type AuthSuccess } from './components/AuthModal';
 import CrashRail, { tierColor, tierTextColor } from './components/CrashRail';
 import {
   AppBar, BallGlyph, Button, CheckIcon, Chip, Eyebrow, LogOutIcon, Modal, Panel,
-  PlusIcon, Readout, RocketGlyph, Spinner, Stat, TextInput, Wordmark,
+  PlusIcon, Readout, RocketGlyph, Spinner, Stat, TextInput, TrophyGlyph, Wordmark,
 } from './components/ui';
 import { useHistories, type GameFeed } from './lib/histories';
 import { fromMinor, symbolFor, toMinor } from './lib/money';
@@ -226,6 +226,7 @@ export default function Lobby() {
                     />
                   ))}
               <SimulateRow onPlay={() => { window.location.href = '/simulate'; }} />
+              <FantasyLeagueRow onPlay={() => { window.location.href = '/fantasy-league'; }} />
             </ul>
           </Panel>
         </section>
@@ -400,6 +401,23 @@ function SimulateRow({ onPlay }: { onPlay: () => void }) {
         <div className="truncate text-[11px] text-neutral-500">Football · real harvested odds</div>
       </div>
       <Chip tone="up" className="hidden sm:inline-flex">Sports</Chip>
+      <Button variant="primary" onClick={onPlay}>Play</Button>
+    </li>
+  );
+}
+
+/** Fantasy League: pick a squad, join a league, climb its leaderboard. */
+function FantasyLeagueRow({ onPlay }: { onPlay: () => void }) {
+  return (
+    <li className="flex items-center gap-3 px-3 py-2.5 transition-colors duration-150 ease-snap hover:bg-white/[0.03] sm:gap-4 sm:px-4">
+      <span className="grid h-9 w-9 shrink-0 place-items-center rounded-btn bg-cash-500">
+        <TrophyGlyph className="h-4 w-4 text-black" />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-[13px] font-semibold text-neutral-100">Fantasy League</div>
+        <div className="truncate text-[11px] text-neutral-500">Build a squad · season leaderboard</div>
+      </div>
+      <Chip tone="accent" className="hidden sm:inline-flex">Fantasy</Chip>
       <Button variant="primary" onClick={onPlay}>Play</Button>
     </li>
   );

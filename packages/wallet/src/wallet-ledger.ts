@@ -101,25 +101,9 @@ export class WalletLedger {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      // Serialise all balance-mutating ops for this player within the txn.
-      // hashtextextended keeps the full uuid space; hashtext is fine here and
-      // matches the requested advisory-lock approach.
-      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [playerId]);
-
-      const bal = await this.balanceOnClient(client, playerId, currency);
-      if (bal < amountMinor) {
-        await client.query('ROLLBACK');
-        throw new InsufficientFundsError(playerId, bal, amountMinor);
-      }
-
-      await client.query(
-        `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
-         VALUES ($1, $2, $3, 'bet', $4)`,
-        [playerId, currency, -amountMinor, ref],
-      );
-
+      const balance = await this.betInTx(client, playerId, amountMinor, ref, currency);
       await client.query('COMMIT');
-      return bal - amountMinor;
+      return balance;
     } catch (err) {
       // Roll back on any error (balance check already rolled back before throwing).
       try {
@@ -131,6 +115,42 @@ export class WalletLedger {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Overdraw-guarded debit inside a transaction the caller owns (BEGIN/COMMIT),
+   * so it commits or rolls back together with the caller's other writes.
+   * Returns the new balance; throws InsufficientFundsError.
+   */
+  async betInTx(client: PoolClient, playerId: string, amountMinor: number, ref: string, currency = 'KES'): Promise<number> {
+    assertPositiveInt(amountMinor, 'amountMinor');
+    // Serialise all balance-mutating ops for this player within the txn.
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [playerId]);
+    const bal = await this.balanceOnClient(client, playerId, currency);
+    if (bal < amountMinor) throw new InsufficientFundsError(playerId, bal, amountMinor);
+    await client.query(
+      `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
+       VALUES ($1, $2, $3, 'bet', $4)`,
+      [playerId, currency, -amountMinor, ref],
+    );
+    return bal - amountMinor;
+  }
+
+  /** Credit inside a transaction the caller owns. */
+  async creditInTx(
+    client: PoolClient,
+    playerId: string,
+    amountMinor: number,
+    kind: 'win' | 'adjust',
+    ref: string,
+    currency = 'KES',
+  ): Promise<void> {
+    assertPositiveInt(amountMinor, 'amountMinor');
+    await client.query(
+      `INSERT INTO wallet_ledger (player_id, currency, amount_minor, kind, ref)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [playerId, currency, amountMinor, kind, ref],
+    );
   }
 
   /** Credit a win. Returns the new balance. */

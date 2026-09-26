@@ -10,7 +10,8 @@
     "./config": "./src/config.ts",
     "./curve": "./src/curve.ts",
     "./football": "./src/football.ts",
-    "./simulate": "./src/simulate.ts"
+    "./simulate": "./src/simulate.ts",
+    "./fantasy": "./src/fantasy.ts"
   },
   "scripts": {
     "build": "tsc",
